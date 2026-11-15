@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+// The Call Gate's questions to the Approvals service: one method per question.
+// There is deliberately no list, show or answer method.
+package tool_approvals.v1;
+
+service ApprovalRequests {
+  rpc Request(Call) returns (RequestReply);
+  rpc Claim(Call) returns (ClaimReply);
+  rpc AddWords(AddWordsRequest) returns (AddWordsReply);
+  // Current state first; ends after a final event (every outcome but `waiting`).
+  rpc AwaitOutcome(TicketRef) returns (stream OutcomeEvent);
+}
+
+// params: agentgateway's raw JSON-RPC `params` bytes, unchanged.
+message Call { string client = 1; string server = 2; bytes params = 3; }
+
+message Refused { optional string comment = 1; }
+message Empty {}
+
+message Rejected {
+  Reason reason = 1;
+  enum Reason { REASON_UNSPECIFIED = 0; MALFORMED = 1; TASK_REQUESTED = 2; TOO_LARGE = 3; }
+}
+
+message RequestReply {
+  oneof result { string ticket = 1; Refused refused = 2; Rejected rejected = 3; Empty queue_full = 4; }
+}
+
+message ClaimReply {
+  oneof result { Empty claimed = 1; Empty not_approved = 2; Refused refused = 3; Rejected rejected = 4; }
+}
+
+message AddWordsRequest {
+  string client = 1;
+  string ticket = 2;
+  optional string reason = 3;
+  optional string work_ref = 4;
+}
+
+message AddWordsReply {
+  oneof result { Empty accepted = 1; TicketError error = 2; Empty words_too_long = 3; }
+}
+
+message TicketRef { string client = 1; string ticket = 2; }
+
+message OutcomeEvent {
+  oneof outcome {
+    Empty waiting = 1;
+    Empty approved = 2;
+    Refused refused = 3;
+    Empty expired = 4;
+    Empty used = 5;
+    TicketError error = 6;
+  }
+}
+
+enum TicketError { TICKET_ERROR_UNSPECIFIED = 0; UNKNOWN_TICKET = 1; NOT_YOUR_TICKET = 2; }

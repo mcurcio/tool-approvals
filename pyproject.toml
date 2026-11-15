@@ -1,0 +1,75 @@
+[project]
+name = "tool-approvals"
+version = "0.0.0"  # set by semantic-release; never hand-edited
+description = "Human approval of MCP tool calls: the Call Gate and the Approvals service"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE", "src/tool_approvals/contract/ext_mcp.LICENSE"]
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "grpcio>=1.85.1,<2",
+    "protobuf>=7.35.1,<8",  # the generated stubs need the protoc major they came from
+    "pydantic>=2.14.3,<3",
+]
+
+[dependency-groups]
+dev = [
+    "grpcio-tools==1.85.1",
+    "hypothesis>=6.170.15",
+    "import-linter>=2.16",
+    "mypy>=2.4.1",
+    "mypy-protobuf==5.1.0",
+    "pytest>=9.2.0",
+    "pytest-asyncio>=1.5.0",
+    "pytest-xdist>=3.8.0",
+    "ruff>=0.17.5",
+    "types-grpcio>=1.85.0.20261028",
+    "types-protobuf>=7.35.1.20260906",
+]
+
+[build-system]
+requires = ["uv_build>=0.8.18,<0.9"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 110
+target-version = "py313"
+extend-exclude = ["src/tool_approvals/contract/*_pb2.py", "src/tool_approvals/contract/*_pb2_grpc.py",
+                  "src/tool_approvals/contract/*_pb2.pyi", "src/tool_approvals/contract/*_pb2_grpc.pyi"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "ASYNC", "PT", "TC", "N"]
+ignore = ["N818"]  # the frozen interface names its exceptions (ApprovalsUnavailable)
+
+[tool.mypy]
+strict = true
+python_version = "3.13"
+files = ["src", "tests", "scripts"]
+exclude = ['_pb2(_grpc)?\.py$']
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["grpc_tools", "grpc_tools.*"]  # grpcio-tools ships no type information
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = ["--strict-markers", "--strict-config"]
+
+[tool.importlinter]
+root_package = "tool_approvals"
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "The Call Gate core and ports do no I/O and know no wire format"
+type = "forbidden"
+source_modules = ["tool_approvals.call_gate.core", "tool_approvals.call_gate.ports"]
+forbidden_modules = ["grpc", "google", "mcp", "sqlalchemy", "psycopg", "tool_approvals.contract"]
+
+[[tool.importlinter.contracts]]
+name = "The contract imports no service"
+type = "forbidden"
+source_modules = ["tool_approvals.contract"]
+forbidden_modules = ["tool_approvals.call_gate"]
