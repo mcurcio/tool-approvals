@@ -69,7 +69,23 @@ source_modules = ["tool_approvals.call_gate.core", "tool_approvals.call_gate.por
 forbidden_modules = ["grpc", "google", "mcp", "sqlalchemy", "psycopg", "tool_approvals.contract"]
 
 [[tool.importlinter.contracts]]
+name = "The Approvals domain and application layer do no I/O and know no wire format"
+type = "forbidden"
+source_modules = ["tool_approvals.approvals.domain", "tool_approvals.approvals.app"]
+forbidden_modules = ["grpc", "google", "mcp", "sqlalchemy", "psycopg", "tool_approvals.contract"]
+
+[[tool.importlinter.contracts]]
+name = "The Approvals application layer sits above its domain"
+type = "layers"
+layers = ["tool_approvals.approvals.app", "tool_approvals.approvals.domain"]
+
+[[tool.importlinter.contracts]]
+name = "The service packages are independent"
+type = "independence"
+modules = ["tool_approvals.call_gate", "tool_approvals.approvals"]
+
+[[tool.importlinter.contracts]]
 name = "The contract imports no service"
 type = "forbidden"
 source_modules = ["tool_approvals.contract"]
-forbidden_modules = ["tool_approvals.call_gate"]
+forbidden_modules = ["tool_approvals.call_gate", "tool_approvals.approvals"]
