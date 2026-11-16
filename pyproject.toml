@@ -7,13 +7,16 @@ license = "MIT"
 license-files = ["LICENSE", "src/tool_approvals/contract/ext_mcp.LICENSE"]
 requires-python = ">=3.13,<3.14"
 dependencies = [
+    "alembic>=1.20.1,<2",
     "grpcio>=1.85.1,<2",
     "grpcio-health-checking>=1.85.1,<2",
     "jsonschema>=4.26,<5",
     "mcp>=2.3.0,<3",
     "protobuf>=7.35.1,<8", # the generated stubs need the protoc major they came from
+    "psycopg[binary]>=3.3.9,<4",  # libpq keepalives for LISTEN (interfaces page §2)
     "pydantic>=2.14.3,<3",
     "pydantic-settings>=2.16.3,<3",
+    "sqlalchemy[asyncio]>=2.1.8,<3",
     "starlette>=1.10.0,<2",
     "uvicorn>=0.54.0,<1",
 ]
@@ -33,6 +36,7 @@ dev = [
     "pytest-asyncio>=1.5.0",
     "pytest-xdist>=3.8.0",
     "ruff>=0.17.5",
+    "testcontainers[postgres]>=4.15.0",
     "types-grpcio>=1.85.0.20261028",
     "types-grpcio-health-checking>=1.85.0.20261029",
     "types-jsonschema>=4.26.0.20261006",
@@ -88,9 +92,20 @@ source_modules = ["tool_approvals.approvals.domain", "tool_approvals.approvals.a
 forbidden_modules = ["grpc", "google", "mcp", "sqlalchemy", "psycopg", "tool_approvals.contract"]
 
 [[tool.importlinter.contracts]]
-name = "The Approvals application layer sits above its domain"
+name = "The Approvals layers: edges over infra over the application over its domain"
 type = "layers"
-layers = ["tool_approvals.approvals.app", "tool_approvals.approvals.domain"]
+layers = [
+    "tool_approvals.approvals.edges",
+    "tool_approvals.approvals.infra",
+    "tool_approvals.approvals.app",
+    "tool_approvals.approvals.domain",
+]
+
+[[tool.importlinter.contracts]]
+name = "The Approvals store knows no wire format"
+type = "forbidden"
+source_modules = ["tool_approvals.approvals.infra"]
+forbidden_modules = ["grpc", "google", "mcp", "tool_approvals.contract"]
 
 [[tool.importlinter.contracts]]
 name = "The service packages are independent"

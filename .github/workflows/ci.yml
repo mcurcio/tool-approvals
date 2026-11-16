@@ -33,6 +33,9 @@ jobs:
         run: uv run lint-imports
       - name: generated contract stubs are current
         run: uv run python scripts/generate_contract.py --check
+      - name: migrations are additive unless marked contract
+        run: uv run python scripts/check_migrations.py
+      # The store tests start Postgres in Docker (testcontainers), one container per worker.
       - name: pytest
         run: uv run pytest -n auto
 
