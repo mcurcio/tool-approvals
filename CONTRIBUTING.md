@@ -16,9 +16,22 @@ Run these before you push; CI runs the same on every pull request and is the ful
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy
-uv run lint-imports     # the layering contracts in pyproject.toml
+uv run lint-imports                               # the layering contracts in pyproject.toml
+uv run python scripts/check_migrations.py         # migrations only expand
+uv run python scripts/generate_contract.py --check  # the wire stubs match proto/ and vendor/
 uv run pytest -n auto
 ```
+
+The store tests start Postgres through Docker (testcontainers). The end-to-end tests run against an image built
+from your tree, with both gateways, and are skipped without one:
+
+```bash
+docker build -t tool-approvals:e2e .
+TOOL_APPROVALS_E2E_IMAGE=tool-approvals:e2e uv run pytest -n auto tests/e2e
+```
+
+A change to behaviour that the [reference pages](docs/reference/configuration.md) describe updates them in the
+same pull request.
 
 The import contracts are part of the design, not style: they keep the three services independent, the shared
 kernel free of I/O, and the code that spends or answers an approval behind one door each

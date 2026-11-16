@@ -3,18 +3,20 @@
 The Python packages, what each may import, what each module promises, and how Approvals uses Postgres. Read the
 [system](system.md) and [service](service.md) designs first.
 
-> **Status:** design. Milestone 0 lays out the package skeleton, enforces the import contracts below and builds
-> `kernel.names` and the call parser in `kernel.calls` (parse and identity); every other module, and the parts of
-> `kernel.calls` marked planned, is filled in from milestone 1 ([roadmap](system.md#delivery-milestones)).
+> **Status:** milestones 0 and 1 are built: every module below not marked planned exists, and the import contracts
+> are enforced in CI ([roadmap](system.md#delivery-milestones)). Modules for later milestones (`gate.policy`'s
+> gateway-context, AuthZEN and OPA adapters; `approvals.edges.answers` and `admin`; `approvals.infra.channels`;
+> `approvals.app.delivery` and `audit`; telemetry) are planned.
 
 ## Summary
 
 1. **Three service packages and a shared kernel.** `gate`, `wait` and `approvals` never import each other. What
    they share is a pure **kernel** (names, the call library, requirements, the ApprovalRequests result types) or
-   a shared package that knows no service (`contract`, `config`, `auth`, `serving`, `requests_client`).
+   a shared package that knows no service (`contract`, `contract_mapping`, `config`, `auth`, `serving`,
+   `requests_client`).
 2. **Ports and adapters in each service, with a composition root on top** (`main`), enforced by import-linter:
    pure cores; driving adapters (`edges`, `mappings`) and driven adapters (`infra`, `policy`) independent of each
-   other.
+   other. A core bounds a wait through the kernel's `Timeouts` port, never `asyncio` itself.
 3. **Every public contract is a protobuf schema**; gRPC by grpcio, HTTP as plain proto3 JSON
    (`POST /v1/<method>`) from the same messages; `buf breaking` against the last release tag.
 4. **Only one module can spend a yes, and only one can make an answer;** import-linter's `protected` contracts
@@ -52,33 +54,36 @@ The Python packages, what each may import, what each module promises, and how Ap
  cli.py ── one subcommand per command (gate, wait, approvals serve|migrate, config check, credentials issue)
  ┌ gate/ ─────────────────┐ ┌ wait/ ───────────────┐ ┌ approvals/ ─────────────────────────────────────────┐
  │ main  (composition)    │ │ main                 │ │ main  (serve, migrate)                              │
- │ mappings/ ext_mcp      │ │ mcp/  approval_wait  │ │ edges/ requests (gRPC)  desk/  answers  admin       │
- │           ext_authz    │ │       tasks extension│ │ infra/ store/ (repositories, UoW, locks, clock,     │
- │           check_api    │ │ core/ wait use case  │ │        migrations)  feed (LISTEN)  channels/        │
- │ policy/ rules_file     │ │   port WaitRequests  │ │ app/   requests waits answers deadlines delivery    │
- │   gateway_context      │ └──────────────────────┘ │        audit  ports                                 │
- │   authzen opa          │                          │ domain/ approval (Approval, Wait)  answer  issuer   │
- │ core/ check use case   │                          └─────────────────────────────────────────────────────┘
- │   ports Policy,        │
- │         GateRequests   │
+ │ mappings/ ext_mcp      │ │ mcp/  server (tool)  │ │ edges/ requests (gRPC)  desk/  answers* admin*      │
+ │           ext_authz    │ │       tasks, calls   │ │ infra/ store/ (repositories, UoW, locks, clock,     │
+ │           check_api    │ │ core/ hold (use case)│ │        migrations)  feed (LISTEN)  sources          │
+ │           errors       │ │   wording            │ │        channels/*                                   │
+ │ policy/ rules_file     │ │   port WaitRequests  │ │ app/   requests waits answers deadlines rules       │
+ │   gateway_context*     │ └──────────────────────┘ │        attempts ports  delivery* audit*             │
+ │   authzen* opa*        │                          │ domain/ approval (Approval, Wait)  answer  issuer   │
+ │ core/ check use case,  │                          └─────────────────────────────────────────────────────┘
+ │   wording, ports       │
+ │   Policy, GateRequests │                                                          * planned
  └────────────────────────┘
  requests_client/ ApprovalRequests over gRPC (satisfies GateRequests and WaitRequests structurally)
- serving/  gRPC options, uvicorn runner, proto3-JSON route, health, telemetry   auth/  registry, one decider
- config/   one YAML file, per-command views, floor and cross-section checks      contract/  generated stubs
- kernel/   names · calls (parse, identity; planned: span reader, shown digest) · requirements · requests
+ contract_mapping/ the one translation between the ApprovalRequests wire and the kernel
+ serving/  gRPC server, uvicorn runner, proto3-JSON route, health, signals, Timeouts   auth/  registry, one decider
+ config/   one YAML file, per-command views, floor and cross-section checks            contract/  generated stubs
+ kernel/   names · calls (parse, identity, JSON-RPC reader, shown digest) · requirements · requests · words
+           · timeouts (the Timeouts port)
 ```
 
 **Import contracts** (import-linter, blocking in CI; `ta.` = `tool_approvals.`; "I/O" = any network, database,
-wire, web, template, validation, YAML or telemetry library, the standard library's network, process and
-database modules included):
+wire, web, template, validation, YAML or telemetry library, the async runtimes `asyncio` and `anyio`, and the
+standard library's network, process and database modules):
 
 | id | Contract | Type |
 |---|---|---|
 | C1 | `ta.kernel` imports nothing else in the package and no I/O library | forbidden |
 | C2 | `ta.gate`, `ta.wait`, `ta.approvals` are independent | independence |
 | C3 | `gate`: `main` > `mappings` \| `policy` > `core`. `wait`: `main` > `mcp` > `core`. `approvals`: `main` > `edges` \| `infra` > `app` > `domain` | layers |
-| C4 | Shared packages: `requests_client` > `serving` \| `auth` > `config` > `contract` \| `kernel`; none imports a service | layers + forbidden |
-| C5 | `gate.core`, `wait.core`, `approvals.domain`, `approvals.app` import no I/O library and no `contract`; `approvals.infra.store` imports no `contract` | forbidden |
+| C4 | Shared packages: `requests_client` > `serving` \| `auth` \| `contract_mapping` > `config` > `contract` \| `kernel`; none imports a service | layers + forbidden |
+| C5 | `gate.core`, `wait.core`, `approvals.domain`, `approvals.app` import no I/O library and no `contract` or `contract_mapping`; `approvals.infra.store` imports neither | forbidden |
 | C6 | `approvals.domain.issuer` (the only holder of the `Answer` constructor key) is importable only by `approvals.app.answers` and `approvals.infra.store` (which rebuilds stored answers through it) | protected |
 | C7 | `approvals.app.answers` is importable only by `edges.desk`, `edges.answers` and `main`; `edges.requests`, `app.requests`, `app.waits` and `infra.channels` import none of `app.answers`, `edges.desk`, `edges.answers`, `domain.issuer` | protected + forbidden |
 | C8 | `requests_client` is importable only by `gate.main` and `wait.main` | protected |
@@ -89,12 +94,12 @@ database modules included):
 
 | Module | Takes | Gives | Never |
 |---|---|---|---|
-| `kernel.calls` | principal, server, params bytes; planned: a JSON-RPC body | `CallIdentity` or `CallRejected`; planned: the params span, the shown digest (computed only here) | Re-encode; accept duplicate or escaped-duplicate keys, trailing data, extra top-level keys, a task request (a `task` member or a Tasks declaration in `_meta`), nesting past 32 levels, a number that overflows a float, an empty name, a NUL or lone surrogate in a name or an argument key or string; planned: a duplicate `method` or `params` |
+| `kernel.calls` | principal, server, params bytes; a JSON-RPC body | `CallIdentity` or `CallRejected`; the params span (`read_rpc_request`); the shown digest (computed only here) | Re-encode; accept duplicate or escaped-duplicate keys, trailing data, extra top-level keys, a task request (a `task` member or a Tasks declaration in `_meta`), nesting past 32 levels, a number that overflows a float, an empty name, a NUL or lone surrogate in a name or an argument key or string; a batch, or a duplicate `method` or `params` |
 | `kernel.requirements` | assurance scale, requirements | `stricter`, `meets_floor`, `qualify` | Read an identity provider or a clock |
 | `gate.core` | a call (principal, server, params, gateway attributes), a deadline | the verdict | Know a wire, a gateway or the wait server |
 | `gate.mappings.*` | one gateway's hook message | a call; the verdict in the gateway's encoding; `ext_mcp` sets the principal header on the wait route | Read caller or server from the body; send the wait route to policy |
 | `gate.policy.*` | principal, server, tool, arguments, gateway attributes | `none` or `require(name)`; anything else refuses | Cache; decide reach |
-| `wait.core`, `wait.mcp` | principal, ticket, words; a wait id | the held outcome; a task only to a client that declared Tasks | Keep wait state; answer `tasks/update`; put wait ids in spans or logs |
+| `wait.core`, `wait.mcp` | principal, ticket, words; a wait id | the held outcome; a task only to a client that declared Tasks | Keep wait state; answer `tasks/update`; put wait ids in spans or logs; import `asyncio` in the core (it waits through the kernel's `Timeouts` port, which `serving.timeouts` implements) |
 | `approvals.app.requests` | a call reference, a requirement name | `request`; `claim`, the only spend | List, show or answer |
 | `approvals.app.waits` | open, await (and later cancel) a wait | wait ids, status streams | Open a wait on another principal's ticket |
 | `approvals.app.answers` | an authenticated surface's answer | an `Answer`, or an answer error | Accept an agents'-side credential |
@@ -138,7 +143,7 @@ interface Approval {                 // aggregate root
   ticket: Ticket;
   call: CallIdentity;                // principal, server, tool, argument bytes
   requirement: RequirementSnapshot;  // copied at request; claim and answer meet the stricter of it and the current one
-  state: State;                      // Waiting → Approved | Refused; Approved → Used | Expired
+  state: State;                      // Waiting → Approved | Refused | Expired; Approved → Used | Expired
   words?: AgentWords;                // first words win
   answer?: Answer;                   // set once
   waits: Wait[];                     // ended in the commit that ends Waiting

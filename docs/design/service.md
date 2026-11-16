@@ -3,7 +3,8 @@
 The three services, what crosses between them, who owns which data, and how each fails. Read the
 [system design](system.md) first; the [module design](module.md) goes one level down.
 
-> **Status:** design. Built in milestones 1-4 ([roadmap](system.md#delivery-milestones)).
+> **Status:** the tracer (milestone 1) is built; the rest arrives in milestones 2-4
+> ([roadmap](system.md#delivery-milestones)). How to run what is built: [operations](../operations.md).
 
 ## Summary
 
@@ -53,7 +54,8 @@ The three services, what crosses between them, who owns which data, and how each
                                                   │                         ▼  (gRPC, client-side round robin)
                                                   │   APPROVALS x N ─────────────────────────► Postgres (direct, LISTEN)
                                                   │    :requests  ◄ gate, wait server   :approvers ◄ browsers (desk)
-                                                  │    :answers   ◄ integrated surfaces :admin     ◄ operators, probes
+                                                  │    :answers   ◄ integrated surfaces :admin     ◄ operators
+                                                  │    :health    ◄ probes (every service has one)
                                                   │    waker, dispatcher ──signed CloudEvents──► channels, audit sinks
 ```
 
@@ -64,9 +66,9 @@ The three services, what crosses between them, who owns which data, and how each
 | **Approvals** | Approval lifecycle, call identity, requirements, answers, deadlines, retention, delivery, audit | N ≥ 2 active-active; clients round-robin over all replicas and servers cap connection age, so new replicas take load and a stopping one sheds it | Run a tool; decide what needs approval |
 
 The desk, Answers API, report and dispatcher stay in Approvals: each needs the Approval aggregate inside its
-commit, and a split would add an internal contract over the same table. Readiness is per function: claim and
-request need Postgres; a lost `LISTEN` only delays waits, so it does not take the requests listener out of
-service.
+commit, and a split would add an internal contract over the same table. Each service serves `/healthz` and
+`/readyz` on its own health listener; Approvals reports ready only while its `LISTEN` change feed is connected
+(waits on a replica without it do not wake until it reconnects). `:answers` and `:admin` arrive in milestone 3.
 
 **The wait route.** The config's `wait_route` names the gateway server that is the wait server and the header that
 carries the attested principal to it. The gate recognises that route (it is passed without policy, and the
@@ -78,8 +80,8 @@ wait route's server name.
 
 | Caller → listener | Credential | Grants |
 |---|---|---|
-| gateway hook → gate (`ext_mcp`, `ext_authz`, Check API) | mTLS, or bearer over TLS | check; trusted for every principal and server it names |
-| gateway → wait server | mTLS or bearer, plus a principal header on `tools/call` written by the gateway's hook, conformance-tested to replace any client copy | `tools/call approval_wait`, `tasks/get` (`tasks/cancel` later); `initialize`, `tools/list`, `ping` open for discovery |
+| gateway hook → gate (`ext_mcp`, `ext_authz`, Check API) | bearer over TLS (mTLS from milestone 2) | check; trusted for every principal and server it names |
+| gateway → wait server | bearer over TLS (mTLS from milestone 2), plus a principal header on `tools/call` written by the gateway's hook, conformance-tested to replace any client copy | `tools/call approval_wait`, `tasks/get` (`tasks/cancel` later); `initialize`, `tools/list`, `ping` open for discovery |
 | gate → policy | mTLS or bearer | the policy service's own (it receives arguments) |
 | gate → `:requests` | the gate's | `Request`, `Claim` |
 | wait server → `:requests` | the wait server's | `OpenWait`, `AwaitOutcome` (`CancelWait` later) |
@@ -117,8 +119,8 @@ type WaitStatus =
   | "waiting" | "approved" | "refused" | "expired"
   | "used"                // the yes was spent before this wait opened
   | "cancelled"
-  | "still_waiting"       // bound reached, shutdown, or replaced by a newer wait: call again
-  | "unknown_wait";
+  | "still-waiting"       // bound reached, shutdown, or replaced by a newer wait: call again
+  | "unknown-wait";
 ```
 
 ## Key flows
@@ -140,7 +142,7 @@ type WaitStatus =
 
 **One wait model.** A held wait and a Task wait are the same domain process, so both are one wait record; a Task
 is only how it is returned. That gives the replacement rule (one live wait per principal and ticket; a new one
-ends the old with `still_waiting`) and the per-principal cap one place in Approvals instead of one replica's
+ends the old with `still-waiting`) and the per-principal cap one place in Approvals instead of one replica's
 memory. A wait ends in the commit that ends its Approval's waiting, and keeps that outcome: a terminal Task never
 changes (E7).
 
@@ -167,8 +169,9 @@ allowance: the **sign-in moment** is the earlier of the identity provider's `aut
 of the token, because an allowance added to the age would let a sign-in older than `maxSignInAge` count.
 
 **Retention:** an ended Approval, with its events, waits and answer, is deleted at its end + `retention`. Startup
-refuses a retention shorter than the delivery give-up horizon, so retention never deletes what a lagging channel
-is still owed. Longer audit lives in the integrator's audit sink.
+refuses a retention shorter than the longest answer deadline, and from milestone 3 also one shorter than the
+delivery give-up horizon, so retention never deletes what a lagging channel is still owed. Longer audit lives in
+the integrator's audit sink.
 
 **Upgrades:** schema, protos, the Check API and event kinds all change expand-then-contract
 ([Parallel Change](https://martinfowler.com/bliki/ParallelChange.html)) across a rolling update: a migration job
@@ -181,12 +184,12 @@ Each is one config value; the defaults are placeholders until measured.
 
 | Budget | Default | When missed |
 |---|---|---|
-| Check (policy + claim + request) | Below the hook's own deadline: the inbound gRPC deadline when one arrives, else the listener's declared hook timeout (agentgateway 10 s, E5) | `unavailable`; the gateway fails closed |
+| Check (policy + claim + request) | `gate.check_budget`, 5 s, which must be below each mapping's declared hook timeout (agentgateway 10 s, E5); from milestone 2 also below an inbound gRPC deadline | `unavailable`; the gateway fails closed |
 | Envoy `ext_authz` timeout | Must be raised above the check budget (E6's 200 ms would refuse every gated call) | — |
-| Wait route at the gateway | agentgateway request timeout ≥ 20 s (E8); Envoy route timeout off and idle timeout above the keep-alive (E6) | The wait is cut; the agent calls again |
+| Wait route at the gateway | agentgateway request timeout ≥ 20 s (E8; it bounds only the time to response headers, and the suite uses 60 s); Envoy route timeout off and idle timeout above the keep-alive (E6, milestone 4) | The wait is cut; the agent calls again |
 | Held wait | 15 min, then `still_waiting` | The agent calls again |
-| Wait Task `ttlMs` / `pollIntervalMs` | answer deadline + use window / 5 s | The task fails after its time to live |
-| Answer deadline, use window | Per requirement | Refused, Expired |
+| Wait Task `ttlMs` / `pollIntervalMs` | answer deadline + use window / 5 s | The client may drop the task after its time to live |
+| Answer deadline, use window | Per requirement | Expired |
 | Webhook | 5 s per attempt; a down receiver pauses its channel with backoff; give up after 24 h | Metric, alert, audited dead letter |
 
 ## Event delivery and audit (milestone 3)
@@ -215,7 +218,8 @@ Each is one config value; the defaults are placeholders until measured.
 | identity provider, desk (client, session and form keys) | approvals | Issuer form; keys present and at least 32 bytes |
 | `assurance`, `floor`, `requirements`, `surfaces` | gate (names only), approvals | Requirement ≥ floor; known surfaces; cap ≥ minimum wherever a surface is allowed |
 | policy | gate | Rules name known requirements; gateway-context policy only with a mapping that supplies gateway attributes |
-| channels (including Web Push keys and allowed push origins), retention, telemetry | approvals | Retention ≥ delivery give-up horizon |
+| retention | approvals | Retention ≥ the longest answer deadline |
+| channels (including Web Push keys and allowed push origins), telemetry (milestone 3) | approvals | Retention ≥ delivery give-up horizon |
 
 Each command resolves only its own secrets, from files or the environment, never inline. No identity-provider
 call and no group check at boot. A gate that cannot boot fails closed for every call through its hook. Changes
@@ -236,7 +240,7 @@ Approvals, channel lag and dead letters. Arguments, words, comments and wait ids
 | One gate or wait replica | Its in-flight checks refused, held waits cut | — | The next call; Wait Tasks unaffected |
 | All gates, or the external policy | Every call through the hook refused | — | The service returns |
 | Approvals or Postgres | Gated calls `unavailable`; ungated calls pass; `tasks/get` errors, the client polls again | Desk unavailable | Streams re-read current state |
-| `LISTEN` lost | Waits delayed until reconnect | — | Reconnect wakes every feed |
+| `LISTEN` lost | Waits delayed until reconnect; that Approvals replica reports not ready | — | Reconnect wakes every feed |
 | Channel receiver | — | No notice; the desk works | The channel resumes from its position |
 | Identity provider | — | Cannot sign in; requests reach their deadline | The provider returns |
 | Missing principal, unknown requirement or verdict kind, unclassifiable request | That call refused | — | Fix the configuration |

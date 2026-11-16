@@ -1,0 +1,284 @@
+# Configuration reference
+
+One YAML file configures every command. Each command reads only the sections it needs and resolves only its
+own secrets, so one file can serve the gate, the wait server and Approvals, or each can get its own copy.
+
+The reference file is [`examples/config.yaml`](../../examples/config.yaml). It holds every section, the test suite
+uses it as its valid baseline, and every YAML block on this page is copied from it unchanged.
+
+```bash
+tool-approvals --config examples/config.yaml config check     # prints "configuration ok", exit 0
+```
+
+`--config` defaults to `$TOOL_APPROVALS_CONFIG`. `config check` reads the file, checks every value and every rule
+between sections, and lists every problem it finds (exit 2). It resolves no secret and opens no file the
+configuration names, so it runs without any command's credentials. A serving command checks the same things,
+then resolves its own secrets and refuses to start (exit 2, every problem listed) if one is unreadable, empty, or
+(for the desk keys) too short.
+
+## Grammar
+
+| Value | Written as |
+|---|---|
+| Duration | A positive whole number and one unit: `90s`, `10m`, `1h`, `90d` |
+| Secret | `{file: PATH}` (the file's contents, one trailing newline dropped) or `{env: NAME}`; never inline |
+| Listener | `{host, port, tls?: {cert, key, client_ca?}}`; with `client_ca`, clients must present a certificate it signed |
+| Pattern | A case-sensitive shell-style pattern (`*`, `?`, `[...]`), matched against the whole value |
+
+Every section refuses keys it does not know, and the YAML loader refuses a key written twice. `version: 1` is the
+only version.
+
+**Which sections each command needs:**
+
+| Command | Sections |
+|---|---|
+| `gate` | `gate`, `wait_route`, `registry`, `requirements` |
+| `wait` | `wait`, `wait_route`, `registry` |
+| `approvals serve` | `approvals`, `assurance`, `floor`, `requirements`, `surfaces`, `registry` |
+| `approvals migrate` | `approvals` (it reads only `approvals.database`) |
+
+## `registry`: who may call whom
+
+```yaml
+# Every service that calls another, by name: the SHA-256 of its bearer (from `tool-approvals credentials issue`)
+# and the methods it may call. No two entries share a bearer.
+registry:
+  - name: gateway-hook # the gateway's guardrail call into the gate
+    kind: caller
+    credential: { bearer_sha256: 1f0b6c6e2a2d4b5f8e9a0c1d2e3f405162738495a6b7c8d9e0f1a2b3c4d5e6f7 }
+    grants: [check]
+  - name: gate # the gate asking Approvals
+    kind: caller
+    credential: { bearer_sha256: 2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f70819 }
+    grants: [requests.request, requests.claim]
+  - name: wait-server # the wait server asking Approvals
+    kind: caller
+    credential: { bearer_sha256: 3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b }
+    grants: [requests.open_wait, requests.await_outcome]
+  - name: gateway-wait-route # the gateway calling the wait tool for an agent
+    kind: caller
+    credential: { bearer_sha256: 4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c }
+    grants: [wait.call]
+```
+
+Every service-to-service call carries `Authorization: Bearer <bearer>`. The callee hashes the bearer and compares
+it with every entry; it never holds a bearer in plain text. `tool-approvals credentials issue` prints a new bearer
+and, on the next line, `sha256:<hex>`: the hex goes in `bearer_sha256`, the bearer goes to the caller only.
+
+| Grant | Allows |
+|---|---|
+| `check` | The gate's Check API (gRPC and JSON) and its `ext_mcp` and `ext_authz` hooks |
+| `requests.request`, `requests.claim` | The gate asking Approvals for a ticket, and spending a yes |
+| `requests.open_wait`, `requests.await_outcome` | The wait server opening and following a wait |
+| `wait.call` | A `tools/call` or `tasks/get` to the wait server (discovery needs no grant) |
+
+`kind: caller` is the only kind. A hook credential is trusted for every principal and server it names, so give
+each gateway its own entry. Refused at load: one bearer hash on two entries; a grant that is not in the table; a
+hash that is not 64 hex digits; any listener that accepts registry bearers without `tls`.
+
+## `assurance`, `floor`, `requirements`, `surfaces`: what an answer must meet
+
+```yaml
+# Assurance levels, weakest first, each with the IdP `acr` values that vouch it.
+assurance:
+  - name: password
+    acr: ["1"]
+  - name: passkey
+    acr: ["2", "urn:example:acr:passkey"]
+
+# The deployment's minimum: no requirement may ask for less.
+floor:
+  min_assurance: passkey
+  max_sign_in_age: 5m
+
+# What an answer must meet, by name. The gate's policy names one per call.
+requirements:
+  reviewed:
+    approver_groups: [{ claim: groups, value: approvers }] # any one qualifies
+    allowed_surfaces: [desk]
+    min_assurance: passkey
+    max_sign_in_age: 3m # the approver signed in at most this long before answering
+    answer_deadline: 2h # from the request to the latest answer
+    use_window: 15m # from the yes to the latest claim
+
+# Where people answer, and the highest level each may vouch. A native surface always binds the digest of what the
+# approver was shown.
+surfaces:
+  - name: desk
+    kind: native
+    cap: passkey
+    binds_digest: true
+```
+
+- **`assurance`** is ordered weakest first. A sign-in's level is the level whose `acr` list holds the identity
+  provider's `acr` claim; an `acr` not listed matches no level, and the sign-in is refused. A level name or an
+  `acr` value may appear only once.
+- **`floor`** is the weakest requirement the deployment accepts: every requirement's `min_assurance` must be at
+  least the floor's and its `max_sign_in_age` at most the floor's, or the file is refused.
+- **`requirements`** are named; the policy names one per gated call. An answer counts only from a member of one of
+  `approver_groups` (`claim` is the token claim, `value` one of its values), through one of `allowed_surfaces`, at
+  `min_assurance` or above, signed in at most `max_sign_in_age` before answering. With no answer by
+  `answer_deadline` the Approval expires; a yes not used within `use_window` expires. The name `none` is reserved.
+- **`surfaces`**: `kind: native` (the built-in desk) is the only kind until integrated surfaces arrive (planned,
+  milestone 3). `cap` is the highest level the surface may vouch; a requirement may not allow a surface whose cap is
+  below the requirement's minimum. A native surface must keep `binds_digest: true` (the default).
+
+An Approval keeps a copy of the requirement it was asked under. An answer, and later the claim that spends a yes,
+must meet the stricter of that copy and the requirement as configured now (groups and surfaces intersected, the
+higher level, the shorter durations), so tightening a requirement applies to Approvals already open; removing it
+makes them unanswerable.
+
+**Keep `claim` equal to `approvals.idp.groups_claim`.** The desk reads groups from that one claim, so a requirement
+naming another claim has no approver the desk can vouch for. `config check` does not catch this.
+
+## `wait_route`: the wait server's route at the gateway
+
+```yaml
+# The gateway's route to the wait server, and the header that carries the attested principal on it.
+wait_route:
+  server: approvals-wait
+  principal_header: x-approvals-principal
+```
+
+`server` is the gateway's name for the wait server's route (agentgateway: the target's `name`). On that route the
+`ext_mcp` hook passes every `tools/call` without asking policy and sets `principal_header` to the principal the
+gateway attested; on every other route it removes that header from a call it passes, so no tool server sees a
+copy a client sent.
+
+**Naming rule:** no real tool server may use the name in `wait_route.server`. A tool server routed under that name
+would have every call passed without policy.
+
+## `gate`
+
+```yaml
+gate:
+  listeners:
+    health: { host: 0.0.0.0, port: 8081 }
+  check_budget: 5s # default; below every hook_timeout
+  approvals:
+    address: dns:///approvals.example.com:9443
+    ca: /etc/tool-approvals/ca.pem # leave out to use the system roots
+    credential: { env: GATE_APPROVALS_BEARER }
+  check_api:
+    grpc: { host: 0.0.0.0, port: 9443, tls: { cert: /etc/tool-approvals/gate.pem, key: /etc/tool-approvals/gate-key.pem } }
+    json: { host: 0.0.0.0, port: 8443, tls: { cert: /etc/tool-approvals/gate.pem, key: /etc/tool-approvals/gate-key.pem } }
+    exposed_wait_tool: approvals-wait_approval_wait # the wait tool's name as agents see it through the gateway
+  ext_mcp:
+    listener: { host: 0.0.0.0, port: 9444, tls: { cert: /etc/tool-approvals/gate.pem, key: /etc/tool-approvals/gate-key.pem } }
+    hook_timeout: 10s # default; the gateway's own timeout on the hook
+    principal_key: principal
+    exposed_wait_tool: approvals-wait_approval_wait
+  ext_authz:
+    listener: { host: 0.0.0.0, port: 9445, tls: { cert: /etc/tool-approvals/gate.pem, key: /etc/tool-approvals/gate-key.pem } }
+    hook_timeout: 70s # no default: raise Envoy's ext_authz timeout to match
+    principal_path: [envoy.filters.http.jwt_authn, payload, sub] # filter name, then keys
+    server_key: server # default; the route's context_extensions key naming its server
+    exposed_wait_tool: approvals-wait_approval_wait
+  policy:
+    kind: rules
+    rules: # first match wins; principal, server and tool are case-sensitive patterns (default "*")
+      - { server: files, tool: "delete_*", require: reviewed }
+      - { principal: "ci-*", server: "*", tool: "*", require: none }
+    default: none
+```
+
+| Key | Meaning |
+|---|---|
+| `listeners.health` | `/healthz` and `/readyz` over plain HTTP ([operations](../operations.md#health-endpoints)) |
+| `check_budget` | The whole check (policy, claim, request) must finish within it, or the call is refused as `unavailable`. Must be below every `hook_timeout`. Default `5s` |
+| `approvals` | Approvals' requests listener as a gRPC target (`dns:///host:port`: every address the name resolves to is used in turn), the CA that signed its certificate (system roots when left out), and the gate's bearer |
+| `check_api` | The [Check API](check-api.md): `grpc`, `json`, or both. `exposed_wait_tool` is named in the refusal's words |
+| `ext_mcp` | The [agentgateway](agentgateway.md) hook. `principal_key`: the key in the processor's `metadata` that carries the principal. `hook_timeout`: the gateway's own timeout on the hook (agentgateway's default is 10 s) |
+| `ext_authz` | The [Envoy](envoy.md) hook. `hook_timeout` has no default: set Envoy's `ext_authz` timeout to it. `principal_path`: the filter's dynamic-metadata namespace, then the keys down to the principal string. `server_key`: the `context_extensions` key naming the route's server |
+| `policy` | `kind: rules` is the built-in policy; AuthZEN and OPA adapters are planned (milestone 5). The first rule whose three patterns all match decides; with none matching, `default` does. `require` names a requirement, or `none` for no approval |
+
+Each mapping listener is optional; a gate serves the ones present. `exposed_wait_tool` is the wait tool's name as
+agents see it through that gateway: with agentgateway's `prefixMode: always` it is `<wait_route.server>_<tool>`.
+The rules-file policy matches principal, server and tool only; policy over gateway attributes is planned
+(milestone 2).
+
+## `wait`
+
+```yaml
+wait:
+  listeners:
+    mcp: { host: 0.0.0.0, port: 8443, tls: { cert: /etc/tool-approvals/wait.pem, key: /etc/tool-approvals/wait-key.pem } }
+    health: { host: 0.0.0.0, port: 8081 }
+  tool: approval_wait # default
+  approvals: # leave out and the wait server answers discovery but refuses every call ("not configured")
+    address: dns:///approvals.example.com:9443
+    ca: /etc/tool-approvals/ca.pem
+    credential: { env: WAIT_APPROVALS_BEARER }
+  max_hold: 15m # default
+  task_poll_interval: 5s # default
+```
+
+| Key | Meaning |
+|---|---|
+| `listeners.mcp` | Streamable HTTP at `/mcp`, stateless: any replica serves any request |
+| `tool` | The wait tool's name on the wait server. Default `approval_wait` |
+| `approvals` | As for the gate, with the wait server's bearer |
+| `max_hold` | A held call returns `still-waiting` after this long; the agent calls again. Default `15m` |
+| `task_poll_interval` | The `pollIntervalMs` a Wait Task suggests. Default `5s` |
+
+The behaviour is in [the wait tool and MCP Tasks](wait.md).
+
+## `approvals`
+
+```yaml
+approvals: # `approvals migrate` reads only approvals.database
+  listeners:
+    requests: { host: 0.0.0.0, port: 9443, tls: { cert: /etc/tool-approvals/approvals.pem, key: /etc/tool-approvals/approvals-key.pem } }
+    approvers: { host: 0.0.0.0, port: 8080 } # the desk, behind a TLS-terminating proxy at public_url
+    health: { host: 0.0.0.0, port: 8081 }
+  database:
+    dsn: { file: /run/secrets/approvals-dsn } # postgresql://approvals@db.example.com/approvals, direct, no pooler
+    lock_timeout: 5s # default
+  retention: 90d # default; at least the longest answer deadline
+  caps:
+    waiting_per_principal: 10 # default
+    live_waits_per_principal: 10 # default
+  idp:
+    issuer: https://id.example.com
+    client_id: approvals-desk
+    client_secret: { file: /run/secrets/idp-client-secret }
+    groups_claim: groups # default
+  desk:
+    surface: desk # a native surface
+    public_url: https://approvals.example.com
+    session_key: { file: /run/secrets/desk-session-key } # at least 32 bytes
+    form_key: { file: /run/secrets/desk-form-key } # at least 32 bytes, separate from the session key
+```
+
+| Key | Meaning |
+|---|---|
+| `listeners.requests` | ApprovalRequests (gRPC), for the gate and the wait server only. Needs `tls` |
+| `listeners.approvers` | The [desk](desk.md), plain HTTP behind a TLS-terminating proxy that serves `public_url` |
+| `database.dsn` | Any libpq connection string, straight to Postgres with no pooler in between: Approvals holds a `LISTEN` connection and takes advisory locks ([operations](../operations.md#postgres)) |
+| `database.lock_timeout` | How long a unit of work waits for any lock (a principal's, a row's, the commit-order lock) before it fails and the request is refused as unavailable. Default `5s` |
+| `retention` | An ended Approval (with its waits, answer and events) is deleted this long after it ended. At least the longest `answer_deadline`. Default `90d` |
+| `caps.waiting_per_principal` | Approvals one principal may have waiting; past it the gate answers `queue_full`. Default `10` |
+| `caps.live_waits_per_principal` | Open waits one principal may hold; past it a wait is refused. Default `10` |
+| `idp` | The OpenID Provider the desk signs approvers in with: discovery at `<issuer>/.well-known/openid-configuration`, a confidential client, the groups claim. See [the desk](desk.md#identity-provider-requirements) |
+| `desk.surface` | The native surface the desk answers as |
+| `desk.public_url` | The desk's external HTTPS address; the sign-in callback is `<public_url>/callback` |
+| `desk.session_key`, `desk.form_key` | Two separate secrets of at least 32 bytes, the same on every replica. The session key signs the sign-in cookie, so whoever holds it can mint a qualifying session: guard it as answer authority |
+
+## Every rule `config check` enforces
+
+Besides each value's grammar and the unknown-key and duplicate-key refusals:
+
+- `assurance`: no level name and no `acr` value twice.
+- `surfaces`: no name twice; each `cap` a known level; a native surface binds the digest. `floor.min_assurance` a
+  known level.
+- `requirements`: not named `none`; `min_assurance` a known level; at or above the floor (level and sign-in age);
+  every allowed surface known, with a cap at least the requirement's minimum.
+- `registry`: no bearer hash on two entries; grants from the grant table.
+- Every listener that accepts registry bearers (`gate.check_api.*`, `gate.ext_mcp.listener`,
+  `gate.ext_authz.listener`, `wait.listeners.mcp`, `approvals.listeners.requests`) has `tls`.
+- `gate.check_budget` below every configured `hook_timeout`; every policy `require` and `default` a known
+  requirement or `none`.
+- `approvals.desk.surface` a known surface; `approvals.retention` at least the longest `answer_deadline`.
+
+When a command starts it also checks that its sections are present and its secrets resolve (and that each desk key
+is at least 32 bytes). A change takes a restart; there is no reload.

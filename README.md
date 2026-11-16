@@ -7,9 +7,10 @@ forwarded, whether the call may run. If your policy says the call needs approval
 ticket, a person reviews the exact call and answers, and the agent repeats the call, which then runs once.
 Policy, approval routing and the surfaces people answer on are yours to choose.
 
-> **Status: pre-release, under construction.** This repository currently holds the package skeleton, CI and the
-> shared call parser. Everything else on this page is the design, built in the milestones listed
-> [below](#roadmap); each section says what is planned. Releases stay on `0.x` until the project is declared
+> **Status: pre-release.** Milestone 1, the tracer, is built: the Check API, the agentgateway and Envoy hooks,
+> the rules-file policy, Approvals on Postgres, the wait tool with MCP Tasks, and a minimal desk with step-up
+> sign-in. What is still planned is marked so on this page and in the [roadmap](#roadmap); the first release meant
+> for deployment is milestone 3. Releases stay on `0.x` until the project is declared
 > stable. The `0.x` line starts from a seed tag, `v0.1.0`, that a maintainer pushes once before the first
 > release; on `0.x` a breaking change raises the minor version, a rule deleted from the release configuration
 > when the project goes 1.0.
@@ -51,13 +52,35 @@ All three ship as one image and one command (`tool-approvals gate | wait | appro
 The design pages explain each piece: [system](docs/design/system.md), [services](docs/design/service.md) and
 [modules](docs/design/module.md).
 
+## Quick start
+
+```bash
+docker build -t tool-approvals .                                   # or use the image CI publishes
+cp examples/config.yaml config.yaml                                # then edit: names, addresses, policy
+docker run --rm tool-approvals credentials issue                   # once per registry entry
+docker run --rm --read-only -v "$PWD/config.yaml:/c.yaml:ro" tool-approvals --config /c.yaml config check
+```
+
+Then, against your Postgres: `approvals migrate`, `approvals serve`, `gate` and `wait` (each with the same file
+and its own secrets), and wire your gateway. [Running tool-approvals](docs/operations.md) walks through it.
+
+| Reference | |
+|---|---|
+| [Configuration](docs/reference/configuration.md) | Every section of the one configuration file |
+| [Wiring agentgateway](docs/reference/agentgateway.md) | The `ext_mcp` guardrail and the wait target |
+| [Wiring Envoy](docs/reference/envoy.md) | `ext_authz` with the request body and `jwt_authn` metadata |
+| [The Check API](docs/reference/check-api.md) | For any other gateway's hook |
+| [The wait tool and MCP Tasks](docs/reference/wait.md) | What the agent calls while a person decides |
+| [The desk and OIDC step-up](docs/reference/desk.md) | Where people answer, and what the identity provider must provide |
+| [Running tool-approvals](docs/operations.md) | Image, commands, Postgres, upgrades, replicas, health, stopping |
+
 ## Gateways
 
 | Gateway | Wiring | Status |
 |---|---|---|
-| [agentgateway](https://agentgateway.dev) | Guardrail processor (`ext_mcp`), last in the chain, fail closed, `tools/call` request phase; the wait server as an MCP target | Planned: milestone 1 (tracer), complete in milestone 2 |
-| Envoy family (Envoy, Envoy Gateway, Istio) | [`ext_authz`](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_authz_filter) gRPC with the request body as raw bytes, last body filter, raised timeout; caller from `jwt_authn` metadata | Planned: minimal in milestone 1, complete in milestone 2, the wait route in milestone 4 |
-| Any other hook | Call the **Check API** (gRPC, or JSON over HTTP) from the gateway's own plugin | Planned: milestone 1 |
+| [agentgateway](https://agentgateway.dev) | Guardrail processor (`ext_mcp`), last in the chain, fail closed, `tools/call` request phase; the wait server as an MCP target ([wiring](docs/reference/agentgateway.md)) | Built; the conformance suite completes in milestone 2 |
+| Envoy family (Envoy, Envoy Gateway, Istio) | [`ext_authz`](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_authz_filter) gRPC with the request body as raw bytes, last body filter, raised timeout; caller from `jwt_authn` metadata ([wiring](docs/reference/envoy.md)) | Built (minimal); complete in milestone 2, the wait route in milestone 4 |
+| Any other hook | Call the **Check API** (gRPC, or JSON over HTTP) from the gateway's own plugin ([reference](docs/reference/check-api.md)) | Built |
 
 ## The Check API
 
@@ -86,11 +109,13 @@ message CheckRequest {
 
 Every response carries `agent_text`, the one wording of what the agent is told (empty only for `pass`). A caller
 must treat a verdict kind it does not know as a refusal, so new kinds can be added without a breaking change.
-The full contract is in [the system design](docs/design/system.md#public-contracts).
+Through agentgateway a refusal reaches the agent as a failed tool result carrying `agent_text`; through Envoy, as a
+JSON-RPC error (`-32001`, or `-32003` for `queue_full` and `unavailable`). The full contract is in
+[the Check API reference](docs/reference/check-api.md).
 
 **What is hashed is what runs.** An approval covers the caller, the server, the tool and the exact argument
-bytes. The gate must be the last processor that can change the call; each gateway mapping ships a conformance
-test that proves the bytes the tool receives are the bytes that were approved.
+bytes. The gate must be the last processor that can change the call; each gateway mapping's conformance suite
+proves the bytes the tool receives are the bytes that were approved (complete in milestone 2).
 
 ## Bring your own policy and routing
 
@@ -100,34 +125,29 @@ test that proves the bytes the tool receives are the bytes that were approved.
   surfaces, a minimum assurance level (from the identity provider's `acr` claim), a maximum sign-in age, an
   answer deadline and a use window.
 - **A floor** sets the weakest requirement a deployment accepts; the services refuse to start below it.
-- **Answer surfaces** are the built-in desk (OIDC sign-in with step-up) or, from milestone 3, any integrated
-  system holding its own credential, whose vouched assurance is capped per surface.
-- **Channels** tell approvers something is waiting (CloudEvents over signed webhooks, Web Push). A notice carries
-  routing data and a link, never the call's arguments or the agent's words.
+- **Answer surfaces** are the built-in desk (OIDC sign-in with step-up, [reference](docs/reference/desk.md)) or,
+  from milestone 3, any integrated system holding its own credential, whose vouched assurance is capped per
+  surface.
+- **Channels** will tell approvers something is waiting (CloudEvents over signed webhooks, Web Push; planned,
+  milestone 3). A notice carries routing data and a link, never the call's arguments or the agent's words. Until
+  then the desk link (`<public_url>/approvals/<ticket>`) reaches approvers some other way.
 
-A sketch of the configuration (the reference file and its full grammar arrive with milestone 1):
+A requirement, as the [reference configuration](examples/config.yaml) writes it
+([every section](docs/reference/configuration.md)):
 
 ```yaml
-version: 1
-assurance:                           # ordered, weakest first; each level is a set of the IdP's acr values
-  - { name: password, acr: ["urn:example:acr:password"] }
-  - { name: mfa,      acr: ["urn:example:acr:mfa"] }
-floor: { min_assurance: mfa, max_sign_in_age: 5m }
-surfaces: [{ name: desk, kind: native, cap: mfa, binds_digest: true }]
+# What an answer must meet, by name. The gate's policy names one per call.
 requirements:
-  production-writes:
-    approver_groups: [{ claim: groups, value: approvers }]
+  reviewed:
+    approver_groups: [{ claim: groups, value: approvers }] # any one qualifies
     allowed_surfaces: [desk]
-    min_assurance: mfa
-    max_sign_in_age: 5m
-    answer_deadline: 30m             # no answer by then: refused
-    use_window: 15m                  # an unused yes expires
-gate:
-  policy:
-    kind: rules
-    rules: [{ principal: "*", server: "deploy", tool: "*", require: production-writes }]
-    default: none
+    min_assurance: passkey
+    max_sign_in_age: 3m # the approver signed in at most this long before answering
+    answer_deadline: 2h # from the request to the latest answer
+    use_window: 15m # from the yes to the latest claim
 ```
+
+With no answer by the answer deadline the approval expires; a yes not spent within the use window expires.
 
 ## Security model
 
@@ -138,21 +158,22 @@ gate:
   assurance and sign-in moment, and is audited.
 - **Fail closed.** The caller and server come only from gateway metadata; a missing caller, an unknown
   requirement, an unknown verdict kind or an unreachable dependency refuses the call.
-- **Authenticated hops.** Every caller is a named entry in one credential registry with its own credential and
-  granted methods; bearer tokens are accepted only over TLS, stored only as hashes, and no two entries may share
-  one.
+- **Authenticated hops.** Every caller is a named entry in one credential registry with its own bearer and
+  granted methods; bearers are accepted only over TLS, stored only as hashes, and no two entries may share one
+  (mTLS as a registry credential is planned, milestone 2).
 - **You own the wiring.** The project provides service-to-service authentication, step-up sign-in and an audit
   trail. Keeping Approvals unreachable from agents and connecting integrated systems securely is the
   deployment's job.
 
-The [system design](docs/design/system.md#design-rules) and the
-[service design](docs/design/service.md#credentials-and-the-internal-contract) give the detail.
+The [system design](docs/design/system.md#design-rules), the
+[service design](docs/design/service.md#credentials-and-the-internal-contract) and the
+[operations checklist](docs/operations.md#security-checklist) give the detail.
 
 ## MCP Tasks
 
 A client that declares the [Tasks extension](https://modelcontextprotocol.io/seps/2663-tasks-extension) gets a
 **Wait Task** from `approval_wait` and polls `tasks/get` until the approval is decided; other clients get a held
-wait. The gated call itself is not turned into a Task: behind a gateway, `tasks/*` follow-ups can skip the
+wait ([the wait tool](docs/reference/wait.md)). The gated call itself is not turned into a Task: behind a gateway, `tasks/*` follow-ups can skip the
 gateway's hook, so a gated call that declares Tasks is refused. A later executor that returns the gated call as a
 Task has a reserved place in the contracts and needs no breaking change.
 
@@ -160,8 +181,8 @@ Task has a reserved place in the contracts and needs no breaking change.
 
 | Milestone | Delivers | Status |
 |---|---|---|
-| 0 | Package skeleton, import contracts, CI, release automation, the shared call parser, these docs | In progress |
-| 1 | Tracer: Check API (gRPC and JSON), `ext_mcp` and minimal `ext_authz` mappings, rules-file policy, config with floor and registry, Approvals on Postgres, held wait and Wait Task create and get, minimal desk with step-up | Planned |
+| 0 | Package skeleton, import contracts, CI, release automation, the shared call parser, these docs | Built |
+| 1 | Tracer: Check API (gRPC and JSON), `ext_mcp` and minimal `ext_authz` mappings, rules-file policy, config with floor and registry, Approvals on Postgres, held wait and Wait Task create and get, minimal desk with step-up | Built |
 | 2 | Gateway breadth: full `ext_authz` classification, gateway-context policy, mTLS, inbound deadlines, complete conformance suites | Planned |
 | 3 | Approvers' side: complete desk, Answers API for integrated surfaces, audit report, event delivery to channels, Web Push, retention, compose file and Helm chart. **The first deployable release** | Planned |
 | 4 | Wait Tasks complete: cancel, replacement, caps, time to live, the Envoy wait route | Planned |
