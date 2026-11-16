@@ -45,6 +45,7 @@ def _view(dsn: str, tmp_path: Path, bearer: str) -> ApprovalsView:
         requests=ListenerView("localhost", free_port(), TlsView(tls.cert, tls.key, None)),
         approvers=ListenerView("localhost", free_port(), TlsView(tls.cert, tls.key, None)),
         health=ListenerView("127.0.0.1", free_port(), None),
+        drain=timedelta(0),
         database=DatabaseView(dsn, timedelta(seconds=5)),
         retention=RULES.retention,
         caps=CapsView(RULES.max_waiting, RULES.max_live_waits),

@@ -22,7 +22,7 @@ from tool_approvals.gate.policy.rules_file import RulesFilePolicy
 from tool_approvals.requests_client.client import RequestsClient
 from tool_approvals.serving.grpc_server import grpc_server, serve_grpc
 from tool_approvals.serving.http import health_app, serve_asgi
-from tool_approvals.serving.signals import stop_on_signals
+from tool_approvals.serving.signals import drain_then_stop, ready_checks, stop_on_signals
 from tool_approvals.serving.timeouts import AsyncioTimeouts
 
 EXIT_OK: Final = 0
@@ -46,15 +46,19 @@ async def run(view: GateView) -> int:
     return await serve(view, stop_on_signals())
 
 
-async def serve(view: GateView, stop: asyncio.Event) -> int:
-    """`run` with the stop event given: every listener serves until `stop` is set. A listener that fails stops
-    the others and the error propagates (exit 1)."""
+async def serve(view: GateView, stopping: asyncio.Event) -> int:
+    """`run` with the stop event given: once `stopping` is set, /readyz answers 503 for `view.drain`, then every
+    listener stops. A listener that fails stops the others and the error propagates (exit 1)."""
+    stop = asyncio.Event()
     registry = Registry(view.registry)
     requests = RequestsClient.connect(view.approvals)
     try:
         policy = RulesFilePolicy(view.policy)
         core = CheckCore(policy, requests, view.requirements, view.check_budget, AsyncioTimeouts())
-        servings: list[Coroutine[Any, Any, None]] = [serve_asgi(health_app({}), view.health, stop)]
+        servings: list[Coroutine[Any, Any, None]] = [
+            drain_then_stop(stopping, view.drain, stop),
+            serve_asgi(health_app(ready_checks(stopping)), view.health, stop),
+        ]
 
         def grpc_listener(listener: ListenerView, methods: Mapping[str, Method]) -> grpc.aio.Server:
             server = grpc_server(listener, [GrpcAuth(registry, methods)])

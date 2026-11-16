@@ -25,7 +25,7 @@ from tool_approvals.contract.requests.v1 import requests_pb2_grpc
 from tool_approvals.contract_mapping.requests import REQUESTS_METHODS
 from tool_approvals.serving.grpc_server import grpc_server, serve_grpc
 from tool_approvals.serving.http import health_app, serve_asgi
-from tool_approvals.serving.signals import STOP_GRACE, stop_on_signals
+from tool_approvals.serving.signals import STOP_GRACE, drain_then_stop, ready_checks, stop_on_signals
 from tool_approvals.serving.timeouts import AsyncioTimeouts
 
 EXIT_OK: Final = 0
@@ -40,10 +40,12 @@ async def serve(view: ApprovalsView) -> int:
     return await serve_until(view, stop_on_signals())
 
 
-async def serve_until(view: ApprovalsView, stop: asyncio.Event) -> int:
-    """`serve` with the stop event given. A listener or the feed that fails stops the rest and the error
+async def serve_until(view: ApprovalsView, stopping: asyncio.Event) -> int:
+    """`serve` with the stop event given: once `stopping` is set, /readyz answers 503 for `view.drain`, then
+    every listener, the feed and the waker stop. A listener or the feed that fails stops the rest and the error
     propagates (exit 1); the deadline waker is restarted when the store fails under it. Ready while the change
-    feed is connected."""
+    feed is connected and the service is not stopping."""
+    stop = asyncio.Event()
     engine = make_engine(view.database.dsn)
     try:
         uow = sql_unit_of_work(engine, view.database.lock_timeout)
@@ -63,13 +65,15 @@ async def serve_until(view: ApprovalsView, stop: asyncio.Event) -> int:
         requests_pb2_grpc.add_ApprovalRequestsServiceServicer_to_server(RequestsServicer(requests, waits), server)
         try:
             async with asyncio.TaskGroup() as group:
+                group.create_task(drain_then_stop(stopping, view.drain, stop))
                 group.create_task(feed.run(stop))
                 group.create_task(_supervise(waker, stop))
                 # In-flight RPCs get STOP_GRACE; a held AwaitOutcome stream is then cut and its caller follows the
                 # wait again on another replica.
                 group.create_task(serve_grpc(server, stop, STOP_GRACE))
                 group.create_task(serve_asgi(desk, view.approvers, stop))
-                group.create_task(serve_asgi(health_app({READY_CHANGE_FEED: feed.connected}), view.health, stop))
+                health = health_app(ready_checks(stopping, {READY_CHANGE_FEED: feed.connected}))
+                group.create_task(serve_asgi(health, view.health, stop))
         except BaseException:
             stop.set()
             raise

@@ -208,8 +208,13 @@ class Policy(Section):
     default: Text  # a requirement's name, or NO_APPROVAL
 
 
+# On a stop signal /readyz answers 503 for this long before the listeners close (load balancers move away first).
+DRAIN: Final = timedelta(seconds=5)
+
+
 class Gate(Section):
     listeners: GateListeners
+    drain: Duration = DRAIN
     check_budget: Duration = timedelta(seconds=5)
     approvals: ApprovalsClient
     check_api: CheckApi | None = None
@@ -225,6 +230,7 @@ class WaitListeners(Section):
 
 class Wait(Section):
     listeners: WaitListeners
+    drain: Duration = DRAIN
     tool: Text = "approval_wait"
     approvals: ApprovalsClient | None = None  # absent: discovery answers, every call is refused
     max_hold: Duration = timedelta(minutes=15)
@@ -263,6 +269,7 @@ class Desk(Section):
 
 class Approvals(Section):
     listeners: ApprovalsListeners
+    drain: Duration = DRAIN
     database: Database
     retention: Duration = timedelta(days=90)
     caps: Caps = Caps()

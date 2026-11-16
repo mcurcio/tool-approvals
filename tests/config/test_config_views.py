@@ -44,6 +44,7 @@ def test_the_gate_view_mirrors_its_sections() -> None:
     view = gate_view(load(EXAMPLE), {"GATE_APPROVALS_BEARER": "gate-bearer"})
     assert view.health == ListenerView("0.0.0.0", 8081, None)  # noqa: S104 - a listen address, not a bind-all bug
     assert view.check_budget == timedelta(seconds=5)
+    assert view.drain == timedelta(seconds=5)
     assert view.approvals.bearer == "gate-bearer"
     assert view.approvals.address == "dns:///approvals.example.com:9443"
     assert view.approvals.ca == Path("/etc/tool-approvals/ca.pem")

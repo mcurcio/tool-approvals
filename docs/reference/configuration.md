@@ -154,6 +154,7 @@ would have every call passed without policy.
 gate:
   listeners:
     health: { host: 0.0.0.0, port: 8081 }
+  drain: 5s # default; on a stop signal, /readyz answers 503 this long before the listeners close
   check_budget: 5s # default; below every hook_timeout
   approvals:
     address: dns:///approvals.example.com:9443
@@ -185,6 +186,7 @@ gate:
 | Key | Meaning |
 |---|---|
 | `listeners.health` | `/healthz` and `/readyz` over plain HTTP ([operations](../operations.md#health-endpoints)) |
+| `drain` | On `SIGTERM` or `SIGINT`, `/readyz` answers 503 for this long while every listener still serves; then the listeners close ([operations](../operations.md#stopping)). The wait server and Approvals have the same key. Default `5s` |
 | `check_budget` | The whole check (policy, claim, request) must finish within it, or the call is refused as `unavailable`. Must be below every `hook_timeout`. What is left of it is sent to Approvals as each call's gRPC deadline, and Approvals commits nothing (no yes is spent) once too little of it is left to answer in time. Default `5s` |
 | `approvals` | Approvals' requests listener as a gRPC target (`dns:///host:port`: every address the name resolves to is used in turn), the CA that signed its certificate (system roots when left out), and the gate's bearer |
 | `check_api` | The [Check API](check-api.md): `grpc`, `json`, or both. `exposed_wait_tool` is named in the refusal's words |
@@ -204,6 +206,7 @@ wait:
   listeners:
     mcp: { host: 0.0.0.0, port: 8443, tls: { cert: /etc/tool-approvals/wait.pem, key: /etc/tool-approvals/wait-key.pem } }
     health: { host: 0.0.0.0, port: 8081 }
+  drain: 5s # default
   tool: approval_wait # default
   approvals: # leave out and the wait server answers discovery but refuses every call ("not configured")
     address: dns:///approvals.example.com:9443
@@ -231,6 +234,7 @@ approvals: # `approvals migrate` reads only approvals.database
     requests: { host: 0.0.0.0, port: 9443, tls: { cert: /etc/tool-approvals/approvals.pem, key: /etc/tool-approvals/approvals-key.pem } }
     approvers: { host: 0.0.0.0, port: 8080 } # the desk, behind a TLS-terminating proxy at public_url
     health: { host: 0.0.0.0, port: 8081 }
+  drain: 5s # default
   database:
     dsn: { file: /run/secrets/approvals-dsn } # postgresql://approvals@db.example.com/approvals, direct, no pooler
     lock_timeout: 1s # default; at most a quarter of gate.check_budget

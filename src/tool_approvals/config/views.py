@@ -108,6 +108,7 @@ class ExtAuthzView:
 @dataclass(frozen=True, slots=True)
 class GateView:
     health: ListenerView
+    drain: timedelta  # from the stop signal to closing the listeners, /readyz answering 503
     check_budget: timedelta
     approvals: RequestsClientView
     check_api: CheckApiView | None
@@ -123,6 +124,7 @@ class GateView:
 class WaitView:
     mcp: ListenerView
     health: ListenerView
+    drain: timedelta
     tool: str  # the wait tool's own name on the wait server
     approvals: RequestsClientView | None  # None: discovery answers, every call is refused ("not configured")
     max_hold: timedelta
@@ -164,6 +166,7 @@ class ApprovalsView:
     requests: ListenerView
     approvers: ListenerView
     health: ListenerView
+    drain: timedelta
     database: DatabaseView
     retention: timedelta
     caps: CapsView
@@ -195,6 +198,7 @@ def gate_view(cfg: ConfigFile, env: Mapping[str, str]) -> GateView:
     check_api = gate.check_api
     return GateView(
         health=_listener(gate.listeners.health),
+        drain=gate.drain,
         check_budget=gate.check_budget,
         approvals=approvals,
         check_api=None
@@ -246,6 +250,7 @@ def wait_view(cfg: ConfigFile, env: Mapping[str, str]) -> WaitView:
     return WaitView(
         mcp=_listener(wait.listeners.mcp),
         health=_listener(wait.listeners.health),
+        drain=wait.drain,
         tool=wait.tool,
         approvals=approvals,
         max_hold=wait.max_hold,
@@ -282,6 +287,7 @@ def approvals_view(cfg: ConfigFile, env: Mapping[str, str]) -> ApprovalsView:
         requests=_listener(approvals.listeners.requests),
         approvers=_listener(approvals.listeners.approvers),
         health=_listener(approvals.listeners.health),
+        drain=approvals.drain,
         database=database,
         retention=approvals.retention,
         caps=CapsView(approvals.caps.waiting_per_principal, approvals.caps.live_waits_per_principal),

@@ -78,6 +78,7 @@ async def _running(approvals: Any, tls: TlsFiles, max_hold: timedelta) -> AsyncI
     view = WaitView(
         mcp=ListenerView("localhost", free_port(), TlsView(tls.cert, tls.key, None)),
         health=ListenerView("localhost", free_port(), None),
+        drain=timedelta(0),
         tool=TOOL,
         approvals=approvals,
         max_hold=max_hold,

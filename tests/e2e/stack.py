@@ -46,6 +46,7 @@ WAIT_SERVER: Final = "approvals-wait"  # wait_route.server
 PRINCIPAL_HEADER: Final = "x-approvals-principal"
 PRINCIPAL_KEY: Final = "principal"  # gate.ext_mcp.principal_key
 SERVER_KEY: Final = "server"  # gate.ext_authz.server_key
+DRAIN: Final = "1s"  # each service's stop drain: no load balancer to move away here, so the shortest there is
 # gate.ext_authz.hook_timeout, and Envoy's raised timeout: agentgateway's own fixed 10 s for its processors, so a
 # gate slower than both hooks needs one delay. Above the gate's check budget (5 s), as `config check` demands.
 EXT_AUTHZ_TIMEOUT: Final = timedelta(seconds=10)
@@ -328,6 +329,7 @@ def _service_config(
         "wait_route": {"server": WAIT_SERVER, "principal_header": PRINCIPAL_HEADER},
         "gate": {
             "listeners": {"health": health},
+            "drain": DRAIN,
             "approvals": {
                 "address": f"dns:///approvals:{APPROVALS_REQUESTS_PORT}",
                 "ca": "/e2e/tls/ca.pem",
@@ -354,6 +356,7 @@ def _service_config(
         },
         "wait": {
             "listeners": {"mcp": listener(WAIT_MCP_PORT), "health": health},
+            "drain": DRAIN,
             "max_hold": f"{int(max_hold.total_seconds())}s",
             "approvals": {
                 "address": f"dns:///approvals:{APPROVALS_REQUESTS_PORT}",
@@ -367,6 +370,7 @@ def _service_config(
                 "approvers": {"host": "0.0.0.0", "port": APPROVALS_DESK_PORT},  # noqa: S104 (inside its container)
                 "health": health,
             },
+            "drain": DRAIN,
             "database": {"dsn": secret("approvals-dsn")},
             "idp": {
                 "issuer": idp_issuer(idp_port),

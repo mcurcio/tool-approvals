@@ -83,6 +83,7 @@ def _listener(tls: TlsFiles) -> ListenerView:
 def gate_view(approvals: Any, tls: TlsFiles, budget: timedelta, entries: Sequence[RegistryEntryView]) -> GateView:
     return GateView(
         health=_listener(tls),
+        drain=timedelta(0),
         check_budget=budget,
         approvals=approvals,
         check_api=CheckApiView(grpc=_listener(tls), json=_listener(tls), exposed_wait_tool=WAIT_TOOL),

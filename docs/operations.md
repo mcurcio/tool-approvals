@@ -97,27 +97,38 @@ Each service serves `GET /healthz` and `GET /readyz` over plain HTTP on its own 
 
 | Service | `/healthz` | `/readyz` |
 |---|---|---|
-| Gate | 200 while the process runs | 200 |
-| Wait server | 200 while the process runs | 200 |
+| Gate | 200 while the process runs | 200 until it is stopping |
+| Wait server | 200 while the process runs | 200 until it is stopping |
 | Approvals | 200 while the process runs | 200 while its change feed (`LISTEN`) is connected, else 503 `not ready: change-feed` |
+
+Every service's `/readyz` also answers 503 `not ready: stopping` from its stop signal on ([stopping](#stopping)).
 
 Keep the health listener off networks agents reach. A gate that is down fails closed: every gated call through its
 hook is refused, and ungated calls too where the gateway sends every `tools/call` to the hook.
 
 ## Stopping
 
-`SIGTERM` or `SIGINT` stops a service cleanly (exit 0):
+`SIGTERM` or `SIGINT` stops a service cleanly (exit 0), in two steps:
 
-| Service | On stop |
+1. **Drain.** `/readyz` answers 503 `not ready: stopping` for the service's `drain` (default 5 s) while every
+   listener still serves, so load balancers and Service endpoints move new work away before anything closes.
+2. **Close.** The listeners stop accepting and work in flight gets its grace:
+
+| Service | On close |
 |---|---|
-| Gate | Stops accepting; checks in flight get up to `gate.check_budget` to finish |
+| Gate | Checks in flight get up to `gate.check_budget` to finish |
 | Wait server | Held calls end at once with `still-waiting`, so the agent waits again (on another replica); Wait Tasks are unaffected; other requests get 5 s |
 | Approvals | Requests in flight get 5 s; held outcome streams are then cut and the wait servers follow them again on another replica |
 
-Every listener's stop is bounded: once its time is up, every connection still open is closed, one that never
-finished its TLS handshake included, so an idle client cannot hold the stop. A service therefore stops within the
-longest of these (5 s, or `gate.check_budget` for the gate if that is longer) plus about a second. Give the
-orchestrator's stop timeout a few seconds more than that.
+Every listener's close is bounded: once its time is up, every connection still open is closed, one that never
+finished its TLS handshake included, so an idle client cannot hold the stop. A service therefore stops within
+`drain` plus the longest grace above (5 s, or `gate.check_budget` for the gate if that is longer) plus about a
+second.
+
+In Kubernetes the drain replaces a `preStop` sleep: leave `preStop` out (or keep it short and lower `drain` by as
+much, since the two add up), and set `terminationGracePeriodSeconds` a few seconds above `drain` plus the longest
+grace (with the defaults, 5 + 5 + 1 s: 15 s is enough for every service). Other orchestrators: give the stop
+timeout the same margin.
 
 ## Security checklist
 

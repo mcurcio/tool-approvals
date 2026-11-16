@@ -66,6 +66,7 @@ wait_route:
 gate:
   listeners:
     health: { host: 0.0.0.0, port: 8081 }
+  drain: 5s # default; on a stop signal, /readyz answers 503 this long before the listeners close
   check_budget: 5s # default; below every hook_timeout
   approvals:
     address: dns:///approvals.example.com:9443
@@ -97,6 +98,7 @@ wait:
   listeners:
     mcp: { host: 0.0.0.0, port: 8443, tls: { cert: /etc/tool-approvals/wait.pem, key: /etc/tool-approvals/wait-key.pem } }
     health: { host: 0.0.0.0, port: 8081 }
+  drain: 5s # default
   tool: approval_wait # default
   approvals: # leave out and the wait server answers discovery but refuses every call ("not configured")
     address: dns:///approvals.example.com:9443
@@ -110,6 +112,7 @@ approvals: # `approvals migrate` reads only approvals.database
     requests: { host: 0.0.0.0, port: 9443, tls: { cert: /etc/tool-approvals/approvals.pem, key: /etc/tool-approvals/approvals-key.pem } }
     approvers: { host: 0.0.0.0, port: 8080 } # the desk, behind a TLS-terminating proxy at public_url
     health: { host: 0.0.0.0, port: 8081 }
+  drain: 5s # default
   database:
     dsn: { file: /run/secrets/approvals-dsn } # postgresql://approvals@db.example.com/approvals, direct, no pooler
     lock_timeout: 1s # default; at most a quarter of gate.check_budget
