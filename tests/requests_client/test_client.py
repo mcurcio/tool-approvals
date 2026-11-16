@@ -228,10 +228,29 @@ class _Unreadable(requests_pb2_grpc.ApprovalRequestsServiceServicer):
         yield requests_pb2.AwaitOutcomeResponse()
 
 
-async def test_a_reply_kind_it_does_not_know_is_unavailable(tls: TlsFiles, bearer: str) -> None:
+class _Unset(requests_pb2_grpc.ApprovalRequestsServiceServicer):
+    """Every reply with its result oneof unset (what a newer server's kind reads as here)."""
+
+    async def Request(self, request: Any, context: grpc.aio.ServicerContext[Any, Any]) -> Any:
+        return requests_pb2.RequestResponse()
+
+    async def Claim(self, request: Any, context: grpc.aio.ServicerContext[Any, Any]) -> Any:
+        return requests_pb2.ClaimResponse()
+
+    async def OpenWait(self, request: Any, context: grpc.aio.ServicerContext[Any, Any]) -> Any:
+        return requests_pb2.OpenWaitResponse()
+
+    async def AwaitOutcome(self, request: Any, context: grpc.aio.ServicerContext[Any, Any]) -> AsyncIterator[Any]:
+        yield requests_pb2.AwaitOutcomeResponse()
+
+
+@pytest.mark.parametrize("servicer", [_Unreadable, _Unset])
+async def test_a_reply_kind_it_does_not_know_is_unavailable(
+    tls: TlsFiles, bearer: str, servicer: type[requests_pb2_grpc.ApprovalRequestsServiceServicer]
+) -> None:
     port = free_port()
     server = grpc_server(ListenerView("localhost", port, TlsView(tls.cert, tls.key, None)), [])
-    requests_pb2_grpc.add_ApprovalRequestsServiceServicer_to_server(_Unreadable(), server)
+    requests_pb2_grpc.add_ApprovalRequestsServiceServicer_to_server(servicer(), server)
     await server.start()
     client = RequestsClient.connect(RequestsClientView(f"dns:///localhost:{port}", tls.ca, bearer))
     try:
