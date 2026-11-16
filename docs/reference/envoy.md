@@ -152,4 +152,6 @@ ticket:
 
 These are the codes agentgateway v1.7.0 uses for its own refusals (through agentgateway itself the gate's refusal
 reaches the agent as a failed tool result instead: [agentgateway](agentgateway.md#what-the-agent-sees)). A pass
-forwards the request unchanged.
+forwards the request with one change: the OK response lists `wait_route.principal_header` (`x-approvals-principal`
+in the example) in `headers_to_remove`, so no tool behind Envoy sees a principal header an agent sent. Envoy
+applies it; nothing in the bootstrap needs to ask for it.

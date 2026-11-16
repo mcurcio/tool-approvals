@@ -46,8 +46,10 @@ def assert_ext_mcp_shows(result: ext_mcp_pb2.McpRequestResult, verdict: CheckVer
 
 
 def assert_allowed(response: Any) -> None:
+    """OK, removing the principal header: no tool sees one a client sent."""
     assert response.status.code == 0
     assert response.WhichOneof("http_response") == "ok_response"
+    assert list(response.ok_response.headers_to_remove) == [ROUTE.principal_header]
 
 
 def assert_denied(response: Any, verdict: CheckVerdict, id_json: bytes) -> dict[str, Any]:

@@ -9,7 +9,7 @@ import grpc
 import grpc.aio
 from envoy.service.auth.v3 import external_auth_pb2, external_auth_pb2_grpc
 
-from tool_approvals.config.views import ExtAuthzView
+from tool_approvals.config.views import ExtAuthzView, WaitRouteView
 from tool_approvals.gate.core.check import Call, CheckCore, CheckVerdict, Pass, Pending, Unavailable
 from tool_approvals.gate.core.wording import agent_text
 from tool_approvals.gate.mappings.errors import Refusal, error_code, verdict_name
@@ -31,15 +31,17 @@ class ExtAuthzServicer(external_auth_pb2_grpc.AuthorizationServicer):  # type: i
     """Behind GrpcAuth. A POST with a complete raw_body only. `kernel.calls.read_rpc_request`: tools/call goes to
     the core on the params span's exact bytes; PASS_METHODS are OK; anything else (GET, DELETE, a batch,
     resources/*, tasks/*, other methods) is denied. The principal at `principal_path` in the dynamic metadata and
-    the server at context_extensions[server_key] must both be non-empty strings, else denied. A denial is HTTP 200
-    application/json {"jsonrpc": "2.0", "id": <id bytes>, "error": {"code", "message": agent_text,
+    the server at context_extensions[server_key] must both be non-empty strings, else denied. An OK removes
+    `route.principal_header` (headers_to_remove), so no tool sees a principal header a client sent. A denial is
+    HTTP 200 application/json {"jsonrpc": "2.0", "id": <id bytes>, "error": {"code", "message": agent_text,
     "data": {"verdict", "ticket"?}}}, code from mappings.errors."""
 
     PASS_METHODS: Final = frozenset({"initialize", "notifications/initialized", "tools/list", "ping"})
 
-    def __init__(self, core: CheckCore, view: ExtAuthzView) -> None:
+    def __init__(self, core: CheckCore, view: ExtAuthzView, route: WaitRouteView) -> None:
         self._core: Final = core
         self._view: Final = view
+        self._route: Final = route
 
     async def Check(
         self,
@@ -49,7 +51,7 @@ class ExtAuthzServicer(external_auth_pb2_grpc.AuthorizationServicer):  # type: i
         subject, id_json = self._read(request.attributes)
         verdict = await self._core.check(subject) if isinstance(subject, Call) else subject
         if isinstance(verdict, Pass):
-            return _allow()
+            return _allow(self._route.principal_header)
         return deny_response(verdict, agent_text(verdict, self._view.exposed_wait_tool), id_json)
 
     def _read(self, attributes: Any) -> tuple[Call | CheckVerdict, bytes]:
@@ -109,10 +111,11 @@ def deny_response(refusal: Refusal, text: str, id_json: bytes) -> Any:
     return response
 
 
-def _allow() -> Any:
+def _allow(principal_header: str) -> Any:
+    """OK, with the principal header removed from the request Envoy forwards."""
     response = external_auth_pb2.CheckResponse()
     response.status.code = _OK
-    response.ok_response.SetInParent()
+    response.ok_response.headers_to_remove.append(principal_header)
     return response
 
 

@@ -94,12 +94,16 @@ async def case_4_the_approvals_server_is_the_routes(st: Stack, gateway: GatewayU
 
 
 async def case_5_principal_header_reaches_no_tool_and_wait_sees_the_attested(
-    st: Stack, gateway: GatewayUnderTest, owned_ticket: str
+    st: Stack, gateway: GatewayUnderTest, owned_ticket: str | None
 ) -> None:
+    """A principal header a client sends reaches no tool, ungated or approved. With `owned_ticket` (a gateway
+    that routes the wait server; Envoy does not yet, milestone 4), the wait server sees the attested principal."""
     principal = f"{gateway.name}-5"
     outcome = await gateway.call(principal, OTHER_SERVER, "echo", b"{}", headers={PRINCIPAL_HEADER: "someone-else"})
     assert outcome.ran, outcome
     assert PRINCIPAL_HEADER not in st.echo.received()[-1].headers
+    if owned_ticket is None:
+        return
     owner = f"{gateway.name}-2"  # case 2's principal, whose approval is used
     wait = ("approval_wait", json.dumps({"ticket": owned_ticket}).encode())
     claimed = await gateway.call(principal, WAIT_SERVER, *wait, headers={PRINCIPAL_HEADER: owner})
@@ -191,5 +195,6 @@ async def test_envoy(tmp_path: Path) -> None:
         await case_2_refused_approved_repeat_runs_once_third_asks_again(st, gateway)
         await case_3_the_tool_receives_the_approved_bytes(st, gateway)
         await case_4_the_approvals_server_is_the_routes(st, gateway)
+        await case_5_principal_header_reaches_no_tool_and_wait_sees_the_attested(st, gateway, None)
         await case_6_a_tasks_declaring_call_is_rejected(st, gateway)
         await case_11_envoy_denies_what_is_not_one_tools_call(st, gateway)

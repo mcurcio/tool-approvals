@@ -122,7 +122,7 @@ async def test_each_mapping_hands_the_core_the_gateway_attributes() -> None:
     mcp = ExtMcpServicer(core, ExtMcpView(_listener(), timedelta(seconds=10), PRINCIPAL_KEY, WAIT_TOOL), ROUTE)
     await mcp.CheckRequest(mcp_request(GATED), None)  # type: ignore[arg-type]
     authz = ExtAuthzServicer(
-        core, ExtAuthzView(_listener(), timedelta(seconds=10), PRINCIPAL_PATH, SERVER_KEY, WAIT_TOOL)
+        core, ExtAuthzView(_listener(), timedelta(seconds=10), PRINCIPAL_PATH, SERVER_KEY, WAIT_TOOL), ROUTE
     )
     await authz.Check(authz_request(tools_call(GATED)), None)  # type: ignore[arg-type]
     assert [(call.principal, call.server, call.params) for call in core.calls] == [(PRINCIPAL, SERVER, GATED)] * 3

@@ -79,7 +79,9 @@ async def serve(view: GateView, stopping: asyncio.Event) -> int:
             ext_mcp_pb2_grpc.add_ExtMcpServicer_to_server(ExtMcpServicer(core, view.ext_mcp, view.wait_route), server)
         if view.ext_authz is not None:
             server = grpc_listener(view.ext_authz.listener, EXT_AUTHZ_METHODS)
-            external_auth_pb2_grpc.add_AuthorizationServicer_to_server(ExtAuthzServicer(core, view.ext_authz), server)
+            external_auth_pb2_grpc.add_AuthorizationServicer_to_server(
+                ExtAuthzServicer(core, view.ext_authz, view.wait_route), server
+            )
         try:
             async with asyncio.TaskGroup() as group:
                 for serving in servings:
