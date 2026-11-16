@@ -26,8 +26,9 @@ class WaitService:
     async def open_wait(
         self, principal: Principal, ticket: Ticket, words: AgentWords | None, via: CallerName
     ) -> OpenWaitResult:
-        """A new wait id on the principal's own ticket (keeping its words if first); past the live-wait cap
-        TooManyWaits."""
+        """A new wait id on the principal's own ticket (keeping its words if first and the Approval is still
+        Waiting); past the live-wait cap TooManyWaits. On an answered or ended Approval the wait still opens and
+        reports the outcome at once, and the words are not kept."""
         by = Actor(ActorKind.PRINCIPAL, principal, via)
         wait_id = self._wait_ids()
 

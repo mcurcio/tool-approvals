@@ -351,3 +351,13 @@ def test_a_request_is_blocked_while_live_and_by_a_standing_no() -> None:
     expired = opened()
     expired.pass_deadlines(expired.answer_deadline, RETENTION, DEADLINE_ACTOR)
     assert not expired.blocks_request(expired.answer_deadline)
+
+
+@pytest.mark.parametrize("verdict", [Verdict.APPROVE, Verdict.REFUSE])
+def test_words_after_the_answer_are_refused(verdict: Verdict) -> None:
+    approval = opened()
+    assert isinstance(answer(approval, verdict), Answer)
+    approval.events.clear()
+    version, digest = approval.version, approval.digest
+    approval.add_words(WORDS, BY_AGENT, NOW)
+    assert (approval.words, approval.version, approval.digest, kinds(approval)) == (None, version, digest, [])

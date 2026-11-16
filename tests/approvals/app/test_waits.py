@@ -147,3 +147,16 @@ async def test_an_open_wait_racing_an_answer_reruns_and_ends_with_the_outcome() 
     stored = world.store.stored(T1)
     assert stored is not None
     assert [w.outcome for w in stored.waits] == [WaitState.APPROVED]
+
+
+async def test_a_wait_on_an_answered_approval_keeps_no_words() -> None:
+    world = World()
+    await requested(world)
+    await answer(world, Verdict.APPROVE)
+    wait = await world.waits.open_wait(AGENT, T1, WORDS, WAITER)
+    assert isinstance(wait, str)
+    stored = world.store.stored(T1)
+    assert stored is not None
+    assert stored.words is None
+    assert EventKind.WORDED not in [event.kind for event in world.store.events]
+    assert [report.state async for report in world.waits.await_outcome(wait)] == [WaitState.APPROVED]

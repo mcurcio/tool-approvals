@@ -155,8 +155,9 @@ class Approval:
             self._end(State.EXPIRED, by, now, retention)
 
     def add_words(self, words: AgentWords, by: Actor, now: datetime) -> None:
-        """Keep the agent's words if none are kept yet (event WORDED); later words are ignored."""
-        if self.words is None:
+        """Keep the agent's words while Waiting if none are kept yet (event WORDED). Later words, and any words once
+        the Approval is answered or ended, are refused: what an approver was shown never changes after the answer."""
+        if self.state is State.WAITING and self.words is None:
             self.words = words
             self._changed(by, EventKind.WORDED)
 
