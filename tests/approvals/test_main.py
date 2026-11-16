@@ -52,7 +52,7 @@ def _view(dsn: str, tmp_path: Path, bearer: str) -> ApprovalsView:
         approvers=ListenerView("localhost", free_port(), TlsView(tls.cert, tls.key, None)),
         health=ListenerView("127.0.0.1", free_port(), None),
         drain=timedelta(0),
-        database=DatabaseView(dsn, timedelta(seconds=5)),
+        database=DatabaseView(dsn, timedelta(seconds=5), 5, 10, timedelta(seconds=1)),
         retention=RULES.retention,
         caps=CapsView(RULES.max_waiting, RULES.max_live_waits),
         idp=IdpView("https://idp.invalid", "client", "secret", "groups"),
@@ -100,7 +100,8 @@ async def test_serve_answers_requests_and_stops_cleanly(tmp_path: Path) -> None:
 
 
 async def test_migrate_exits_0_at_the_latest_revision() -> None:
-    assert await migrate(MigrateView(DatabaseView(empty_database(), timedelta(seconds=5)))) == EXIT_OK
+    view = MigrateView(DatabaseView(empty_database(), timedelta(seconds=5), 5, 10, timedelta(seconds=1)))
+    assert await migrate(view) == EXIT_OK
 
 
 class _ScriptedWaker(DeadlineWaker):

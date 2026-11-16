@@ -23,7 +23,7 @@ REQUIREMENT = '{"v": 1}'
 
 
 def test_the_migrations_create_exactly_the_mapped_schema(dsn: str) -> None:
-    engine = create_engine("postgresql+psycopg://", creator=lambda: psycopg.connect(dsn, **connect_kwargs()))
+    engine = create_engine("postgresql+psycopg://", creator=lambda: psycopg.connect(dsn, **connect_kwargs(dsn)))
     try:
         with engine.connect() as connection:
             assert compare_metadata(MigrationContext.configure(connection), metadata) == []

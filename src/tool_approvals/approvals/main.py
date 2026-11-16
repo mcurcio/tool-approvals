@@ -16,7 +16,7 @@ from tool_approvals.approvals.edges.requests import RequestsServicer
 from tool_approvals.approvals.infra.feed import RECONNECT_CAP, RECONNECT_FIRST, PgChangeFeed
 from tool_approvals.approvals.infra.sources import new_ticket, new_wait_id
 from tool_approvals.approvals.infra.store import migrate as store_migrate
-from tool_approvals.approvals.infra.store.engine import make_engine
+from tool_approvals.approvals.infra.store.engine import Pool, make_engine
 from tool_approvals.approvals.infra.store.uow import TRANSIENT_FAILURES, sql_unit_of_work
 from tool_approvals.auth.grpc_auth import GrpcAuth
 from tool_approvals.auth.registry import Registry
@@ -46,7 +46,8 @@ async def serve_until(view: ApprovalsView, stopping: asyncio.Event) -> int:
     propagates (exit 1); the deadline waker is restarted when the store fails under it. Ready while the change
     feed is connected and the service is not stopping."""
     stop = asyncio.Event()
-    engine = make_engine(view.database.dsn)
+    database = view.database
+    engine = make_engine(database.dsn, Pool(database.pool_size, database.max_overflow, database.pool_timeout))
     try:
         uow = sql_unit_of_work(engine, view.database.lock_timeout)
         rules = Rules(

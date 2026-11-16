@@ -238,6 +238,9 @@ approvals: # `approvals migrate` reads only approvals.database
   database:
     dsn: { file: /run/secrets/approvals-dsn } # postgresql://approvals@db.example.com/approvals, direct, no pooler
     lock_timeout: 1s # default; at most a quarter of gate.check_budget
+    pool_size: 5 # default; connections kept open per replica
+    max_overflow: 10 # default; more under load
+    pool_timeout: 1s # default; how long a request waits for a connection
   retention: 90d # default; at least the longest answer deadline
   caps:
     waiting_per_principal: 10 # default
@@ -260,6 +263,7 @@ approvals: # `approvals migrate` reads only approvals.database
 | `listeners.approvers` | The [desk](desk.md), plain HTTP behind a TLS-terminating proxy that serves `public_url` |
 | `database.dsn` | Any libpq connection string, straight to Postgres with no pooler in between: Approvals holds a `LISTEN` connection and takes advisory locks ([operations](../operations.md#postgres)) |
 | `database.lock_timeout` | How long a unit of work waits for any lock (a principal's, a row's, the commit-order lock) before it fails and the request is refused as unavailable; never longer than what is left of the caller's deadline. At most a quarter of `gate.check_budget` when the file has both: one check can meet four lock waits in a row (claim's row and commit-order locks, then request's principal and commit-order locks). Default `1s` |
+| `database.pool_size`, `database.max_overflow`, `database.pool_timeout` | Each replica's connection pool: connections kept open (default `5`), more opened under load (default `10`), and how long a request waits for one before it is refused as unavailable (default `1s`, on the scale of a lock wait and well inside `gate.check_budget`). The change feed holds one more connection of its own |
 | `retention` | An ended Approval (with its waits, answer and events) is deleted this long after it ended. At least the longest `answer_deadline`. Default `90d` |
 | `caps.waiting_per_principal` | Approvals one principal may have waiting; past it the gate answers `queue_full`. Default `10` |
 | `caps.live_waits_per_principal` | Open waits one principal may hold; past it a wait is refused. Default `10` |

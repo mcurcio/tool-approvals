@@ -108,7 +108,7 @@ class PgChangeFeed:
         while True:
             try:
                 async with await psycopg.AsyncConnection.connect(
-                    self._dsn, autocommit=True, **connect_kwargs()
+                    self._dsn, autocommit=True, **connect_kwargs(self._dsn)
                 ) as connection:
                     await connection.execute(sql.SQL("LISTEN {}").format(sql.Identifier(NOTIFY_CHANNEL)))
                     self._up()

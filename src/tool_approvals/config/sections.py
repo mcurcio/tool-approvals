@@ -59,6 +59,7 @@ FilePath = Annotated[Path, BeforeValidator(_path)]
 Text = Annotated[str, StringConstraints(min_length=1)]
 Port = Annotated[StrictInt, Field(ge=0, le=65535)]
 Count = Annotated[StrictInt, Field(ge=1)]
+Extra = Annotated[StrictInt, Field(ge=0)]
 
 
 class Section(BaseModel):
@@ -246,6 +247,10 @@ class ApprovalsListeners(Section):
 class Database(Section):
     dsn: Secret
     lock_timeout: Duration = timedelta(seconds=1)  # at most a quarter of gate.check_budget (config.checks)
+    pool_size: Count = 5
+    max_overflow: Extra = 10
+    # No connection within this: refused as unavailable. On the scale of a lock wait, well inside a check.
+    pool_timeout: Duration = timedelta(seconds=1)
 
 
 class Caps(Section):

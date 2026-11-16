@@ -33,7 +33,7 @@ from tool_approvals.approvals.domain.answer import Verdict
 from tool_approvals.approvals.domain.approval import Actor
 from tool_approvals.approvals.infra.feed import PgChangeFeed
 from tool_approvals.approvals.infra.sources import new_ticket, new_wait_id
-from tool_approvals.approvals.infra.store.engine import make_engine
+from tool_approvals.approvals.infra.store.engine import Pool, make_engine
 from tool_approvals.approvals.infra.store.uow import sql_unit_of_work
 from tool_approvals.kernel.names import ApproverId, AssuranceName, Principal, SurfaceName, Ticket, WaitId
 from tool_approvals.kernel.requests import CallRef, OpenWaitResult, Ticketed, TicketError, TooManyWaits
@@ -42,6 +42,7 @@ from tool_approvals.kernel.words import WordsError
 from tool_approvals.serving.timeouts import AsyncioTimeouts
 
 LOCK_TIMEOUT: Final = timedelta(seconds=5)
+POOL: Final = Pool(size=5, max_overflow=10, timeout=timedelta(seconds=5))
 
 
 def facts(
@@ -192,7 +193,7 @@ class StoreWorld:
 
 @asynccontextmanager
 async def store_world(dsn: str) -> AsyncIterator[StoreWorld]:
-    engine = make_engine(dsn)
+    engine = make_engine(dsn, POOL)
     try:
         yield StoreWorld(dsn, engine)
     finally:

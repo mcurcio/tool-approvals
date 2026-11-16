@@ -137,6 +137,9 @@ class WaitView:
 class DatabaseView:
     dsn: str  # resolved from its secret
     lock_timeout: timedelta
+    pool_size: int  # connections kept open
+    max_overflow: int  # more under load
+    pool_timeout: timedelta  # a unit of work waits this long for a connection, then is refused
 
 
 @dataclass(frozen=True, slots=True)
@@ -381,7 +384,13 @@ def _client(client: ApprovalsClient, where: str, secrets: _Secrets) -> RequestsC
 
 
 def _database(database: Database, secrets: _Secrets) -> DatabaseView:
-    return DatabaseView(secrets.text(database.dsn, "approvals.database.dsn"), database.lock_timeout)
+    return DatabaseView(
+        secrets.text(database.dsn, "approvals.database.dsn"),
+        database.lock_timeout,
+        database.pool_size,
+        database.max_overflow,
+        database.pool_timeout,
+    )
 
 
 def _listener(listener: Listener) -> ListenerView:
