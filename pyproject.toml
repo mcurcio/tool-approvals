@@ -31,6 +31,8 @@ required-version = ">=0.13.5"
 [tool.ruff]
 line-length = 120
 target-version = "py313"
+# A byte-identical copy of the publishing step's scanner (tests/test_denylist_copy.py): its style is set there.
+extend-exclude = ["scripts/denylist.py"]
 
 [tool.ruff.lint]
 select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "S", "PT", "PL", "C4", "PIE", "RET", "TID", "TC"]
@@ -39,8 +41,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101", "S603", "S607"]
-"scripts/**" = ["S603", "S607"]
+"tests/**" = ["S101"]
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "all"

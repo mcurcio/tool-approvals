@@ -1,7 +1,7 @@
 # Deny-list check for text written on the repository outside commits: issues, comments, reviews, and later
 # edits of a pull request's title or body. Only text by an owner, member or collaborator is scanned; anyone
 # else's text would turn the check into an oracle for the list. The text reaches the scanner only through
-# `env:`, and the scanner runs quietly: the job result is the only output.
+# `env:` (the word list through stdin), and the scanner's output is discarded: the job result is the only output.
 name: Deny-list text
 
 on:
@@ -52,7 +52,8 @@ jobs:
             || (github.event_name == 'pull_request' && github.event.pull_request.body) || '' }}
         run: |
           if [ -z "$DENYLIST" ]; then exit 2; fi
-          umask 077
-          printf '%s\n' "$DENYLIST" > "$RUNNER_TEMP/denylist-words"
-          unset DENYLIST
-          uv run --no-project scripts/denylist.py --quiet --words "$RUNNER_TEMP/denylist-words" text TEXT_TITLE TEXT_BODY
+          text="$RUNNER_TEMP/denylist-text"
+          mkdir -m 700 "$text"
+          printf '%s' "$TEXT_TITLE" > "$text/title"
+          printf '%s' "$TEXT_BODY" > "$text/body"
+          printf '%s\n' "$DENYLIST" | uv run --no-project scripts/denylist.py tree "$text" > /dev/null 2>&1
