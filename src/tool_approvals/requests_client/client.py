@@ -33,6 +33,7 @@ from tool_approvals.kernel.requests import (
 )
 from tool_approvals.kernel.words import AgentWords
 from tool_approvals.serving.deadlines import remaining
+from tool_approvals.serving.grpc_server import KEEPALIVE, Keepalive
 
 # Every resolved address gets a subchannel and calls rotate over them; with the server's maximum connection age
 # the client re-resolves, so replicas added later take load.
@@ -51,14 +52,17 @@ class RequestsClient:
         self._stub: Final = requests_pb2_grpc.ApprovalRequestsServiceStub(channel)
 
     @classmethod
-    def connect(cls, view: RequestsClientView) -> Self:
+    def connect(cls, view: RequestsClientView, keepalive: Keepalive = KEEPALIVE) -> Self:
+        """A channel to `view.address`, pinging an idle connection with `keepalive` (the policy Approvals' server
+        accepts), so a vanished Approvals ends a held stream with UNAVAILABLE."""
         # The bearer is call credentials: gRPC attaches it to every call and refuses to send it on a channel
         # without TLS, so a plaintext channel cannot carry it by mistake.
         credentials = grpc.composite_channel_credentials(
             grpc.ssl_channel_credentials(root_certificates=None if view.ca is None else view.ca.read_bytes()),
             grpc.access_token_call_credentials(view.bearer),
         )
-        options = (("grpc.service_config", _SERVICE_CONFIG),)  # no retry policy: a call is never sent twice
+        # No retry policy: a call is never sent twice.
+        options = (("grpc.service_config", _SERVICE_CONFIG), *keepalive.client_options())
         return cls(grpc.aio.secure_channel(view.address, credentials, options=options))
 
     async def close(self) -> None:

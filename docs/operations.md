@@ -89,7 +89,9 @@ changes ride in a later release, after nothing older serves. The Check API and A
 The gate and the wait server reach Approvals at `approvals.address`, a gRPC `dns:///host:port` target. They use
 every address the name resolves to in turn, and Approvals ends each connection after 5 minutes so clients
 re-resolve: point the name at all replicas (in Kubernetes, a headless Service), not one virtual IP. A held wait
-whose stream drops is followed again on another replica without the agent noticing.
+whose stream drops is followed again on another replica without the agent noticing. The clients ping an idle
+connection every 30 s (giving up after 10 s without an answer) and every gRPC server accepts those pings, so a
+replica that vanished without closing its connections (a lost node, a black-holed route) ends the calls on it.
 
 ## Health endpoints
 
