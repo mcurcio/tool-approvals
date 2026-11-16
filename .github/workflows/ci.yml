@@ -1,5 +1,6 @@
 # Checks on every pull request and every push to main. On a push to main that passes them, the release job runs
-# semantic-release (.releaserc.json): Conventional Commit types decide the version, the tag holds it.
+# semantic-release (.releaserc.json): Conventional Commit types decide the version, the tag holds it, and nothing is
+# committed back (the release notes go on the GitHub Release).
 name: CI
 
 on:
@@ -191,7 +192,8 @@ jobs:
         run: npx --no-install semantic-release
 
   # The multi-arch image, pushed after the release job on every push to main: tagged `main` and `sha-<short sha>`,
-  # and on a release also `<version>` and `latest`, with build provenance attached.
+  # and on a release also `<version>` and `latest`, with build provenance attached. It is built from the exact
+  # commit the release tagged (the pushed commit itself: the release commits nothing), checked out by the tag.
   image:
     name: Image
     needs: [release]
@@ -203,7 +205,17 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ needs.release.outputs.tag || github.sha }}
           persist-credentials: false
+      - name: The checkout is the commit this run tested
+        env:
+          TESTED: ${{ github.sha }}
+        run: |
+          built=$(git rev-parse HEAD)
+          if [ "$built" != "$TESTED" ]; then
+            echo "::error::The release tag points at $built, not at the tested commit $TESTED"
+            exit 1
+          fi
       - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0

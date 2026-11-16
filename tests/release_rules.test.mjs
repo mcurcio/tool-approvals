@@ -26,6 +26,17 @@ const cases = [
   ["docs: explain the gate", null],
 ];
 
+// The version lives only in the tag: nothing is committed back to the branch (no CHANGELOG commit), and the release
+// notes are published on the GitHub Release.
+test("a release commits nothing and publishes its notes on the GitHub Release", () => {
+  const names = config.plugins.map((plugin) => (Array.isArray(plugin) ? plugin[0] : plugin));
+  for (const committing of ["@semantic-release/git", "@semantic-release/changelog"]) {
+    assert.ok(!names.includes(committing), `${committing} would commit to the branch`);
+  }
+  assert.ok(names.includes("@semantic-release/release-notes-generator"));
+  assert.ok(names.includes("@semantic-release/github"));
+});
+
 for (const [message, expected] of cases) {
   test(`${JSON.stringify(message.split("\n")[0])} releases ${expected ?? "nothing"}`, async () => {
     const release = await analyzeCommits(analyzerConfig, {
