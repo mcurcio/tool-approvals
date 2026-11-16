@@ -6,11 +6,13 @@ import logging
 from datetime import timedelta
 from typing import Final
 
+from tool_approvals.approvals.app.answers import AnswerService
 from tool_approvals.approvals.app.deadlines import DeadlineWaker
 from tool_approvals.approvals.app.ports import StoreUnavailable
 from tool_approvals.approvals.app.requests import RequestService
 from tool_approvals.approvals.app.rules import Rules
 from tool_approvals.approvals.app.waits import WaitService
+from tool_approvals.approvals.edges.desk.app import desk_app
 from tool_approvals.approvals.edges.requests import RequestsServicer
 from tool_approvals.approvals.infra.feed import RECONNECT_CAP, RECONNECT_FIRST, PgChangeFeed
 from tool_approvals.approvals.infra.sources import new_ticket, new_wait_id
@@ -37,8 +39,8 @@ _log: Final = logging.getLogger(__name__)
 
 
 async def serve(view: ApprovalsView) -> int:
-    """Serve ApprovalRequests (`:requests`) and health, run the change feed and the deadline waker, until a stop
-    signal. Exit 0 on a clean stop. (The desk on `:approvers` is wired by its own slice.)"""
+    """Serve ApprovalRequests (`:requests`), the desk (`:approvers`) and health, run the change feed and the
+    deadline waker, until a stop signal. Exit 0 on a clean stop."""
     return await serve_until(view, stop_on_signals())
 
 
@@ -60,6 +62,7 @@ async def serve_until(view: ApprovalsView, stop: asyncio.Event) -> int:
         requests = RequestService(uow, new_ticket, rules)
         waits = WaitService(uow, new_wait_id, feed, rules)
         waker = DeadlineWaker(uow, feed, rules, AsyncioTimeouts())
+        desk = desk_app(AnswerService(uow, rules, view.desk.surface), view.desk, view.idp, view.scale)
         server = grpc_server(view.requests, [GrpcAuth(Registry(view.registry), REQUESTS_METHODS)])
         requests_pb2_grpc.add_ApprovalRequestsServiceServicer_to_server(RequestsServicer(requests, waits), server)
         try:
@@ -67,6 +70,7 @@ async def serve_until(view: ApprovalsView, stop: asyncio.Event) -> int:
                 group.create_task(feed.run(stop))
                 group.create_task(_supervise(waker, stop))
                 group.create_task(serve_grpc(server, stop, STOP_GRACE))
+                group.create_task(serve_asgi(desk, view.approvers, stop))
                 group.create_task(serve_asgi(health_app({READY_CHANGE_FEED: feed.connected}), view.health, stop))
         except BaseException:
             stop.set()

@@ -22,6 +22,7 @@ from typing import Final, Literal, Protocol
 import httpx
 import psycopg
 
+from tests.approvals.desk.driver import DeskPerson
 from tests.conformance.gateways import GatewayUnderTest
 from tests.e2e import agentgateway, envoy
 from tests.e2e.agents import AUDIENCE, ISSUER, AgentKeys
@@ -30,6 +31,7 @@ from tests.e2e.relay import SlowRelay
 from tests.e2e.wiring import AgentJwt, Hook, WaitTarget
 from tests.fixtures.certs import tls_files
 from tests.fixtures.echo_tool import EchoTool
+from tests.fixtures.oidc_provider import ScriptedIdp, SignInScript
 from tests.fixtures.ports import free_port
 from tool_approvals.auth.registry import issue_bearer
 from tool_approvals.config.methods import Method
@@ -47,6 +49,7 @@ GATED_TOOL: Final = "delete_file"  # on `files`, the one call the policy sends f
 DESK_SURFACE: Final = "desk"
 IDP_CLIENT_ID: Final = "approvals-desk"
 APPROVER_GROUP: Final = "approvers"
+APPROVER: Final = "approver-1"  # the IdP subject the desk driver signs in as
 # The container side of every port the compose file names.
 GATE_CHECK_JSON_PORT: Final = 8443
 GATE_EXT_MCP_PORT: Final = 9444
@@ -66,7 +69,8 @@ class DeskDriver(Protocol):
         self, ticket: str, verdict: Literal["approve", "refuse"], *, acr: str, comment: str | None = None
     ) -> int:
         """Sign in through the scripted IdP vouching `acr`, open the review and post the answer; the POST's HTTP
-        status (or the status that stopped the flow)."""
+        status (303 when the answer is recorded), or the status that stopped the flow (403 for a sign-in that falls
+        short of the requirement even when asked for it)."""
         ...
 
 
@@ -155,6 +159,8 @@ class Rendered:
     check_api_bearer: str
     postgres_password: str
     desk_port: int  # where the desk is published on the host (its public URL)
+    idp_port: int  # where the scripted IdP must listen on the host (the issuer names it)
+    idp_client_secret: str
 
 
 def render(
@@ -193,19 +199,21 @@ def render(
         )
     postgres_password = secrets.token_urlsafe(24)
     desk_port = free_port()
+    idp_port = idp_port or free_port()
+    idp_client_secret = secrets.token_urlsafe(24)
     secret_values = {
         "postgres-password": postgres_password,
         "approvals-dsn": f"postgresql://approvals:{postgres_password}@postgres:{POSTGRES_PORT}/approvals",
         "gate-approvals-bearer": bearers["gate"],
         "wait-approvals-bearer": bearers["wait-server"],
-        "idp-client-secret": secrets.token_urlsafe(24),
+        "idp-client-secret": idp_client_secret,
         "desk-session-key": secrets.token_urlsafe(32),
         "desk-form-key": secrets.token_urlsafe(32),
     }
     for name, value in secret_values.items():
         (secret_dir / name).write_text(value)
 
-    service_config = _service_config(registry, idp_port or free_port(), desk_port)
+    service_config = _service_config(registry, idp_port, desk_port)
     (mounted / "config.yaml").write_text(json.dumps(service_config, indent=2))
     agents_jwt = AgentJwt(issuer=ISSUER, audience=AUDIENCE, jwks_file="/e2e/jwks.json")
     ca = "/e2e/tls/ca.pem"
@@ -244,6 +252,8 @@ def render(
         check_api_bearer=bearers["check-client"],
         postgres_password=postgres_password,
         desk_port=desk_port,
+        idp_port=idp_port,
+        idp_client_secret=idp_client_secret,
     )
 
 
@@ -318,18 +328,28 @@ def _service_config(registry: Sequence[Mapping[str, object]], idp_port: int, des
             },
             "database": {"dsn": secret("approvals-dsn")},
             "idp": {
-                "issuer": f"http://host.docker.internal:{idp_port}",
+                "issuer": idp_issuer(idp_port),
                 "client_id": IDP_CLIENT_ID,
                 "client_secret": secret("idp-client-secret"),
             },
             "desk": {
                 "surface": DESK_SURFACE,
-                "public_url": f"http://127.0.0.1:{desk_port}",
+                "public_url": desk_url(desk_port),
                 "session_key": secret("desk-session-key"),
                 "form_key": secret("desk-form-key"),
             },
         },
     }
+
+
+def idp_issuer(idp_port: int) -> str:
+    """The scripted IdP as the Approvals container reaches it (it runs on the host)."""
+    return f"http://host.docker.internal:{idp_port}"
+
+
+def desk_url(desk_port: int) -> str:
+    """The desk's public URL: where a browser on the host reaches it."""
+    return f"http://127.0.0.1:{desk_port}"
 
 
 def image() -> str:
@@ -430,13 +450,19 @@ class _GateControl:
             relay.slow(delay)
 
 
-class _DeskAwaitingIdp:
+class _Desk:
+    """The desk driver: a person on the host signing in through the scripted IdP as an approver."""
+
+    def __init__(self, idp: ScriptedIdp, url: str) -> None:
+        self._idp = idp
+        self._url = url
+
     async def answer(
         self, ticket: str, verdict: Literal["approve", "refuse"], *, acr: str, comment: str | None = None
     ) -> int:
-        raise NotImplementedError(
-            "the desk driver signs in through S1.6's scripted IdP (tests/fixtures/oidc_provider.py)"
-        )
+        sign_in = SignInScript(sub=APPROVER, groups=(APPROVER_GROUP,), acr=acr)
+        async with httpx.AsyncClient(timeout=10.0) as http:
+            return await DeskPerson(http, self._idp, self._url).answer(ticket, verdict, sign_in, comment=comment)
 
 
 def _published_gate(published: Mapping[int, int], container_port: int) -> Callable[[], tuple[str, int]]:
@@ -455,10 +481,17 @@ async def _stack(tmp: Path) -> AsyncIterator[Stack]:
         ext_authz=("host.docker.internal", relay_ports[GATE_EXT_AUTHZ_PORT]),
     )
     echo = EchoTool(rendered.records)
+    idp = ScriptedIdp(
+        idp_issuer(rendered.idp_port),
+        IDP_CLIENT_ID,
+        rendered.idp_client_secret,
+        f"{desk_url(rendered.desk_port)}/callback",
+    )
     for port, relay in relays.items():
         await relay.start(relay_ports[port])
     try:
-        async with project(rendered) as compose:
+        # Every interface: the Approvals container reaches the host through the bridge's gateway address.
+        async with idp.serving("0.0.0.0", rendered.idp_port), project(rendered) as compose:  # noqa: S104
             await compose.up("postgres", "migrate", "approvals", "gate", "wait", "echo")
             control = _GateControl(compose, list(relays.values()), published)
             await control.refresh()
@@ -468,7 +501,7 @@ async def _stack(tmp: Path) -> AsyncIterator[Stack]:
                 check_api_url=f"https://127.0.0.1:{await compose.port('gate', GATE_CHECK_JSON_PORT)}/v1/check",
                 check_api_bearer=rendered.check_api_bearer,
                 echo=echo,
-                desk=_DeskAwaitingIdp(),
+                desk=_Desk(idp, desk_url(rendered.desk_port)),
                 store=_PostgresStore(await compose.port("postgres", POSTGRES_PORT), rendered.postgres_password),
                 gate=control,
             )
