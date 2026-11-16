@@ -64,6 +64,12 @@ def test_the_packaged_migrations_pass() -> None:
         'op.execute("CREATE UNIQUE INDEX x ON approvals (principal)")',
         "op.execute(\"ALTER TYPE approval_state RENAME VALUE 'used' TO 'spent'\")",
         "op.execute(\"ALTER TYPE approval_state ADD VALUE 'held'; ALTER TABLE approvals DROP COLUMN reason\")",
+        # A stored enum's new value fails the old code's reads: a contract change.
+        "op.execute(\"ALTER TYPE event_kind ADD VALUE 'reminded'\")",
+        "op.execute(\"ALTER TYPE event_kind ADD VALUE IF NOT EXISTS 'reminded' AFTER 'worded'\")",
+        'op.create_foreign_key("waits_by_principal", "waits", "principals", ["principal"], ["name"])',
+        'op.create_foreign_key("w", source_table="waits", referent_table="p", local_cols=["a"], remote_cols=["b"])',
+        'op.alter_column("approvals", "version", server_default=None)',
     ],
 )
 def test_an_expand_migration_may_not_break_the_running_code(tmp_path: Path, upgrade: str) -> None:
@@ -82,8 +88,7 @@ def test_an_expand_migration_may_not_break_the_running_code(tmp_path: Path, upgr
         'op.execute("CREATE INDEX x ON approvals (state)")',
         'op.add_column("approvals", sa.Column("note", sa.Text, nullable=False, server_default="x"))',
         'op.alter_column("approvals", "reason", nullable=True)',
-        "op.execute(\"ALTER TYPE event_kind ADD VALUE 'reminded'\")",
-        "op.execute(\"ALTER TYPE event_kind ADD VALUE IF NOT EXISTS 'reminded' AFTER 'worded'\")",
+        'op.alter_column("approvals", "reason", server_default="")',
     ],
 )
 def test_an_expand_migration_may_add(tmp_path: Path, upgrade: str) -> None:

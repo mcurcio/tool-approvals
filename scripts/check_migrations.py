@@ -6,13 +6,16 @@ with. Every migration declares ``phase: Final = "expand"`` or ``"contract"``; in
 
 - every drop (``op.drop_*``) and every rename (``op.rename_table``, ``op.alter_column(new_column_name=...)``);
 - every type change (``op.alter_column(type_=...)``) and every ``op.alter_column(nullable=False)``;
+- a dropped default (``op.alter_column(server_default=None)``): the old code's inserts may rely on it;
 - ``op.add_column`` of a ``nullable=False`` column without a ``server_default`` (the old code's inserts fail);
-- a new CHECK or UNIQUE rule (``op.create_check_constraint``, ``op.create_unique_constraint``,
-  ``op.create_index(unique=True)``), which the old code's writes may break;
-- raw SQL that drops, renames, changes a type, sets NOT NULL or adds a CHECK or UNIQUE rule.
+- a new CHECK, UNIQUE or FOREIGN KEY rule (``op.create_check_constraint``, ``op.create_unique_constraint``,
+  ``op.create_index(unique=True)``, ``op.create_foreign_key``), which the old code's writes may break;
+- raw SQL that drops, renames, changes a type, sets NOT NULL or adds a CHECK or UNIQUE rule, and every
+  ``ALTER TYPE``, ``ADD VALUE`` included.
 
-``ALTER TYPE ... ADD VALUE`` (a new member of a stored enum, such as a new event kind) only adds, and is allowed;
-every other ``ALTER TYPE`` is refused.
+A new member of a stored enum (``ALTER TYPE ... ADD VALUE``) is a contract change: the old code loads every row it
+reads into its own enum and fails on a value it does not know (there is no safe "unknown" state or outcome to read
+it as), so the value is added only once every running release can read it, and written only after that.
 
 ``downgrade()`` is not checked. CI runs it:
 
@@ -35,7 +38,6 @@ _RAW_SQL: Final = re.compile(
     r"\bDROP\b|\bRENAME\b|\bALTER\b[\s\S]*\b(TYPE|SET\s+NOT\s+NULL)\b|\bCHECK\b|\bUNIQUE\b",
     re.IGNORECASE,
 )
-_ADD_ENUM_VALUE: Final = re.compile(r"\s*ALTER\s+TYPE\s+\S+\s+ADD\s+VALUE\b", re.IGNORECASE)
 # Where each op names its table: (position, keyword).
 _TABLE_ARG: Final = {
     "add_column": (0, "table_name"),
@@ -44,6 +46,7 @@ _TABLE_ARG: Final = {
     "create_check_constraint": (1, "table_name"),
     "create_unique_constraint": (1, "table_name"),
     "create_index": (1, "table_name"),
+    "create_foreign_key": (1, "source_table"),
 }
 
 
@@ -106,22 +109,25 @@ def _refusals(call: ast.Call) -> Iterator[str]:
             yield "op.alter_column(nullable=False)"
         if _keyword(call, "new_column_name") is not None:
             yield "op.alter_column(new_column_name=...)"
+        default = _keyword(call, "server_default")
+        if isinstance(default, ast.Constant) and default.value is None:
+            yield "op.alter_column(server_default=None)"
     if name == "add_column" and any(
         _required_without_default(a) for a in [*call.args, *(k.value for k in call.keywords)]
     ):
         yield "op.add_column(a nullable=False column without a server_default)"
-    if name in {"create_check_constraint", "create_unique_constraint"}:
+    if name in {"create_check_constraint", "create_unique_constraint", "create_foreign_key"}:
         yield f"op.{name}"
     if name == "create_index" and _constant(_keyword(call, "unique")) is True:
         yield "op.create_index(unique=True)"
     if name == "execute" and any(_refused_sql(s) for arg in call.args for s in _strings(arg)):
-        yield "op.execute(DROP, RENAME, ALTER ... TYPE or SET NOT NULL, CHECK or UNIQUE)"
+        yield "op.execute(DROP, RENAME, ALTER ... TYPE (ADD VALUE included) or SET NOT NULL, CHECK or UNIQUE)"
 
 
 def _refused_sql(text: str) -> bool:
     """Whether a raw SQL text holds a statement an expand migration may not run."""
     statements = (statement for statement in text.split(";") if statement.strip())
-    return any(not _ADD_ENUM_VALUE.match(statement) and _RAW_SQL.search(statement) for statement in statements)
+    return any(_RAW_SQL.search(statement) for statement in statements)
 
 
 def _created_tables(upgrade: ast.FunctionDef) -> set[object]:
