@@ -1,0 +1,11 @@
+# The project's protobuf module: lint and breaking-change rules. vendor/ (agentgateway's ext_mcp.proto, kept
+# byte-identical to its release) sits outside the module, so neither rule judges a schema this project does not own.
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+breaking:
+  use:
+    - FILE

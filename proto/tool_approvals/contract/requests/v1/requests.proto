@@ -1,0 +1,125 @@
+// ApprovalRequests: internal, between the gate, the wait server and Approvals. No list, review or answer method.
+syntax = "proto3";
+
+package tool_approvals.contract.requests.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+import "tool_approvals/contract/calls/v1/calls.proto";
+
+service ApprovalRequestsService {
+  rpc Request(RequestRequest) returns (RequestResponse);
+  // The only spend of a yes.
+  rpc Claim(ClaimRequest) returns (ClaimResponse);
+  rpc OpenWait(OpenWaitRequest) returns (OpenWaitResponse);
+  // The current status first; the stream ends after a terminal one.
+  rpc AwaitOutcome(AwaitOutcomeRequest) returns (stream AwaitOutcomeResponse);
+}
+
+message CallRef {
+  string principal = 1;
+  string server = 2;
+  bytes params = 3;
+}
+
+message RequestRequest {
+  CallRef call = 1;
+  string requirement = 2;
+}
+
+message ClaimRequest {
+  CallRef call = 1;
+  string requirement = 2;
+}
+
+message RequestResponse {
+  oneof result {
+    string ticket = 1;
+    tool_approvals.contract.calls.v1.Refused refused = 2;
+    tool_approvals.contract.calls.v1.Rejected rejected = 3;
+    QueueFull queue_full = 4;
+    UnknownRequirement unknown_requirement = 5;
+  }
+}
+
+message ClaimResponse {
+  oneof result {
+    Claimed claimed = 1;
+    NotApproved not_approved = 2;
+    tool_approvals.contract.calls.v1.Refused refused = 3;
+    tool_approvals.contract.calls.v1.Rejected rejected = 4;
+    UnknownRequirement unknown_requirement = 5;
+  }
+}
+
+message OpenWaitRequest {
+  string principal = 1;
+  string ticket = 2;
+  optional string reason = 3;
+  optional string work_ref = 4;
+}
+
+message OpenWaitResponse {
+  oneof result {
+    string wait_id = 1;
+    TicketError ticket_error = 2;
+    WordsError words_error = 3;
+    TooManyWaits too_many_waits = 4;
+  }
+}
+
+message AwaitOutcomeRequest {
+  string wait_id = 1;
+}
+
+message AwaitOutcomeResponse {
+  oneof status {
+    Waiting waiting = 1;
+    Approved approved = 2;
+    tool_approvals.contract.calls.v1.Refused refused = 3;
+    Expired expired = 4;
+    Used used = 5;
+    Cancelled cancelled = 6;
+    StillWaiting still_waiting = 7;
+    UnknownWait unknown_wait = 8;
+  }
+  google.protobuf.Timestamp opened_at = 9;
+  google.protobuf.Timestamp updated_at = 10;
+  google.protobuf.Duration ttl = 11;
+}
+
+message QueueFull {}
+
+message UnknownRequirement {}
+
+message Claimed {}
+
+message NotApproved {}
+
+message TooManyWaits {}
+
+message Waiting {}
+
+message Approved {}
+
+message Expired {}
+
+message Used {}
+
+message Cancelled {}
+
+message StillWaiting {}
+
+message UnknownWait {}
+
+enum TicketError {
+  TICKET_ERROR_UNSPECIFIED = 0;
+  TICKET_ERROR_UNKNOWN_TICKET = 1;
+  TICKET_ERROR_NOT_YOUR_TICKET = 2;
+}
+
+enum WordsError {
+  WORDS_ERROR_UNSPECIFIED = 0;
+  WORDS_ERROR_TOO_LONG = 1;
+  WORDS_ERROR_MALFORMED = 2;
+}

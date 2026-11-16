@@ -19,7 +19,8 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Final
 
-from tool_approvals.kernel.names import Fingerprint, Principal, ServerName, ToolName
+from tool_approvals.kernel.names import Digest, Fingerprint, Principal, RequirementName, ServerName, ToolName
+from tool_approvals.kernel.words import AgentWords
 
 MAX_PARAMS_BYTES: Final = 16_384
 ALLOWED_PARAMS_KEYS: Final = frozenset({"name", "arguments", "_meta"})
@@ -70,6 +71,23 @@ class CallIdentity:
 class ParsedCall:
     identity: CallIdentity
     arguments: Mapping[str, object]  # the parsed `arguments` object, read-only; empty when absent
+
+
+@dataclass(frozen=True, slots=True)
+class Span:
+    """The exact byte range [start, end) of one JSON value inside a larger body."""
+
+    start: int
+    end: int
+
+
+@dataclass(frozen=True, slots=True)
+class RpcRequest:
+    """One JSON-RPC request object, read without re-encoding."""
+
+    method: str
+    id_json: bytes  # the exact bytes of `id` (a string or a number); b"" for a notification
+    params: Span | None  # where `params` sits in the body; None when absent
 
 
 class _Malformed(ValueError):
@@ -238,3 +256,26 @@ def parse_call(principal: Principal, server: ServerName, params: bytes) -> Parse
     except ValueError:  # JSONDecodeError, UnicodeError and _Malformed are ValueErrors
         return CallRejected(RejectReason.MALFORMED)
     return ParsedCall(CallIdentity(principal, server, tool, arguments_json), MappingProxyType(arguments))
+
+
+def read_rpc_request(body: bytes) -> RpcRequest | CallRejected:
+    """The one JSON-RPC request object in `body`, or CallRejected(MALFORMED).
+
+    Refuses a batch (an array), duplicate or escaped-duplicate keys at any depth, a duplicate `method` or `params`,
+    extra top-level keys and trailing data. The span lets a mapping hand `parse_call` the exact
+    params bytes the gateway forwards; the params themselves are judged there, not here.
+    """
+    raise NotImplementedError
+
+
+def declares_tasks(meta: object) -> bool:
+    """Whether a request's `_meta` declares the MCP Tasks extension: the one reader of that declaration, used by
+    `parse_call` (to refuse a task) and by the wait server (to offer one). S1.1 makes `_declares_tasks` this."""
+    raise NotImplementedError
+
+
+def shown_digest(identity: CallIdentity, words: AgentWords | None, requirement: RequirementName) -> Digest:
+    """SHA-256 of what an approver is shown: the identity's four fields, the words (a presence byte, then each
+    optional field as a presence byte and its length-prefixed UTF-8) and the requirement name, every field as an
+    8-byte big-endian length and its bytes. The one home of the digest an answer binds to."""
+    raise NotImplementedError

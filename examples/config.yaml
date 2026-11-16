@@ -1,0 +1,3 @@
+# The reference configuration: every section, as the configuration reference quotes it. A stub until the kernel
+# and config slice writes it in full; `tool-approvals config check` passes it from then on.
+version: 1

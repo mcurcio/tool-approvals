@@ -17,11 +17,13 @@ env:
 
 jobs:
   check:
-    name: Lint, types, import contracts, tests
+    name: Lint, types, import contracts, contract, tests
     runs-on: ubuntu-latest
     steps:
+      # Full history and tags: buf breaking compares against the latest release tag.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
@@ -31,13 +33,33 @@ jobs:
       - run: uv run --locked ruff format --check .
       - run: uv run --locked mypy
       - run: uv run --locked lint-imports
+      # The committed wire stubs match proto/ and vendor/ under the locked grpcio-tools and mypy-protobuf.
+      - run: uv run --locked python scripts/generate_contract.py --check
       - run: uv run --locked pytest -n auto
-      # The release rules (.releaserc.json) through the pinned commit-analyzer: what each title type releases.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
       - run: npm ci --ignore-scripts --no-audit --no-fund
+      # The release rules (.releaserc.json) through the pinned commit-analyzer: what each title type releases.
       - run: node --test tests/release_rules.test.mjs
+      # The protobuf module (buf.yaml): lint STANDARD, canonical format, and no breaking change since the last release.
+      - run: npx --no-install buf lint
+      - run: npx --no-install buf format --diff --exit-code
+      - name: buf breaking against the latest release tag
+        run: |
+          tags=$(git tag --list 'v*' --sort=-v:refname)
+          if [ -z "$tags" ]; then
+            echo "No v* tag yet: nothing released to break."
+            exit 0
+          fi
+          latest=$(printf '%s\n' "$tags" | head -n 1)
+          # A release made before the protobuf module existed has no contract to break.
+          if ! git cat-file -e "$latest:buf.yaml" 2>/dev/null; then
+            git rev-parse --verify --quiet "$latest^{commit}" > /dev/null
+            echo "$latest has no buf.yaml: nothing released to break."
+            exit 0
+          fi
+          npx --no-install buf breaking --against ".git#tag=$latest"
 
   # Refuses a listed word in the commits, the tree, the branch name, or the pull request's title and body.
   # The scanner is scripts/denylist.py, vendored unchanged from the maintainers' copy (tests/test_denylist_copy.py
