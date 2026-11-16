@@ -26,7 +26,7 @@ x-ready: &ready
 
 services:
   postgres:
-    image: postgres:18.7-alpine
+    image: postgres:18.7-alpine@sha256:b6972e1115a4ff8eba5d7f7d19184926d1e16d7d1136ae1e1a7ebf286da0f015
     environment:
       POSTGRES_USER: approvals
       POSTGRES_DB: approvals
@@ -82,7 +82,7 @@ services:
       retries: 60
 
   agentgateway:
-    image: ghcr.io/agentgateway/agentgateway:v1.7.0
+    image: ghcr.io/agentgateway/agentgateway:v1.7.0@sha256:60216aafb03d37f94e952ff3d51d2f630a65b10ecaebdc0a864882f92610c45b
     command: [-f, /e2e/agentgateway.yaml]
     read_only: true
     volumes:
@@ -94,7 +94,7 @@ services:
       echo: { condition: service_healthy }
 
   envoy:
-    image: envoyproxy/envoy:v1.40.2
+    image: envoyproxy/envoy:v1.40.2@sha256:8de97e654644827d62afdbf7e1d3dc9fee01a8690d410dd1c63a30dc6b6cecbb
     command: [-c, /e2e/envoy.json]
     volumes:
       - ${E2E_DIR:?}/mounted:/e2e:ro

@@ -15,7 +15,9 @@ from typing import Final
 from tests.e2e.wiring import AgentJwt, Hook
 from tool_approvals.kernel.calls import MAX_PARAMS_BYTES
 
-IMAGE: Final = "envoyproxy/envoy:v1.40.2"
+IMAGE: Final = (  # pinned by digest, as compose.yaml runs it
+    "envoyproxy/envoy:v1.40.2@sha256:8de97e654644827d62afdbf7e1d3dc9fee01a8690d410dd1c63a30dc6b6cecbb"
+)
 PORT: Final = 10000
 ADMIN_PORT: Final = 9901
 READINESS_PATH: Final = "/ready"

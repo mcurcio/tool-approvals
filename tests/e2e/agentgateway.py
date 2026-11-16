@@ -17,7 +17,9 @@ from typing import Final
 
 from tests.e2e.wiring import AgentJwt, Hook, WaitTarget
 
-IMAGE: Final = "ghcr.io/agentgateway/agentgateway:v1.7.0"
+IMAGE: Final = (  # pinned by digest, as compose.yaml runs it
+    "ghcr.io/agentgateway/agentgateway:v1.7.0@sha256:60216aafb03d37f94e952ff3d51d2f630a65b10ecaebdc0a864882f92610c45b"
+)
 PORT: Final = 3000
 READINESS_PORT: Final = 15021
 READINESS_PATH: Final = "/healthz/ready"
