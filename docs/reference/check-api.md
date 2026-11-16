@@ -96,6 +96,11 @@ gate spends the yes (`pass`) and the call runs once. A call that differs by one 
 approval. While an Approval for a call is waiting, asking again returns the same ticket; after a no, asking again
 is refused until the answer deadline; after the Approval expires or its yes is spent, asking again opens a new one.
 
+**Known limit: what the approval does not cover.** `_meta` and the HTTP request's headers are not part of what a
+person approves, and the approved call runs with whatever `_meta` and headers the repeat carries. A tool server
+that changes what it does on `_meta` content or on a header (beyond the gateway's own authentication) acts on
+something nobody approved; keep such inputs out of tools behind a requirement, or have your gateway fix them.
+
 The gate rejects, before any Approval exists:
 
 | Reason | When |

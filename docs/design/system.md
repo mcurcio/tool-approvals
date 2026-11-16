@@ -87,9 +87,9 @@ answer counts.
 
 - **Call identity** is computed over the exact parameter bytes the gateway forwards: principal, server, tool,
   argument bytes. `_meta` is not part of it.
-- **Approval lifecycle:** Waiting → Approved or Refused; no answer by the deadline is Expired; Approved → Used (the
-  yes was spent) or Expired (not used within the use window). A no stands until the answer deadline: the same
-  call is refused until then, and asks afresh after.
+- **Approval lifecycle:** Waiting → Approved or Refused; no answer by the deadline is Expired (never Refused: only
+  a person refuses); Approved → Used (the yes was spent) or Expired (not used within the use window). A no stands
+  until the answer deadline: the same call is refused until then, and asks afresh after.
 - **One yes per exact call.** A yes is spent once; the next identical call needs a new Approval.
 - **No withdrawal.** An answer is final.
 - **Agent words** (a reason and a work reference) are quoted to the approver, never interpreted.

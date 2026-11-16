@@ -82,7 +82,7 @@ standard library's network, process and database modules):
 | C1 | `ta.kernel` imports nothing else in the package and no I/O library | forbidden |
 | C2 | `ta.gate`, `ta.wait`, `ta.approvals` are independent | independence |
 | C3 | `gate`: `main` > `mappings` \| `policy` > `core`. `wait`: `main` > `mcp` > `core`. `approvals`: `main` > `edges` \| `infra` > `app` > `domain` | layers |
-| C4 | Shared packages: `requests_client` > `serving` \| `auth` \| `contract_mapping` > `config` > `contract` \| `kernel`; none imports a service | layers + forbidden |
+| C4 | Shared packages: `requests_client` > `serving` \| `auth` > `config` \| `contract_mapping` > `contract` \| `kernel`; none imports a service. `contract_mapping` reads no configuration: the grant each method path needs is each service's `main`'s table, over the kernel's `Method` vocabulary | layers + forbidden |
 | C5 | `gate.core`, `wait.core`, `approvals.domain`, `approvals.app` import no I/O library and no `contract` or `contract_mapping`; `approvals.infra.store` imports neither | forbidden |
 | C6 | `approvals.domain.issuer` (the only holder of the `Answer` constructor key) is importable only by `approvals.app.answers` and `approvals.infra.store` (which rebuilds stored answers through it) | protected |
 | C7 | `approvals.app.answers` is importable only by `edges.desk`, `edges.answers` and `main`; `edges.requests`, `app.requests`, `app.waits` and `infra.channels` import none of `app.answers`, `edges.desk`, `edges.answers`, `domain.issuer` | protected + forbidden |
@@ -96,10 +96,11 @@ standard library's network, process and database modules):
 |---|---|---|---|
 | `kernel.calls` | principal, server, params bytes; a JSON-RPC body | `CallIdentity` or `CallRejected`; the params span (`read_rpc_request`); the shown digest (computed only here) | Re-encode; accept duplicate or escaped-duplicate keys, trailing data, extra top-level keys, a task request (a `task` member or a Tasks declaration in `_meta`), nesting past 32 levels, a number that overflows a float, an empty name, a NUL or lone surrogate in a name or an argument key or string; a batch, or a duplicate `method` or `params` |
 | `kernel.requirements` | assurance scale, requirements | `stricter`, `meets_floor`, `qualify` | Read an identity provider or a clock |
+| `contract_mapping` | kernel results; ApprovalRequests replies | the one wire form of each value, both directions; the method paths; the `Refused` and `Rejected` messages the Check API writes too | Know a grant, a configuration or a service; read a reply of a kind it does not know as anything but `UnknownReply` |
 | `gate.core` | a call (principal, server, params, gateway attributes), a deadline | the verdict | Know a wire, a gateway or the wait server |
 | `gate.mappings.*` | one gateway's hook message | a call; the verdict in the gateway's encoding; `ext_mcp` sets the principal header on the wait route | Read caller or server from the body; send the wait route to policy |
 | `gate.policy.*` | principal, server, tool, arguments, gateway attributes | `none` or `require(name)`; anything else refuses | Cache; decide reach |
-| `wait.core`, `wait.mcp` | principal, ticket, words; a wait id | the held outcome; a task only to a client that declared Tasks | Keep wait state; answer `tasks/update`; put wait ids in spans or logs; import `asyncio` in the core (it waits through the kernel's `Timeouts` port, which `serving.timeouts` implements) |
+| `wait.core`, `wait.mcp` | principal, ticket, words; a wait id | the held outcome; a task only to a client that declared Tasks, authorised by its id alone (no principal is attested on `tasks/*`), and none with `wait.tasks: disabled` | Keep wait state; answer `tasks/update`; put wait ids in spans or logs; import `asyncio` in the core (it waits through the kernel's `Timeouts` port, which `serving.timeouts` implements) |
 | `approvals.app.requests` | a call reference, a requirement name | `request`; `claim`, the only spend | List, show or answer |
 | `approvals.app.waits` | open, await (and later cancel) a wait | wait ids, status streams | Open a wait on another principal's ticket |
 | `approvals.app.answers` | an authenticated surface's answer | an `Answer`, or an answer error | Accept an agents'-side credential |
@@ -111,7 +112,8 @@ standard library's network, process and database modules):
 **Persistence:** one repository per aggregate: `Approval` (with its `Wait` entities and its answer, held as
 all-or-none answer columns on the Approval row, including the digest it answered), `ChannelCursor` (with its dead
 letters) and `PushSubscription`. One flush listener stamps the audit fields (created and last changed, when and by
-whom) on every row; event rows are their own audit.
+whom) on every row; event rows are their own audit. An Approval's events, waits and answer are deleted with it
+when its retention ends (the foreign keys cascade); longer audit is the integrator's audit sink.
 
 ## Data flow
 
@@ -192,7 +194,7 @@ requested level. An identity provider that reuses an earlier ceremony for a high
 | Config | pydantic v2 (`extra="forbid"`) over `ruamel.yaml`'s safe loader, which refuses duplicate keys |
 | Telemetry | OpenTelemetry; no parameters, arguments, words or wait ids recorded |
 | Image, chart | One multi-arch image (non-root, read-only root, provenance and SBOM); a compose file and a Helm chart, the chart pushed as an OCI artifact by the release job and versioned from the tag |
-| Release | semantic-release on every merge to `main`, `CHANGELOG.md` only, the version held by the tag. `0.x` until the project is declared stable: a breaking change (marked `!`, which `buf breaking` against the last tag demands for contract changes) releases a minor version until then |
+| Release | semantic-release on every merge to `main`: the version held by the tag alone (nothing is committed back), the notes on the GitHub Release, the image built from the tagged commit. `0.x` until the project is declared stable: a breaking change (marked `!`, which `buf breaking` against the last tag demands for contract changes) releases a minor version until then |
 
 **Deny-list check.** CI scans commits, paths, the tree, branch names and pull request and issue text for a word
 list kept as a repository secret, as whole words, case-insensitive, printing no match. The list holds only words
