@@ -43,10 +43,21 @@ class ApprovalsSettings(BaseSettings):
 
 
 class ServeSettings(ApprovalsSettings):
-    """What `serve` adds: the ApprovalRequests port and the Call Gate's bearer token."""
+    """What `serve` adds: the ApprovalRequests port and its two bearer tokens, which must differ.
+
+    `call_gate_token` (the guardrail's) may call Request and Claim; `wait_token` (the wait server's) AddWords
+    and AwaitOutcome.
+    """
 
     requests_port: Annotated[int, Field(ge=1, le=65535)] = 9090
     call_gate_token: Annotated[SecretStr, Field(min_length=1)]
+    wait_token: Annotated[SecretStr, Field(min_length=1)]
+
+    @model_validator(mode="after")
+    def _distinct_tokens(self) -> "ServeSettings":
+        if self.call_gate_token.get_secret_value() == self.wait_token.get_secret_value():
+            raise ValueError("APPROVALS_CALL_GATE_TOKEN and APPROVALS_WAIT_TOKEN must differ")
+        return self
 
 
 class MigrateSettings(DatabaseSettings):

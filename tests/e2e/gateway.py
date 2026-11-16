@@ -12,7 +12,9 @@ F's live tracer is the check, and both are bumped together on an agentgateway up
   only after 15 s (`tool_approvals.mcp_serving`); past the headers the SSE stream is not cut (erratum
   E-ta-t4-wait-cut-at-10s);
 - slice F's guardrail: a remote processor on `tools/call` requests, fail closed, `client` from
-  `apiKey.client` and `gated` the "||" of F's per-call predicate.
+  `apiKey.client` and `gated` the "||" of F's per-call predicate, with the Call Gate's guardrail token as
+  the processor's `policies.backendAuth` (agentgateway sends it on the gRPC call, `guardrails/mod.rs`
+  `Remote.target`).
 
 Two listeners differ only in the forwarded-headers filter: `iac` carries it, `bare` leaves it out, so a
 spoofed client header reaches the guardrail and only the Call Gate's own header mutation stands in its way.
@@ -73,7 +75,12 @@ def call_predicate(client: str, server: str, tool: str) -> str:
 
 
 def render(
-    *, keys: dict[str, str], targets: tuple[Target, ...], grants: tuple[Grant, ...], guardrail_host: str
+    *,
+    keys: dict[str, str],
+    targets: tuple[Target, ...],
+    grants: tuple[Grant, ...],
+    guardrail_host: str,
+    guardrail_token_env: str,
 ) -> str:
     """The config as JSON (which agentgateway reads as YAML)."""
     gated = [call_predicate(g.client, g.server, g.tool) for g in grants if g.gated]
@@ -93,6 +100,7 @@ def render(
                     "kind": "remote",
                     "methods": {"tools/call": "request"},
                     "host": guardrail_host,
+                    "policies": {"backendAuth": {"key": f"${{{guardrail_token_env}}}"}},
                     "failureMode": "failClosed",
                     "metadata": {"client": "apiKey.client", "gated": " || ".join(gated) or "false"},
                     "requestHeaders": {"allowed": [":method"]},

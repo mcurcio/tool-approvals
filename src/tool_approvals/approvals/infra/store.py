@@ -28,6 +28,7 @@ from tool_approvals.approvals.domain.call import CallIdentity, ClientName, Finge
 from tool_approvals.approvals.infra.schema import NOTIFY_CHANNEL, approval_events, approvals
 
 ONE_LIVE_CALL: Final = "approvals_one_live_call"  # the partial unique index a racing request trips
+CLIENT_LOCK_CLASS: Final = 0x7461  # the first key of every per-client advisory lock ("ta")
 _AUTHOR: Final = "tool_approvals.author"
 _CLOCK: Final = "tool_approvals.clock"
 _LIVE: Final = (State.WAITING, State.APPROVED)
@@ -132,6 +133,12 @@ class SqlApprovalRepository:
         )
         with _concurrent_changes():
             return (await self._session.execute(query)).scalar_one()
+
+    async def serialize_client(self, client: ClientName) -> None:
+        """A transaction-scoped advisory lock on the client, released when the unit of work ends."""
+        lock = func.pg_advisory_xact_lock(CLIENT_LOCK_CLASS, func.hashtext(client))
+        with _concurrent_changes():
+            await self._session.execute(select(lock))
 
     async def add(self, approval: Approval) -> None:
         self._session.add(approval)

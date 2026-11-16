@@ -2,7 +2,9 @@
 
 Every command reads the clock once, loads, applies `pass_deadlines(now)` in the same unit of work, then
 decides. So `request` never returns a dead ticket. A command that loses a version race decides again
-from a fresh read, up to MAX_ATTEMPTS times, then raises ConcurrentChange.
+from a fresh read, up to MAX_ATTEMPTS times, then raises ConcurrentChange. `request` first serialises on
+its client, so concurrent requests from one client cannot pass the open-request cap together. A ticket that
+is not ticket-shaped is unknown without asking the store.
 """
 
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -36,6 +38,8 @@ from tool_approvals.approvals.domain.approval import (
     Verdict,
     Waiting,
     WaitState,
+    WordsMalformed,
+    WordsTooLong,
 )
 from tool_approvals.approvals.domain.call import (
     CallIdentity,
@@ -44,6 +48,7 @@ from tool_approvals.approvals.domain.call import (
     ServerName,
     Ticket,
     call_identity,
+    is_ticket,
 )
 
 MAX_ATTEMPTS: Final = 3  # the proto's "three lost version races" -> ABORTED
@@ -63,7 +68,7 @@ class QueueFull:
     """The client already has MAX_OPEN_PER_CLIENT requests waiting."""
 
 
-AddWordsError = Literal["unknown-ticket", "not-your-ticket", "words-too-long"]
+AddWordsError = Literal["unknown-ticket", "not-your-ticket", "words-too-long", "words-malformed"]
 TicketError = Literal["unknown-ticket", "not-your-ticket"]
 
 
@@ -110,6 +115,7 @@ class ApprovalsApp:
         by = _client_actor(call.client)
         fingerprint = call.fingerprint
         async with self._uow(by) as uow:
+            await uow.approvals.serialize_client(call.client)
             now = self._clock.now()
             live = await uow.approvals.live_for(fingerprint)
             if live is not None:
@@ -156,10 +162,14 @@ class ApprovalsApp:
     async def add_words(
         self, client: ClientName, ticket: Ticket, reason: str | None, work_ref: str | None
     ) -> AddWordsError | None:
+        if not is_ticket(ticket):
+            return "unknown-ticket"
         try:
             words = AgentWords(reason, work_ref)
-        except ValueError:
+        except WordsTooLong:
             return "words-too-long"
+        except WordsMalformed:
+            return "words-malformed"
         return await _retrying(lambda: self._add_words(client, ticket, words))
 
     async def _add_words(self, client: ClientName, ticket: Ticket, words: AgentWords) -> AddWordsError | None:
@@ -182,6 +192,9 @@ class ApprovalsApp:
         It subscribes before it reads, so no commit falls between, and applies `pass_deadlines` to its own
         copy without committing (the waker's commit is the event that records it).
         """
+        if not is_ticket(ticket):
+            yield "unknown-ticket"
+            return
         async with self._changes.watch(ticket) as feed:
             last: WaitState | None = None
             while True:
@@ -205,6 +218,8 @@ class ApprovalsApp:
 
     async def answer_as_stub(self, ticket: Ticket, verdict: Verdict, comment: str | None) -> StubAnswer:
         """The tracer's answer path, fenced to Approvals for the stub server."""
+        if not is_ticket(ticket):
+            return StubAnswer.UNKNOWN_TICKET
         return await _retrying(lambda: self._answer_as_stub(ticket, verdict, comment))
 
     async def _answer_as_stub(self, ticket: Ticket, verdict: Verdict, comment: str | None) -> StubAnswer:

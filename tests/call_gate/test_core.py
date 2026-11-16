@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import time
 
 import pytest
 from hypothesis import given
@@ -9,6 +10,8 @@ from hypothesis import strategies as st
 
 from tests.call_gate.fakes import FakeApprovals
 from tool_approvals.call_gate.core import (
+    AGENTGATEWAY_GUARDRAIL_DEADLINE,
+    CHECK_DEADLINE,
     MISCONFIGURED_TEXT,
     QUEUE_FULL_TEXT,
     UNAVAILABLE_TEXT,
@@ -228,3 +231,23 @@ def test_refuse_codes_match_ext_mcp() -> None:
 
     assert int(RefuseCode.PERMISSION_DENIED) == ext_mcp_pb2.AuthorizationError.PERMISSION_DENIED
     assert int(RefuseCode.RESOURCE_EXHAUSTED) == ext_mcp_pb2.AuthorizationError.RESOURCE_EXHAUSTED
+
+
+# One deadline for the whole check.
+
+
+def test_claim_and_request_share_one_deadline() -> None:
+    fake = FakeApprovals(delay=0.2)  # each answer alone is in time; the two together are not
+    config = GateConfig(wait_server=WAIT, wait_tool_exposed_name=WAIT_TOOL, check_deadline=0.3)
+    started = time.monotonic()
+    verdict = asyncio.run(GateCore(fake, config).check(call()))
+    assert verdict == Refuse(RefuseCode.RESOURCE_EXHAUSTED, UNAVAILABLE_TEXT)
+    assert time.monotonic() - started < 0.39
+    assert [c[0] for c in fake.calls] == ["claim", "request"]
+
+
+def test_the_whole_check_ends_inside_agentgateways_guardrail_deadline() -> None:
+    assert CONFIG.check_deadline == CHECK_DEADLINE < AGENTGATEWAY_GUARDRAIL_DEADLINE
+    for deadline in (0.0, AGENTGATEWAY_GUARDRAIL_DEADLINE):
+        with pytest.raises(ValueError, match="guardrail deadline"):
+            GateConfig(wait_server=WAIT, wait_tool_exposed_name=WAIT_TOOL, check_deadline=deadline)

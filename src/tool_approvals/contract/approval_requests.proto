@@ -38,8 +38,9 @@ message AddWordsRequest {
   optional string work_ref = 4;
 }
 
+// words_malformed: a reason or work_ref holding a NUL character, which Approvals never stores.
 message AddWordsReply {
-  oneof result { Empty accepted = 1; TicketError error = 2; Empty words_too_long = 3; }
+  oneof result { Empty accepted = 1; TicketError error = 2; Empty words_too_long = 3; Empty words_malformed = 4; }
 }
 
 message TicketRef { string client = 1; string ticket = 2; }

@@ -239,28 +239,34 @@ Global___AddWordsRequest: _TypeAlias = AddWordsRequest  # noqa: Y015
 
 @_typing.final
 class AddWordsReply(_message.Message):
+    """words_malformed: a reason or work_ref holding a NUL character, which Approvals never stores."""
+
     DESCRIPTOR: _descriptor.Descriptor
 
     ACCEPTED_FIELD_NUMBER: _builtins.int
     ERROR_FIELD_NUMBER: _builtins.int
     WORDS_TOO_LONG_FIELD_NUMBER: _builtins.int
+    WORDS_MALFORMED_FIELD_NUMBER: _builtins.int
     error: Global___TicketError.ValueType
     @_builtins.property
     def accepted(self) -> Global___Empty: ...
     @_builtins.property
     def words_too_long(self) -> Global___Empty: ...
+    @_builtins.property
+    def words_malformed(self) -> Global___Empty: ...
     def __init__(
         self,
         *,
         accepted: Global___Empty | None = ...,
         error: Global___TicketError.ValueType = ...,
         words_too_long: Global___Empty | None = ...,
+        words_malformed: Global___Empty | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _typing.Literal["accepted", b"accepted", "error", b"error", "result", b"result", "words_too_long", b"words_too_long"]  # noqa: Y015
+    _HasFieldArgType: _TypeAlias = _typing.Literal["accepted", b"accepted", "error", b"error", "result", b"result", "words_malformed", b"words_malformed", "words_too_long", b"words_too_long"]  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["accepted", b"accepted", "error", b"error", "result", b"result", "words_too_long", b"words_too_long"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["accepted", b"accepted", "error", b"error", "result", b"result", "words_malformed", b"words_malformed", "words_too_long", b"words_too_long"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    _WhichOneofReturnType_result: _TypeAlias = _typing.Literal["accepted", "error", "words_too_long"]  # noqa: Y015
+    _WhichOneofReturnType_result: _TypeAlias = _typing.Literal["accepted", "error", "words_too_long", "words_malformed"]  # noqa: Y015
     _WhichOneofArgType_result: _TypeAlias = _typing.Literal["result", b"result"]  # noqa: Y015
     def WhichOneof(self, oneof_group: _WhichOneofArgType_result) -> _WhichOneofReturnType_result | None: ...
 

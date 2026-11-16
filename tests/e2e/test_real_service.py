@@ -18,9 +18,9 @@ from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared._httpx_utils import create_mcp_http_client
 
-from tests.e2e.conftest import STUB_EXPOSED, WAIT_EXPOSED, RealStack, docker
+from tests.e2e.conftest import E2E_TIMEOUT, STUB_EXPOSED, WAIT_EXPOSED, RealStack, docker
 
-pytestmark = [pytest.mark.e2e, pytest.mark.asyncio(loop_scope="session")]
+pytestmark = [pytest.mark.e2e, pytest.mark.asyncio(loop_scope="session"), pytest.mark.timeout(E2E_TIMEOUT)]
 
 LONG_HOLD_SECONDS: Final = float(os.environ.get("E2E_REAL_WAIT_SECONDS", "180"))
 SHORT_HOLD_SECONDS: Final = 5.0

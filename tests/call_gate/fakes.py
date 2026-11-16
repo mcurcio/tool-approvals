@@ -1,5 +1,6 @@
 """A scripted, in-memory Approvals port for the gate core and the guardrail adapter."""
 
+import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 
@@ -25,17 +26,20 @@ class FakeApprovals:
     claim_answer: ClaimAnswer = Claim.NOT_APPROVED
     request_answer: RequestAnswer = field(default_factory=lambda: Ticketed("t-1"))
     calls: list[tuple[str, str, str, bytes]] = field(default_factory=list)
+    delay: float = 0.0  # each answer takes this long
 
     async def request(
         self, client: str, server: str, params: bytes
     ) -> Ticketed | Refused | Rejected | QueueFull:
         self.calls.append(("request", client, server, params))
+        await asyncio.sleep(self.delay)
         if isinstance(self.request_answer, ApprovalsUnavailable):
             raise self.request_answer
         return self.request_answer
 
     async def claim(self, client: str, server: str, params: bytes) -> Claim | Refused | Rejected:
         self.calls.append(("claim", client, server, params))
+        await asyncio.sleep(self.delay)
         if isinstance(self.claim_answer, ApprovalsUnavailable):
             raise self.claim_answer
         return self.claim_answer

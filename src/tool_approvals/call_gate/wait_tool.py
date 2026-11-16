@@ -4,6 +4,10 @@ The caller is the client header agentgateway set through the guardrail (``Pass(c
 server), never anything the agent sends. Failures are ``isError`` text results whose text says what to do
 next; a final outcome is a structured result whose text repeats ``next_step``.
 
+A wait is bounded: it returns ``still_waiting`` after ``MAX_WAIT_SECONDS``, on shutdown, or when the same
+client starts another wait on the same ticket (one live wait per ticket and client in each server), so no
+caller can pile up waits.
+
 ``initialize`` and ``tools/list`` need no bearer, so the tool-list check lists the tool from the release env
 alone; ``tools/call`` needs ``APPROVAL_WAIT_MCP_TOKEN`` (else 401) and, until every runtime setting is
 present, fails closed with an error result.
@@ -50,8 +54,9 @@ OUTPUT_SCHEMA: Final[dict[str, Any]] = {
 DESCRIPTION: Final = (
     "Wait for a human's answer to a call that was refused with a ticket. Give the ticket from that refusal "
     "and a one-line reason (and optionally a work_ref, such as an issue or PR). Returns when the human "
-    "answers, the request expires, or the server restarts; follow next_step."
+    "answers, the request expires, after 15 minutes, or the server restarts; follow next_step."
 )
+MAX_WAIT_SECONDS: Final = 900.0  # the "15 minutes" of DESCRIPTION
 # Additive: a wait records the agent's words on its own request and changes nothing else.
 ANNOTATIONS: Final = types.ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=True)
 NOT_CONFIGURED_TEXT: Final = "This wait server is missing its runtime settings, so no wait can run."
@@ -81,6 +86,8 @@ def _wait_error(error: WaitError, ticket: str) -> types.CallToolResult:
             return _error(f'Ticket "{ticket}" belongs to another client. Repeat the original call yourself.')
         case WaitError.WORDS_TOO_LONG:
             return _error("The reason or work_ref is too long. Call again with a shorter one.")
+        case WaitError.WORDS_MALFORMED:
+            return _error("The reason or work_ref holds a NUL character. Call again without it.")
         case _:
             assert_never(error)
 
@@ -109,6 +116,7 @@ class _WaitTool:
         self._port = port
         self._settings = settings
         self._stopping = stopping
+        self._live: dict[tuple[str, str], asyncio.Event] = {}  # (client, ticket) -> "replaced" of its wait
 
     def tool(self) -> types.Tool:
         return types.Tool(
@@ -161,12 +169,18 @@ class _WaitTool:
         raise ApprovalsUnavailable("the outcome stream ended without a final outcome")
 
     async def _until_final(self, port: ApprovalsPort, client: str, ticket: str) -> types.CallToolResult:
+        key = (client, ticket)
+        if (older := self._live.get(key)) is not None:
+            older.set()  # the older wait returns still_waiting; this one takes its place
+        replaced = self._live[key] = asyncio.Event()
         final = asyncio.ensure_future(self._first_final(port, client, ticket))
-        stopping = asyncio.ensure_future(self._stopping.wait())
+        ends = (final, asyncio.ensure_future(self._stopping.wait()), asyncio.ensure_future(replaced.wait()))
         try:
-            await asyncio.wait((final, stopping), return_when=asyncio.FIRST_COMPLETED)
+            await asyncio.wait(ends, timeout=MAX_WAIT_SECONDS, return_when=asyncio.FIRST_COMPLETED)
         finally:
-            for task in (final, stopping):
+            if self._live.get(key) is replaced:
+                del self._live[key]
+            for task in ends:
                 if not task.done():
                     task.cancel()
                     with suppress(asyncio.CancelledError):

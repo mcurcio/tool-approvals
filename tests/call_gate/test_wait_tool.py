@@ -13,10 +13,12 @@ import pytest
 from pydantic import SecretStr, ValidationError
 from starlette.applications import Starlette
 
-from tests.scripted_approvals import TOKEN, E, Script, serve
+from tests.scripted_approvals import WAIT_TOKEN, E, Script, serve
 from tests.serving import mcp_client, running
+from tool_approvals.call_gate import wait_tool
 from tool_approvals.call_gate.approvals_client import GrpcApprovalsClient
 from tool_approvals.call_gate.core import UNAVAILABLE_TEXT
+from tool_approvals.call_gate.ports import Outcome, WaitError
 from tool_approvals.call_gate.settings import ApprovalWaitSettings, grpc_target
 from tool_approvals.call_gate.wait_tool import (
     INPUT_SCHEMA,
@@ -41,12 +43,12 @@ def settings(approvals_url: str) -> ApprovalWaitSettings:
         client_header=HEADER,
         mcp_token=SecretStr(MCP_TOKEN),
         approvals_url=approvals_url,
-        approvals_token=SecretStr(TOKEN),
+        approvals_token=SecretStr(WAIT_TOKEN),
     )
 
 
 def approvals(url: str) -> GrpcApprovalsClient:
-    return GrpcApprovalsClient(grpc.aio.insecure_channel(grpc_target(url)), SecretStr(TOKEN))
+    return GrpcApprovalsClient(grpc.aio.insecure_channel(grpc_target(url)), SecretStr(WAIT_TOKEN))
 
 
 @dataclass
@@ -62,7 +64,7 @@ async def wait() -> AsyncIterator[Wait]:
     server, port = await serve(script)
     url = f"http://127.0.0.1:{port}"
     channel = grpc.aio.insecure_channel(grpc_target(url))
-    app = build_wait_app(GrpcApprovalsClient(channel, SecretStr(TOKEN)), settings(url))
+    app = build_wait_app(GrpcApprovalsClient(channel, SecretStr(WAIT_TOKEN)), settings(url))
     async with running(app) as url:
         yield Wait(script, app, url)
     await channel.close()
@@ -172,11 +174,18 @@ async def test_a_ticket_error_on_words_is_an_error_and_never_waits(
     assert seen(wait.script, "await") == []
 
 
-async def test_words_too_long_is_an_error(wait: Wait) -> None:
-    wait.script.add_words.append(pb.AddWordsReply(words_too_long=E))
+@pytest.mark.parametrize(
+    ("reply", "says"),
+    [(pb.AddWordsReply(words_too_long=E), "too long"), (pb.AddWordsReply(words_malformed=E), "NUL")],
+)
+async def test_words_approvals_will_not_take_are_an_error(
+    wait: Wait, reply: pb.AddWordsReply, says: str
+) -> None:
+    wait.script.add_words.append(reply)
     result = await call(wait.url, {"ticket": "tk", "reason": "r"})
     assert result.is_error
-    assert "too long" in text(result)
+    assert says in text(result)
+    assert seen(wait.script, "await") == []
 
 
 async def test_a_ticket_error_on_the_stream_is_an_error(wait: Wait) -> None:
@@ -295,7 +304,7 @@ RELEASE_ONLY = ApprovalWaitSettings(tool=TOOL, client_header=HEADER)
         (RELEASE_ONLY.model_copy(update={"mcp_token": SecretStr(MCP_TOKEN)}), AS_CLIENT),
         (
             RELEASE_ONLY.model_copy(
-                update={"mcp_token": SecretStr(MCP_TOKEN), "approvals_token": SecretStr(TOKEN)}
+                update={"mcp_token": SecretStr(MCP_TOKEN), "approvals_token": SecretStr(WAIT_TOKEN)}
             ),
             AS_CLIENT,
         ),
@@ -398,3 +407,74 @@ def test_grpc_target(url: str, target: str) -> None:
 def test_grpc_target_refuses_anything_but_an_h2c_url(url: str) -> None:
     with pytest.raises(ValueError, match=r"approvals|9090"):
         grpc_target(url)
+
+
+# Every wait is bounded.
+
+
+def still_waiting(result: types.CallToolResult) -> bool:
+    content = result.structured_content
+    return not result.is_error and content is not None and content["state"] == "still_waiting"
+
+
+async def test_a_wait_returns_still_waiting_after_its_longest_hold(
+    wait: Wait, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(wait_tool, "MAX_WAIT_SECONDS", 0.3)
+    wait.script.add_words.append(pb.AddWordsReply(accepted=E))
+    wait.script.streams.append(([outcome(waiting=E)], "hang"))
+    async with asyncio.timeout(10):
+        result = await call(wait.url, {"ticket": "tk"})
+    assert still_waiting(result)
+    assert CALL_AGAIN in text(result).lower()
+
+
+async def test_a_second_wait_on_a_ticket_replaces_the_first(wait: Wait) -> None:
+    wait.script.add_words.extend([pb.AddWordsReply(accepted=E), pb.AddWordsReply(accepted=E)])
+    wait.script.streams.extend(
+        [([outcome(waiting=E)], "hang"), ([outcome(waiting=E), None, outcome(approved=E)], "hang")]
+    )
+    async with asyncio.timeout(10):
+        first = asyncio.create_task(call(wait.url, {"ticket": "tk"}))
+        await wait.script.subscribed.wait()
+        wait.script.subscribed.clear()
+        second = asyncio.create_task(call(wait.url, {"ticket": "tk"}))
+        assert still_waiting(await first)
+        await wait.script.subscribed.wait()
+        wait.script.release.set()
+        result = await second
+    assert result.structured_content is not None
+    assert result.structured_content["state"] == "approved"
+
+
+class EndingPort:
+    """An Approvals port whose outcome stream ends while the request still waits."""
+
+    async def request(self, client: str, server: str, params: bytes) -> Any:
+        raise AssertionError("the wait tool never requests")
+
+    async def claim(self, client: str, server: str, params: bytes) -> Any:
+        raise AssertionError("the wait tool never claims")
+
+    async def add_words(self, client: str, ticket: str, reason: str | None, work_ref: str | None) -> None:
+        return None
+
+    async def await_outcome(self, client: str, ticket: str) -> AsyncIterator[Outcome | WaitError]:
+        yield Outcome("waiting")
+
+
+async def test_a_stream_that_ends_without_a_final_outcome_is_unavailable() -> None:
+    app = build_wait_app(EndingPort(), settings("http://127.0.0.1:1"))
+    async with running(app) as url:
+        result = await call(url, {"ticket": "tk"})
+    assert result.is_error
+    assert UNAVAILABLE_TEXT in text(result)
+    assert CALL_AGAIN in text(result)
+
+
+async def test_an_unknown_tool_name_is_an_error_and_asks_nobody(wait: Wait) -> None:
+    async with mcp_client(wait.url, AS_CLIENT) as client:
+        result = await client.call_tool("not-the-wait-tool", {"ticket": "tk"})
+    assert result.is_error
+    assert "Unknown tool" in text(result)
+    assert wait.script.seen == []

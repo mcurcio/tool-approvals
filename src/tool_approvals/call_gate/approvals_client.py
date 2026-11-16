@@ -2,8 +2,9 @@
 
 A request, claim or words call either gets a confirmed answer within ``CONFIRM_TIMEOUT`` seconds or raises
 ``ApprovalsUnavailable``; it is never retried, because an unconfirmed ``request`` or ``claim`` may have
-happened. ``await_outcome`` re-subscribes when a stream that already delivered an event drops; the new
-stream starts with the current state again.
+happened. ``await_outcome`` re-subscribes when a stream that already delivered an event drops (a dead
+connection is noticed by the channel's keepalive, ``tool_approvals.grpc_serving``); the new stream must show
+the current state again within ``RESUBSCRIBE_TIMEOUT``, else ``ApprovalsUnavailable``.
 """
 
 import asyncio
@@ -27,7 +28,8 @@ from tool_approvals.call_gate.ports import (
 from tool_approvals.contract import approval_requests_pb2 as pb
 from tool_approvals.contract import approval_requests_pb2_grpc as pb_grpc
 
-CONFIRM_TIMEOUT: Final = 5.0  # seconds; inside agentgateway's 10 s guardrail deadline
+CONFIRM_TIMEOUT: Final = 5.0  # seconds for one call's confirmed answer
+RESUBSCRIBE_TIMEOUT: Final = 60.0  # seconds for a re-subscribed stream's first event (Approvals restarting)
 
 _TICKET_ERRORS: Final[Mapping[int, WaitError]] = {
     pb.UNKNOWN_TICKET: WaitError.UNKNOWN,
@@ -143,6 +145,8 @@ class GrpcApprovalsClient(ApprovalsPort):
                 return _ticket_error(reply.error)
             case "words_too_long":
                 return WaitError.WORDS_TOO_LONG
+            case "words_malformed":
+                return WaitError.WORDS_MALFORMED
             case None:
                 raise ApprovalsUnavailable("empty words reply")
 
@@ -151,16 +155,17 @@ class GrpcApprovalsClient(ApprovalsPort):
         resubscribe = False
         while True:
             # The first subscribe must show the current state within CONFIRM_TIMEOUT. A re-subscribe waits
-            # for the channel to reconnect (gRPC's own connection events), with no deadline of its own.
+            # for the channel to reconnect (gRPC's own connection events), up to RESUBSCRIBE_TIMEOUT.
             call = self._stub.AwaitOutcome(ref, metadata=self._metadata, wait_for_ready=resubscribe)
+            first = RESUBSCRIBE_TIMEOUT if resubscribe else CONFIRM_TIMEOUT
             delivered = False
             try:
                 while True:
                     try:
-                        async with asyncio.timeout(None if delivered or resubscribe else CONFIRM_TIMEOUT):
+                        async with asyncio.timeout(None if delivered else first):
                             event = await call.read()
                     except TimeoutError:
-                        raise ApprovalsUnavailable("no current state within the confirm timeout") from None
+                        raise ApprovalsUnavailable("no current state in time") from None
                     except grpc.aio.AioRpcError as e:
                         if e.code() != grpc.StatusCode.UNAVAILABLE:
                             raise ApprovalsUnavailable(e.code().name) from e

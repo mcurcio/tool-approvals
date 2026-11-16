@@ -34,8 +34,7 @@ from tests.e2e.gateway import (
     Target,
     render,
 )
-from tests.scripted_approvals import TOKEN as APPROVALS_TOKEN
-from tests.scripted_approvals import Script, serve
+from tests.scripted_approvals import CALL_GATE_TOKEN, WAIT_TOKEN, Script, serve
 from tests.serving import running
 from tool_approvals.stub_tool.app import build_stub_app
 from tool_approvals.stub_tool.settings import HOLD_TOOL, StubToolSettings
@@ -57,6 +56,8 @@ READINESS_SERVICE: Final = "agentgateway.dev.ext_mcp.ExtMcp"
 # bridge address, so there the in-process servers listen on every address.
 HOST_BIND: Final = "127.0.0.1" if sys.platform == "darwin" else "0.0.0.0"
 READY_TIMEOUT: Final = 60.0
+GUARDRAIL_TOKEN: Final = secrets.token_urlsafe(24)  # agentgateway's bearer on the guardrail
+E2E_TIMEOUT: Final = 900  # seconds per test (pytest-timeout), the first one building the image
 
 
 async def docker(*args: str, check: bool = True, with_stderr: bool = False) -> str:
@@ -178,8 +179,9 @@ def env_args(env: dict[str, str]) -> list[str]:
 async def run_call_gate(*, image_name: str, name: str, network: str, alias: str, approvals_url: str) -> None:
     env = {
         "CALL_GATE_GUARDRAIL_PORT": "9000",
+        "CALL_GATE_GUARDRAIL_TOKEN": GUARDRAIL_TOKEN,
         "CALL_GATE_APPROVALS_URL": approvals_url,
-        "CALL_GATE_APPROVALS_TOKEN": APPROVALS_TOKEN,
+        "CALL_GATE_APPROVALS_TOKEN": CALL_GATE_TOKEN,
         "CALL_GATE_WAIT_SERVER": WAIT_SERVER,
         "CALL_GATE_WAIT_TOOL_EXPOSED_NAME": WAIT_EXPOSED,
         "CALL_GATE_CLIENT_HEADER": HEADER,
@@ -201,7 +203,7 @@ async def run_approval_wait(
         **WAIT_RELEASE_ENV,
         "APPROVAL_WAIT_MCP_TOKEN": mcp_token,
         "APPROVAL_WAIT_APPROVALS_URL": approvals_url,
-        "APPROVAL_WAIT_APPROVALS_TOKEN": APPROVALS_TOKEN,
+        "APPROVAL_WAIT_APPROVALS_TOKEN": WAIT_TOKEN,
     }
     await docker(
         "run", "-d", "--name", name, "--network", network, "--network-alias", WAIT_ALIAS,
@@ -247,12 +249,14 @@ async def run_agentgateway(
             Grant(OTHER_CLIENT, STUB_SERVER, HOLD_TOOL),
         ),
         guardrail_host="callgate:9000",
+        guardrail_token_env="GUARDRAIL_TOKEN",
     )
     _write_config(config_dir, config)
     await docker(
         "run", "-d", "--name", name, "--network", network,
         "--add-host", "host.docker.internal:host-gateway",
         "-e", f"APPROVAL_TOKEN={wait_token}", "-e", f"STUB_TOKEN={stub_token}",
+        "-e", f"GUARDRAIL_TOKEN={GUARDRAIL_TOKEN}",
         "-e", f"SESSION_KEY={secrets.token_hex(32)}",
         "-v", f"{config_dir}:/etc/agentgateway:ro",
         "-p", f"127.0.0.1::{IAC_PORT}", "-p", f"127.0.0.1::{BARE_PORT}",
@@ -388,7 +392,8 @@ async def real_stack(tmp_path_factory: pytest.TempPathFactory) -> AsyncIterator[
             await docker(
                 "run", "-d", "--name", approvals, "--network", network, "--network-alias", "approvals",
                 "-p", "127.0.0.1::9090", *pg_env,
-                "-e", f"APPROVALS_CALL_GATE_TOKEN={APPROVALS_TOKEN}",
+                "-e", f"APPROVALS_CALL_GATE_TOKEN={CALL_GATE_TOKEN}",
+                "-e", f"APPROVALS_WAIT_TOKEN={WAIT_TOKEN}",
                 "-e", f"APPROVALS_STUB_SERVER={STUB_SERVER}",
                 *read_only(image_name), "approvals", "serve",
             )  # fmt: skip

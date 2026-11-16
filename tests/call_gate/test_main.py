@@ -9,15 +9,23 @@ from typing import Any
 
 import grpc
 import pytest
+from google.protobuf import struct_pb2
 from grpc_health.v1 import health_pb2, health_pb2_grpc
 from pydantic import SecretStr, ValidationError
 
+from tests.scripted_approvals import CALL_GATE_TOKEN, E, Script
+from tests.scripted_approvals import serve as serve_approvals
 from tests.serving import mcp_client
 from tool_approvals.call_gate import wait_main
-from tool_approvals.call_gate.main import LIVENESS_SERVICE, READINESS_SERVICE, serve
+from tool_approvals.call_gate.core import AGENTGATEWAY_GUARDRAIL_DEADLINE, WAITING_TEXT
+from tool_approvals.call_gate.main import DRAIN_SECONDS, LIVENESS_SERVICE, READINESS_SERVICE, serve
 from tool_approvals.call_gate.settings import ApprovalWaitSettings, CallGateSettings
+from tool_approvals.contract import approval_requests_pb2 as approvals_pb
+from tool_approvals.contract import ext_mcp_pb2 as pb
+from tool_approvals.contract import ext_mcp_pb2_grpc as pb_grpc
 
 HEADER = "x-approval-client"
+GUARDRAIL_TOKEN = "guardrail-token"
 
 
 def free_port() -> int:
@@ -39,14 +47,7 @@ async def watch_until(address: str, service: str, status: int) -> None:
 
 async def test_the_guardrail_is_ready_without_approvals_then_stops_on_sigterm() -> None:
     guardrail_port = free_port()
-    settings = CallGateSettings(
-        guardrail_port=guardrail_port,
-        approvals_url="http://127.0.0.1:1",  # nothing listens: readiness must not care
-        approvals_token=SecretStr("a"),
-        wait_server="approval",
-        wait_tool_exposed_name="approval_wait",
-        client_header=HEADER,
-    )
+    settings = gate_settings(guardrail_port, "http://127.0.0.1:1")  # nothing listens: readiness must not care
     running = asyncio.create_task(serve(settings))
     address = f"127.0.0.1:{guardrail_port}"
     async with asyncio.timeout(20):
@@ -54,6 +55,85 @@ async def test_the_guardrail_is_ready_without_approvals_then_stops_on_sigterm() 
         await watch_until(address, LIVENESS_SERVICE, health_pb2.HealthCheckResponse.SERVING)
         os.kill(os.getpid(), signal.SIGTERM)
         await running
+
+
+def gate_settings(guardrail_port: int, approvals_url: str) -> CallGateSettings:
+    return CallGateSettings(
+        guardrail_port=guardrail_port,
+        guardrail_token=SecretStr(GUARDRAIL_TOKEN),
+        approvals_url=approvals_url,
+        approvals_token=SecretStr(CALL_GATE_TOKEN),
+        wait_server="approval",
+        wait_tool_exposed_name="approval_wait",
+        client_header=HEADER,
+    )
+
+
+def check_request(*, gated: bool) -> pb.McpRequest:
+    context = struct_pb2.Struct()
+    context.update({"client": "claude-cloud", "gated": gated})
+    return pb.McpRequest(
+        service_names=["approval-stub"],
+        method="tools/call",
+        metadata_context=context,
+        mcp_request=b'{"name":"stub_write","arguments":{"text":"x"}}',
+    )
+
+
+def bearer(token: str) -> tuple[tuple[str, str], ...]:
+    return (("authorization", f"Bearer {token}"),)
+
+
+async def test_the_guardrail_needs_its_bearer_token_and_health_does_not() -> None:
+    guardrail_port = free_port()
+    running = asyncio.create_task(serve(gate_settings(guardrail_port, "http://127.0.0.1:1")))
+    address = f"127.0.0.1:{guardrail_port}"
+    async with asyncio.timeout(20):
+        await watch_until(address, READINESS_SERVICE, health_pb2.HealthCheckResponse.SERVING)
+        async with grpc.aio.insecure_channel(address) as channel:
+            stub = pb_grpc.ExtMcpStub(channel)
+            for metadata in ((), bearer("wrong"), bearer(CALL_GATE_TOKEN)):
+                for call in (
+                    stub.CheckRequest(check_request(gated=False), metadata=metadata),
+                    stub.CheckResponse(pb.McpResponse(), metadata=metadata),
+                ):
+                    with pytest.raises(grpc.aio.AioRpcError) as raised:
+                        await call
+                    assert raised.value.code() == grpc.StatusCode.UNAUTHENTICATED
+            passed = await stub.CheckRequest(check_request(gated=False), metadata=bearer(GUARDRAIL_TOKEN))
+            assert passed.HasField("pass")
+        os.kill(os.getpid(), signal.SIGTERM)
+        await running
+
+
+async def test_sigterm_lets_a_check_in_flight_finish() -> None:
+    script = Script(
+        claim=[approvals_pb.ClaimReply(not_approved=E)],
+        request=[approvals_pb.RequestReply(ticket="tk")],
+        delay=1.0,  # each answer takes a second: the check is in flight when SIGTERM comes
+    )
+    approvals, approvals_port = await serve_approvals(script)
+    guardrail_port = free_port()
+    running = asyncio.create_task(serve(gate_settings(guardrail_port, f"http://127.0.0.1:{approvals_port}")))
+    address = f"127.0.0.1:{guardrail_port}"
+    try:
+        async with asyncio.timeout(20), grpc.aio.insecure_channel(address) as channel:
+            await watch_until(address, READINESS_SERVICE, health_pb2.HealthCheckResponse.SERVING)
+            stub = pb_grpc.ExtMcpStub(channel)
+            check = asyncio.ensure_future(
+                stub.CheckRequest(check_request(gated=True), metadata=bearer(GUARDRAIL_TOKEN))
+            )
+            await script.called.wait()  # the claim reached Approvals: the check is in flight
+            os.kill(os.getpid(), signal.SIGTERM)
+            result = await check
+            assert result.error.reason == WAITING_TEXT.format(wait_tool="approval_wait", ticket="tk")
+            await running
+    finally:
+        await approvals.stop(None)
+
+
+def test_the_drain_covers_agentgateways_guardrail_deadline() -> None:
+    assert DRAIN_SECONDS >= AGENTGATEWAY_GUARDRAIL_DEADLINE
 
 
 async def test_the_wait_server_reaches_no_network_at_startup_then_stops_on_sigterm() -> None:
@@ -92,6 +172,7 @@ async def test_the_wait_server_reaches_no_network_at_startup_then_stops_on_sigte
 
 REQUIRED = {
     "CALL_GATE_GUARDRAIL_PORT": "9000",
+    "CALL_GATE_GUARDRAIL_TOKEN": "g",
     "CALL_GATE_APPROVALS_URL": "http://approvals.ns.svc.cluster.local:9090",
     "CALL_GATE_APPROVALS_TOKEN": "a",
     "CALL_GATE_WAIT_SERVER": "approval",
@@ -128,6 +209,7 @@ def test_a_missing_setting_fails(monkeypatch: pytest.MonkeyPatch, missing: str) 
         ("CALL_GATE_CLIENT_HEADER", ":method"),
         ("CALL_GATE_WAIT_SERVER", "two words"),
         ("CALL_GATE_APPROVALS_TOKEN", ""),
+        ("CALL_GATE_GUARDRAIL_TOKEN", ""),
         ("CALL_GATE_APPROVALS_URL", "approvals:9090"),
         ("CALL_GATE_GUARDRAIL_PORT", "70000"),
     ],

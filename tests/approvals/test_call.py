@@ -18,6 +18,7 @@ from tool_approvals.approvals.domain.call import (
     RejectReason,
     ServerName,
     call_identity,
+    is_ticket,
 )
 
 CLIENT = ClientName("claude-cloud")
@@ -53,7 +54,8 @@ def _encode(members: list[tuple[str, object]], ws: str, ensure_ascii: bool) -> b
 
 @st.composite
 def params_members(draw: st.DrawFn) -> list[tuple[str, object]]:
-    members: list[tuple[str, object]] = [("name", draw(tricky_strings | st.just("arguments")))]
+    name = draw(tricky_strings.filter(lambda text: "\x00" not in text) | st.just("arguments"))
+    members: list[tuple[str, object]] = [("name", name)]  # a NUL in it: test_malformed_params
     if draw(st.booleans()):
         members.append(("arguments", draw(json_values)))
     if draw(st.booleans()):
@@ -146,6 +148,7 @@ def test_other_client_capabilities_are_not_a_task_request() -> None:
         pytest.param(b'{"name": 1}', id="number name"),
         pytest.param(b'{"name": null}', id="null name"),
         pytest.param(b'{"name": "\\ud800"}', id="lone surrogate name"),
+        pytest.param(b'{"name": "a\\u0000b"}', id="NUL in name"),
         pytest.param(b'{"name": "a", "name": "b"}', id="duplicate top-level key"),
         pytest.param(b'{"name": "a", "arguments": {"x": 1, "x": 2}}', id="duplicate nested key"),
         pytest.param(b'{"name": "a", "arguments": NaN}', id="NaN"),
@@ -160,6 +163,28 @@ def test_other_client_capabilities_are_not_a_task_request() -> None:
 )
 def test_malformed_params(params: bytes) -> None:
     assert _rejected(params) is RejectReason.MALFORMED
+
+
+@pytest.mark.parametrize(
+    ("client", "server"), [(ClientName("claude\x00cloud"), SERVER), (CLIENT, ServerName("approval\x00stub"))]
+)
+def test_a_client_or_server_holding_nul_is_malformed(client: ClientName, server: ServerName) -> None:
+    assert call_identity(client, server, b'{"name": "a"}') == CallRejected(RejectReason.MALFORMED)
+
+
+@pytest.mark.parametrize(
+    ("text", "ticket"),
+    [
+        ("Ab0_-" * 4 + "xyzw", True),
+        ("t-1", True),
+        ("", False),
+        ("t\x00", False),
+        ("t 1", False),
+        ("x" * 65, False),
+    ],
+)
+def test_is_ticket(text: str, ticket: bool) -> None:
+    assert is_ticket(text) is ticket
 
 
 def test_deep_nesting_within_the_size_limit_never_raises() -> None:

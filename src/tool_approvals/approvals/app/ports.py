@@ -28,6 +28,13 @@ class ApprovalRepository(Protocol):
 
     async def open_count(self, client: ClientName) -> int: ...
 
+    async def serialize_client(self, client: ClientName) -> None:
+        """Waits until no other unit of work holds this client, then holds it until this one ends.
+
+        Two requests from one client then decide one after the other, so the open-request cap holds.
+        """
+        ...
+
     async def add(self, approval: Approval) -> None: ...
 
     async def due(self, now: datetime, limit: int) -> Sequence[Approval]:

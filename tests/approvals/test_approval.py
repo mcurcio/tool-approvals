@@ -28,6 +28,8 @@ from tool_approvals.approvals.domain.approval import (
     Used,
     Verdict,
     Waiting,
+    WordsMalformed,
+    WordsTooLong,
 )
 from tool_approvals.approvals.domain.call import CallIdentity, ClientName, ServerName, Ticket
 
@@ -35,6 +37,9 @@ D = Deadlines(answer=timedelta(hours=1), use=timedelta(minutes=10), retention=ti
 CALL = CallIdentity(ClientName("claude-cloud"), ServerName("approval-stub"), "stub_write", b'{"text":"x"}')
 AGENT = Actor(ActorKind.CLIENT, ClientName("claude-cloud"))
 STUB = Answerer.stub()
+WORDS = st.text(
+    alphabet=st.characters(exclude_characters="\x00"), max_size=5
+)  # NUL: test_agent_words_never_hold_nul
 TINY = timedelta(microseconds=1)
 
 ALLOWED_MOVES = {
@@ -78,7 +83,7 @@ class ApprovalMachine(RuleBasedStateMachine):
         claimed = self._apply(lambda: approval.claim(AGENT, self.now, D))
         assert (claimed is ClaimResult.CLAIMED) is usable  # a yes is spent once, before its use deadline
 
-    @rule(reason=st.none() | st.text(max_size=5), work_ref=st.none() | st.text(max_size=5))
+    @rule(reason=st.none() | WORDS, work_ref=st.none() | WORDS)
     def agent_words(self, reason: str | None, work_ref: str | None) -> None:
         self._apply(lambda: self.approval.add_words(AgentWords(reason, work_ref), AGENT, self.now))
 
@@ -246,7 +251,13 @@ def test_deadlines_must_be_positive_and_retention_at_least_the_answer(
 
 def test_agent_words_limits() -> None:
     AgentWords("r" * 2000, "w" * 500)
-    with pytest.raises(ValueError, match="reason"):
+    with pytest.raises(WordsTooLong, match="reason"):
         AgentWords("r" * 2001, None)
-    with pytest.raises(ValueError, match="work_ref"):
+    with pytest.raises(WordsTooLong, match="work_ref"):
         AgentWords(None, "w" * 501)
+
+
+@pytest.mark.parametrize(("reason", "work_ref"), [("a\x00", None), (None, "\x00b")])
+def test_agent_words_never_hold_nul(reason: str | None, work_ref: str | None) -> None:
+    with pytest.raises(WordsMalformed):
+        AgentWords(reason, work_ref)

@@ -87,6 +87,7 @@ class FakeStore:
     commits: list[Commit] = field(default_factory=list)
     lose_races: int = 0  # the next this-many commits raise ConcurrentChange
     authors: list[str] = field(default_factory=list)
+    serialized: list[ClientName] = field(default_factory=list)  # each serialize_client, in order
 
     def uow(self, author: Author) -> "FakeUnitOfWork":
         self.authors.append(str(author))
@@ -127,6 +128,9 @@ class FakeRepository:
 
     async def open_count(self, client: ClientName) -> int:
         return sum(1 for a in self._current() if a.call.client == client and a.state is State.WAITING)
+
+    async def serialize_client(self, client: ClientName) -> None:
+        self._store.serialized.append(client)  # nothing to wait for: in memory, no await lets another in
 
     async def add(self, approval: Approval) -> None:
         self.added[approval.ticket] = approval

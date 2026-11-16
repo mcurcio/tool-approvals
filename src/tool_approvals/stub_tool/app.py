@@ -18,7 +18,7 @@ from starlette.routing import Route
 from tool_approvals.mcp_serving import stateless_mcp_app
 from tool_approvals.stub_tool.settings import HOLD_TOOL, StubToolSettings
 
-MAX_HOLD_SECONDS: Final = 3600
+MAX_HOLD_SECONDS: Final = 900
 WRITE_SCHEMA: Final[dict[str, Any]] = {
     "type": "object",
     "additionalProperties": False,

@@ -112,6 +112,14 @@ class Deadlines:
             raise ValueError("retention must be at least the answer deadline")
 
 
+class WordsTooLong(ValueError):
+    pass
+
+
+class WordsMalformed(ValueError):
+    """Words holding a NUL character, which Postgres text cannot store."""
+
+
 @dataclass(frozen=True, slots=True)
 class AgentWords:
     """An agent's reason and work reference, shown to the person only as quoted content."""
@@ -121,9 +129,11 @@ class AgentWords:
 
     def __post_init__(self) -> None:
         if self.reason is not None and len(self.reason) > MAX_REASON_CHARS:
-            raise ValueError(f"reason is over {MAX_REASON_CHARS} characters")
+            raise WordsTooLong(f"reason is over {MAX_REASON_CHARS} characters")
         if self.work_ref is not None and len(self.work_ref) > MAX_WORK_REF_CHARS:
-            raise ValueError(f"work_ref is over {MAX_WORK_REF_CHARS} characters")
+            raise WordsTooLong(f"work_ref is over {MAX_WORK_REF_CHARS} characters")
+        if any(words is not None and "\x00" in words for words in (self.reason, self.work_ref)):
+            raise WordsMalformed("the reason or work_ref holds a NUL character")
 
 
 class EventKind(StrEnum):

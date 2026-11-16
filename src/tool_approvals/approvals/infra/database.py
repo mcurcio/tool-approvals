@@ -2,6 +2,7 @@
 
 Every connection, pooled or listening, asks libpq for TCP keepalives, so a dead peer is noticed by the kernel
 within about 25 s instead of a socket hanging forever; the pool also pings a connection before lending it.
+SQL errors never carry their bound parameters (`hide_parameters`): those hold an agent's words.
 """
 
 from collections.abc import Mapping
@@ -59,4 +60,6 @@ class DatabaseSettings(BaseSettings):
 
 def create_engine(settings: DatabaseSettings) -> AsyncEngine:
     """The async engine (psycopg 3): `pool_pre_ping` and libpq keepalives on every pooled connection."""
-    return create_async_engine(settings.url(), pool_pre_ping=True, connect_args=dict(KEEPALIVES))
+    return create_async_engine(
+        settings.url(), pool_pre_ping=True, hide_parameters=True, connect_args=dict(KEEPALIVES)
+    )

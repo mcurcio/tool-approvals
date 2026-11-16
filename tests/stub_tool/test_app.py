@@ -74,7 +74,7 @@ async def test_hold_answers_after_the_given_seconds(url: str) -> None:
     ("name", "arguments"),
     [
         ("stub_hold", {"seconds": 0}),
-        ("stub_hold", {"seconds": 3601}),
+        ("stub_hold", {"seconds": 901}),
         ("stub_hold", {"seconds": "1"}),
         ("stub_write", {}),
         ("stub_write", {"text": "x", "extra": 1}),
@@ -85,6 +85,12 @@ async def test_bad_calls_are_error_results(url: str, name: str, arguments: dict[
     async with mcp_client(url, AUTH) as client:
         result = await client.call_tool(name, arguments)
     assert result.is_error
+
+
+async def test_a_hold_lasts_at_most_15_minutes(url: str) -> None:
+    async with mcp_client(url, {}) as client:
+        hold = next(t for t in (await client.list_tools()).tools if t.name == "stub_hold")
+    assert hold.input_schema["properties"]["seconds"]["maximum"] == 900
 
 
 async def test_a_call_needs_no_token(url: str) -> None:

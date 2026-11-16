@@ -47,10 +47,11 @@ class WaitError(StrEnum):
     UNKNOWN = "unknown-ticket"
     NOT_YOURS = "not-your-ticket"
     WORDS_TOO_LONG = "words-too-long"
+    WORDS_MALFORMED = "words-malformed"
 
 
 class ApprovalsUnavailable(Exception):
-    """No confirmed answer within 5 s (inside agentgateway's 10 s). Never retried."""
+    """No confirmed answer in time (a whole check gets 5 s, inside agentgateway's 10 s). Never retried."""
 
 
 class ApprovalsPort(Protocol):

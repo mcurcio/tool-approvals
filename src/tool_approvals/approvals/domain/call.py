@@ -2,11 +2,13 @@
 
 The identity is the client, the server, the tool name and the exact bytes of the top-level `arguments`
 value. `_meta` is left out (it carries a fresh progress token on every repeat), except that a `_meta`
-declaring the MCP Tasks extension is refused: a Task's later steps would escape the claim.
+declaring the MCP Tasks extension is refused: a Task's later steps would escape the claim. Text holding a
+NUL character (client, server or tool name) is malformed: Postgres text cannot store it.
 """
 
 import hashlib
 import json
+import re
 from collections.abc import Iterator
 from dataclasses import dataclass
 from enum import StrEnum
@@ -23,6 +25,14 @@ CLIENT_CAPABILITIES_META_KEY: Final = "io.modelcontextprotocol/clientCapabilitie
 TASKS_EXTENSION: Final = "io.modelcontextprotocol/tasks"  # refused in _meta[clientCapabilities]["extensions"]
 
 _WHITESPACE: Final = frozenset(" \t\n\r")  # JSON's insignificant whitespace (RFC 8259 §2)
+NUL: Final = "\x00"
+# Every ticket is URL-safe base64 (token_urlsafe); anything else names no ticket, and never reaches the store.
+_TICKET_SHAPE: Final = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+def is_ticket(text: str) -> bool:
+    """Whether `text` could be a ticket at all (URL-safe base64, at most 64 characters)."""
+    return _TICKET_SHAPE.fullmatch(text) is not None
 
 
 class RejectReason(StrEnum):
@@ -125,10 +135,13 @@ def call_identity(client: ClientName, server: ServerName, params: bytes) -> Call
     """The call's identity, or why Approvals will not consider it.
 
     The params must be at most MAX_PARAMS_BYTES of UTF-8 JSON: an object whose keys are within
-    ALLOWED_PARAMS_KEYS, with a string `name` and no `_meta` declaring the Tasks extension.
+    ALLOWED_PARAMS_KEYS, with a string `name` and no `_meta` declaring the Tasks extension; the client, the
+    server and the name hold no NUL.
     """
     if len(params) > MAX_PARAMS_BYTES:
         return CallRejected(RejectReason.TOO_LARGE)
+    if NUL in client or NUL in server:
+        return CallRejected(RejectReason.MALFORMED)
     try:
         text = params.decode("utf-8")  # strict: a lossless round trip, so a span re-encodes to its bytes
         members: dict[str, tuple[object, int, int]] = {}
@@ -139,8 +152,8 @@ def call_identity(client: ClientName, server: ServerName, params: bytes) -> Call
         if not members.keys() <= ALLOWED_PARAMS_KEYS:
             raise _Malformed("unknown top-level key")
         name = members["name"][0] if "name" in members else None
-        if not isinstance(name, str):
-            raise _Malformed("no string name")
+        if not isinstance(name, str) or NUL in name:
+            raise _Malformed("no string name, or a NUL in it")
         name.encode()  # a lone surrogate escape ("\ud800") cannot be fingerprinted
         if "_meta" in members and _declares_tasks(members["_meta"][0]):
             return CallRejected(RejectReason.TASK_REQUESTED)

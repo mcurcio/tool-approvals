@@ -79,5 +79,11 @@ def test_invalid_settings_fail_startup(monkeypatch: pytest.MonkeyPatch, database
     with pytest.raises(ValidationError):
         ServeSettings()  # no APPROVALS_CALL_GATE_TOKEN
     monkeypatch.setenv("APPROVALS_CALL_GATE_TOKEN", "t")
+    with pytest.raises(ValidationError):
+        ServeSettings()  # no APPROVALS_WAIT_TOKEN
+    monkeypatch.setenv("APPROVALS_WAIT_TOKEN", "t")
+    with pytest.raises(ValidationError, match="must differ"):
+        ServeSettings()
+    monkeypatch.setenv("APPROVALS_WAIT_TOKEN", "w")
     served = ServeSettings()
     assert (served.requests_port, served.deadlines().answer.total_seconds()) == (9090, 3600)

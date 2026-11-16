@@ -1,5 +1,5 @@
-"""A scripted ``tool_approvals.v1.ApprovalRequests`` server: checks the bearer token like the real service,
-then answers from a script. Shared by the client tests and the Docker e2e."""
+"""A scripted ``tool_approvals.v1.ApprovalRequests`` server: checks the two bearer tokens with the real
+service's interceptor, then answers from a script. Shared by the client tests and the Docker e2e."""
 
 import asyncio
 from collections.abc import AsyncIterator
@@ -7,11 +7,15 @@ from dataclasses import dataclass, field
 from typing import override
 
 import grpc
+from pydantic import SecretStr
 
+from tool_approvals.approvals.edges.requests import interceptor
 from tool_approvals.contract import approval_requests_pb2 as pb
 from tool_approvals.contract import approval_requests_pb2_grpc as pb_grpc
+from tool_approvals.grpc_serving import server_options
 
-TOKEN = "call-gate-token"
+CALL_GATE_TOKEN = "call-gate-token"  # Request and Claim
+WAIT_TOKEN = "approvals-wait-token"  # AddWords and AwaitOutcome
 E = pb.Empty()
 
 # A stream attempt: the events to send, then how it ends ("end", "unavailable", "hang"). A None event
@@ -29,10 +33,11 @@ class Script:
     seen: list[tuple[str, object, str | None]] = field(default_factory=list)
     release: asyncio.Event = field(default_factory=asyncio.Event)
     subscribed: asyncio.Event = field(default_factory=asyncio.Event)  # set when an outcome stream opens
+    called: asyncio.Event = field(default_factory=asyncio.Event)  # set when any call passes the token check
 
 
 class ScriptedApprovals(pb_grpc.ApprovalRequestsServicer):
-    """Checks the bearer token like the real service, then answers from the script."""
+    """Records each call that passed the token check, then answers from the script."""
 
     def __init__(self, script: Script) -> None:
         self.script = script
@@ -42,8 +47,7 @@ class ScriptedApprovals(pb_grpc.ApprovalRequestsServicer):
     ) -> None:
         auth = dict(context.invocation_metadata() or ()).get("authorization")
         self.script.seen.append((name, request, auth if isinstance(auth, str) else None))
-        if auth != f"Bearer {TOKEN}":
-            await context.abort(grpc.StatusCode.UNAUTHENTICATED, "bad token")
+        self.script.called.set()
         if self.script.delay:
             await asyncio.sleep(self.script.delay)
 
@@ -100,7 +104,8 @@ class ScriptedApprovals(pb_grpc.ApprovalRequestsServicer):
 
 
 async def serve(script: Script, address: str = "127.0.0.1:0") -> tuple[grpc.aio.Server, int]:
-    server = grpc.aio.server()
+    tokens = interceptor(SecretStr(CALL_GATE_TOKEN), SecretStr(WAIT_TOKEN))
+    server = grpc.aio.server(interceptors=[tokens], options=server_options())
     pb_grpc.add_ApprovalRequestsServicer_to_server(ScriptedApprovals(script), server)
     port = server.add_insecure_port(address)
     await server.start()

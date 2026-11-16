@@ -150,7 +150,9 @@ async def test_serve_is_ready_only_while_its_listener_is_up(
     world: StoreWorld, database: DatabaseSettings
 ) -> None:
     port = free_port()
-    settings = ServeSettings(stub_server=STUB, requests_port=port, call_gate_token=SecretStr("t"))
+    settings = ServeSettings(
+        stub_server=STUB, requests_port=port, call_gate_token=SecretStr("t"), wait_token=SecretStr("w")
+    )
     server = asyncio.create_task(main.serve(settings, database))
     serving, not_serving = health_pb2.HealthCheckResponse.SERVING, health_pb2.HealthCheckResponse.NOT_SERVING
     try:

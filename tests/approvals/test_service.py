@@ -170,6 +170,38 @@ async def test_add_words(world: World) -> None:
     assert (approval.reason, approval.work_ref) == ("why", "PR 7")
 
 
+async def test_words_after_the_answer_deadline_are_not_recorded(world: World) -> None:
+    ticket = await world.ticket()
+    world.clock.advance(D.answer)
+    assert await world.app.add_words(AGENT, ticket, "too late", None) is None
+    approval = world.store.committed(ticket)
+    assert (approval.state, approval.reason) == (State.REFUSED, None)
+    assert [e.kind for e in world.store.events] == [EventKind.OPENED, EventKind.REFUSED]
+
+
+async def test_words_holding_nul_are_refused_and_never_stored(world: World) -> None:
+    ticket = await world.ticket()
+    commits = len(world.store.commits)
+    assert await world.app.add_words(AGENT, ticket, "a\x00b", None) == "words-malformed"
+    assert await world.app.add_words(AGENT, ticket, None, "\x00") == "words-malformed"
+    assert len(world.store.commits) == commits
+
+
+async def test_a_ticket_that_is_not_ticket_shaped_never_reaches_the_store(world: World) -> None:
+    for odd in (Ticket("t-1\x00"), Ticket(""), Ticket("x" * 65), Ticket("a b")):
+        units = len(world.store.authors)
+        assert await world.app.add_words(AGENT, odd, "r", None) == "unknown-ticket"
+        assert [s async for s in world.app.watch(AGENT, odd)] == ["unknown-ticket"]
+        assert await world.app.answer_as_stub(odd, Verdict.APPROVE, None) is StubAnswer.UNKNOWN_TICKET
+        assert len(world.store.authors) == units  # no unit of work was opened
+
+
+async def test_a_request_serialises_on_its_client_first(world: World) -> None:
+    await world.ticket()
+    await world.ticket(client=OTHER)
+    assert world.store.serialized == [AGENT, OTHER]
+
+
 async def test_stub_answers_are_fenced_and_checked(world: World) -> None:
     real = await world.ticket(server=REAL)
     assert await world.app.answer_as_stub(Ticket("nope"), Verdict.APPROVE, None) is StubAnswer.UNKNOWN_TICKET

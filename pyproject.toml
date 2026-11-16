@@ -34,6 +34,7 @@ dev = [
     "mypy-protobuf==5.1.0",
     "pytest>=9.2.0",
     "pytest-asyncio>=1.5.0",
+    "pytest-timeout>=2.4",
     "pytest-xdist>=3.8.0",
     "ruff>=0.17.5",
     "testcontainers[postgres]>=4.15.0",
@@ -74,6 +75,8 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 addopts = ["--strict-markers", "--strict-config", "-m", "not e2e"]
 markers = ["e2e: the Docker tracer against real agentgateway (run with `-m e2e`)"]
+# A test that would hang fails by name instead; the e2e tests set their own, longer limit.
+timeout = 60
 
 [tool.importlinter]
 root_package = "tool_approvals"
@@ -119,7 +122,13 @@ source_modules = ["tool_approvals.mcp_serving"]
 forbidden_modules = ["tool_approvals.call_gate", "tool_approvals.stub_tool", "tool_approvals.approvals", "tool_approvals.contract"]
 
 [[tool.importlinter.contracts]]
+name = "The shared gRPC serving module knows no service"
+type = "forbidden"
+source_modules = ["tool_approvals.grpc_serving"]
+forbidden_modules = ["tool_approvals.call_gate", "tool_approvals.stub_tool", "tool_approvals.approvals", "tool_approvals.contract", "tool_approvals.mcp_serving"]
+
+[[tool.importlinter.contracts]]
 name = "The contract imports no service"
 type = "forbidden"
 source_modules = ["tool_approvals.contract"]
-forbidden_modules = ["tool_approvals.call_gate", "tool_approvals.stub_tool", "tool_approvals.approvals", "tool_approvals.mcp_serving"]
+forbidden_modules = ["tool_approvals.call_gate", "tool_approvals.stub_tool", "tool_approvals.approvals", "tool_approvals.mcp_serving", "tool_approvals.grpc_serving"]

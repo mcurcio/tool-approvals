@@ -9,6 +9,7 @@ import pytest
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
 from sqlalchemy import Connection, create_engine, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from tests.approvals.fakes import T0, FakeClock
@@ -257,13 +258,33 @@ async def test_notify_is_delivered_only_when_the_transaction_commits(
 # Races: real overlapping transactions on separate connections.
 
 
-async def test_two_concurrent_requests_for_one_call_get_one_ticket(world: StoreWorld) -> None:
-    hold = Rendezvous(2)
-    one, two = world.app_with(hold=hold), world.app_with(hold=hold)
-    results = await asyncio.gather(one.request(AGENT, STUB, params()), two.request(AGENT, STUB, params()))
+async def test_concurrent_requests_for_one_call_get_one_ticket(world: StoreWorld) -> None:
+    apps = [world.app_with() for _ in range(8)]  # each on its own connections
+    results = await asyncio.gather(*(app.request(AGENT, STUB, params()) for app in apps))
     assert all(isinstance(r, Ticketed) for r in results)
-    assert results[0] == results[1]
-    assert world.tickets.issued == 2  # both opened one; the live-call index refused the second
+    assert len(set(results)) == 1
+    assert world.tickets.issued == 1  # serialised on the client: the later ones found the live ticket
+
+
+async def test_concurrent_requests_from_one_client_stop_at_the_cap(world: StoreWorld) -> None:
+    calls = [params({"n": i}) for i in range(4 * MAX_OPEN_PER_CLIENT)]
+    results = await asyncio.gather(*(world.app_with().request(AGENT, STUB, p) for p in calls))
+    assert sum(isinstance(r, Ticketed) for r in results) == MAX_OPEN_PER_CLIENT
+    assert sum(isinstance(r, QueueFull) for r in results) == len(calls) - MAX_OPEN_PER_CLIENT
+    assert isinstance(await world.app.request(OTHER, STUB, params()), Ticketed)  # another client's own cap
+
+
+async def test_a_second_live_request_for_one_call_is_a_concurrent_change(world: StoreWorld) -> None:
+    # Serialising on the client keeps requests apart; the live-call index still refuses a second live row.
+    call = call_identity(AGENT, STUB, params())
+    assert isinstance(call, CallIdentity)
+    by = Actor(ActorKind.CLIENT, AGENT)
+    async with world.unit(by) as first, world.unit(by) as second:
+        for uow, ticket in ((first, "t-a"), (second, "t-b")):
+            await uow.approvals.add(Approval.open(call, Ticket(ticket), by, T0, world.app._deadlines))
+        await first.commit()
+        with pytest.raises(ConcurrentChange):
+            await second.commit()
 
 
 async def test_two_concurrent_claims_spend_the_yes_once(world: StoreWorld) -> None:
@@ -322,6 +343,15 @@ async def test_a_lost_race_is_a_concurrent_change(world: StoreWorld) -> None:
 
 
 # The pool.
+
+
+async def test_sql_errors_never_carry_their_parameters(engine: AsyncEngine) -> None:
+    words = "the agent's words"
+    with pytest.raises(DBAPIError) as raised:
+        async with engine.connect() as connection:
+            await connection.execute(text("SELECT CAST(:words AS text), 1 / 0"), {"words": words})
+    assert "division by zero" in str(raised.value)
+    assert words not in str(raised.value)
 
 
 async def test_the_pool_replaces_connections_the_server_dropped(

@@ -49,11 +49,16 @@ ApprovalsUrl = Annotated[str, AfterValidator(_h2c_url)]
 
 
 class CallGateSettings(BaseSettings):
-    """``tool-approvals call-gate``: the guardrail."""
+    """``tool-approvals call-gate``: the guardrail.
+
+    ``guardrail_token`` is agentgateway's bearer on the guardrail; ``approvals_token`` is Approvals'
+    ``APPROVALS_CALL_GATE_TOKEN`` (Request and Claim only).
+    """
 
     model_config = SettingsConfigDict(env_prefix="CALL_GATE_", frozen=True)
 
     guardrail_port: Port
+    guardrail_token: Token
     approvals_url: ApprovalsUrl
     approvals_token: Token
     wait_server: Name
@@ -75,7 +80,8 @@ class ApprovalWaitSettings(BaseSettings):
 
     The release env (the tool's name and the client header) is required. The runtime env is optional at
     startup, because the tool-list check starts the image without it; while any of it is missing, every
-    ``tools/call`` gets an error result.
+    ``tools/call`` gets an error result. ``approvals_token`` is Approvals' ``APPROVALS_WAIT_TOKEN`` (AddWords
+    and AwaitOutcome only).
     """
 
     model_config = SettingsConfigDict(env_prefix="APPROVAL_WAIT_", frozen=True)

@@ -1,12 +1,14 @@
 """`tool_approvals.v1.ApprovalRequests` over gRPC: the Call Gate's only way in. No list, show or answer.
 
-Every method needs `authorization: Bearer <APPROVALS_CALL_GATE_TOKEN>`, else UNAUTHENTICATED (checked by
-`BearerTokenInterceptor` before the servicer runs; health stays open for the kubelet's probes). Three lost
-version races are ABORTED; the store being down is UNAVAILABLE.
+Two bearer tokens, each for its own methods (checked by `interceptor()` before the servicer runs; health
+stays open for the kubelet's probes): `APPROVALS_CALL_GATE_TOKEN` (the guardrail) may call Request and Claim,
+`APPROVALS_WAIT_TOKEN` (the wait server) AddWords and AwaitOutcome. Three lost version races are ABORTED; the
+store being down is UNAVAILABLE; anything else is INTERNAL with a fixed message, logged by its type alone,
+so no agent words reach a reply or a log.
 """
 
-import hmac
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+import logging
+from collections.abc import AsyncIterator, Mapping
 from typing import Any, Final, NoReturn, assert_never, override
 
 import grpc
@@ -27,8 +29,14 @@ from tool_approvals.approvals.domain.approval import (
 from tool_approvals.approvals.domain.call import CallRejected, ClientName, RejectReason, ServerName, Ticket
 from tool_approvals.contract import approval_requests_pb2 as pb
 from tool_approvals.contract import approval_requests_pb2_grpc as pb_grpc
+from tool_approvals.grpc_serving import BearerTokenInterceptor, Grant
 
-SERVICE: Final = pb.DESCRIPTOR.services_by_name["ApprovalRequests"].full_name
+_log = logging.getLogger(__name__)
+
+SERVICE_DESCRIPTOR: Final = pb.DESCRIPTOR.services_by_name["ApprovalRequests"]
+SERVICE: Final = SERVICE_DESCRIPTOR.full_name
+CALL_GATE_METHODS: Final = frozenset({"Request", "Claim"})
+WAIT_METHODS: Final = frozenset({"AddWords", "AwaitOutcome"})
 _E: Final = pb.Empty()
 _REJECT_REASONS: Final[Mapping[RejectReason, pb.Rejected.Reason.ValueType]] = {
     RejectReason.MALFORMED: pb.Rejected.MALFORMED,
@@ -71,10 +79,20 @@ def _outcome(state: WaitState | str) -> pb.OutcomeEvent:
             assert_never(state)
 
 
+def interceptor(call_gate_token: SecretStr, wait_token: SecretStr) -> BearerTokenInterceptor:
+    """Each token to its own methods; ValueError if the two tokens are the same."""
+    return BearerTokenInterceptor(
+        SERVICE_DESCRIPTOR, [Grant(call_gate_token, CALL_GATE_METHODS), Grant(wait_token, WAIT_METHODS)]
+    )
+
+
 async def _abort_for(error: Exception, context: _Context) -> NoReturn:
     if isinstance(error, ConcurrentChange):
         await context.abort(grpc.StatusCode.ABORTED, "lost three version races; try again")
-    await context.abort(grpc.StatusCode.UNAVAILABLE, "the approvals store is unavailable")
+    if isinstance(error, STORE_DOWN):
+        await context.abort(grpc.StatusCode.UNAVAILABLE, "the approvals store is unavailable")
+    _log.error("an ApprovalRequests call failed: %s", type(error).__name__)  # the type only: no agent words
+    await context.abort(grpc.StatusCode.INTERNAL, "internal error")
     raise AssertionError("unreachable")  # context.abort raises
 
 
@@ -88,7 +106,7 @@ class ApprovalRequestsServicer(pb_grpc.ApprovalRequestsServicer):
             result = await self._app.request(
                 ClientName(request.client), ServerName(request.server), request.params
             )
-        except (ConcurrentChange, *STORE_DOWN) as e:
+        except Exception as e:
             await _abort_for(e, context)
         match result:
             case Ticketed():
@@ -108,7 +126,7 @@ class ApprovalRequestsServicer(pb_grpc.ApprovalRequestsServicer):
             result = await self._app.claim(
                 ClientName(request.client), ServerName(request.server), request.params
             )
-        except (ConcurrentChange, *STORE_DOWN) as e:
+        except Exception as e:
             await _abort_for(e, context)
         match result:
             case ClaimResult.CLAIMED:
@@ -130,13 +148,15 @@ class ApprovalRequestsServicer(pb_grpc.ApprovalRequestsServicer):
             error = await self._app.add_words(
                 ClientName(request.client), Ticket(request.ticket), reason, work_ref
             )
-        except (ConcurrentChange, *STORE_DOWN) as e:
+        except Exception as e:
             await _abort_for(e, context)
         match error:
             case None:
                 return pb.AddWordsReply(accepted=_E)
             case "words-too-long":
                 return pb.AddWordsReply(words_too_long=_E)
+            case "words-malformed":
+                return pb.AddWordsReply(words_malformed=_E)
             case "unknown-ticket" | "not-your-ticket":
                 return pb.AddWordsReply(error=_TICKET_ERRORS[error])
             case _:
@@ -148,52 +168,5 @@ class ApprovalRequestsServicer(pb_grpc.ApprovalRequestsServicer):
         try:
             async for state in self._app.watch(ClientName(request.client), Ticket(request.ticket)):
                 yield _outcome(state)
-        except STORE_DOWN as e:
+        except Exception as e:
             await _abort_for(e, context)
-
-
-type _Handler = grpc.RpcMethodHandler[Any, Any]
-
-
-class BearerTokenInterceptor(grpc.aio.ServerInterceptor):
-    """Refuses every `service` method without the bearer token (UNAUTHENTICATED); other services pass."""
-
-    def __init__(self, token: SecretStr, service: str = SERVICE) -> None:
-        self._expected = f"Bearer {token.get_secret_value()}".encode()
-        self._prefix = f"/{service}/"
-
-    @override
-    async def intercept_service(
-        self,
-        continuation: Callable[[grpc.HandlerCallDetails], Awaitable[_Handler | None]],
-        handler_call_details: grpc.HandlerCallDetails,
-    ) -> _Handler | None:
-        handler = await continuation(handler_call_details)
-        if handler is None or not handler_call_details.method.startswith(self._prefix):
-            return handler
-        sent = dict(handler_call_details.invocation_metadata or ()).get("authorization")
-        if isinstance(sent, str) and hmac.compare_digest(sent.encode(), self._expected):
-            return handler
-        return _refusing(handler)
-
-
-async def _unauthenticated(context: _Context) -> NoReturn:
-    await context.abort(grpc.StatusCode.UNAUTHENTICATED, "missing or wrong bearer token")
-    raise AssertionError("unreachable")  # context.abort raises
-
-
-def _refusing(handler: _Handler) -> _Handler:
-    async def unary(_request: object, context: _Context) -> NoReturn:
-        await _unauthenticated(context)
-
-    async def stream(_request: object, context: _Context) -> AsyncIterator[NoReturn]:
-        await _unauthenticated(context)
-        yield  # an async generator, as a unary-stream handler must be
-
-    serdes = {
-        "request_deserializer": handler.request_deserializer,
-        "response_serializer": handler.response_serializer,
-    }
-    if handler.unary_stream is not None:
-        return grpc.unary_stream_rpc_method_handler(stream, **serdes)
-    return grpc.unary_unary_rpc_method_handler(unary, **serdes)

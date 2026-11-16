@@ -1,9 +1,11 @@
 """The proto conformance suite (interfaces page, T4): the same scenarios, on real Postgres, answered by
 `ApprovalsApp` directly and through `GrpcApprovalsClient` -> gRPC -> `ApprovalRequestsServicer`. Both must
-give the Call Gate the same answers. Then the edge's own rules: bearer token, health, ABORTED, UNAVAILABLE."""
+give the Call Gate the same answers. Then the edge's own rules: the two bearer tokens, health, ABORTED,
+UNAVAILABLE, INTERNAL, and the cap on calls at once."""
 
 import asyncio
 import json
+import socket
 from collections.abc import AsyncIterator, Awaitable
 from datetime import timedelta
 from typing import Any, Final
@@ -36,7 +38,9 @@ from tool_approvals.approvals.domain.call import (
     ServerName,
     Ticket,
 )
-from tool_approvals.approvals.edges.requests import ApprovalRequestsServicer, BearerTokenInterceptor
+from tool_approvals.approvals.edges import main
+from tool_approvals.approvals.edges.requests import ApprovalRequestsServicer, interceptor
+from tool_approvals.approvals.edges.settings import ServeSettings
 from tool_approvals.approvals.infra.database import DatabaseSettings, create_engine
 from tool_approvals.approvals.infra.store import SqlUnitOfWorkFactory
 from tool_approvals.call_gate import ports
@@ -44,8 +48,23 @@ from tool_approvals.call_gate.approvals_client import GrpcApprovalsClient
 from tool_approvals.contract import approval_requests_pb2 as pb
 from tool_approvals.contract import approval_requests_pb2_grpc as pb_grpc
 
-TOKEN: Final = "approvals-test-token"
+GATE_TOKEN: Final = "approvals-call-gate-token"  # Request and Claim
+WAIT_TOKEN: Final = "approvals-wait-token"  # AddWords and AwaitOutcome
 type Answer = Any
+
+
+def bearer(token: str) -> tuple[tuple[str, str]]:
+    return (("authorization", f"Bearer {token}"),)
+
+
+class SplitClient:
+    """The Call Gate's two clients as one port: the guardrail's (Request, Claim), the wait server's (rest)."""
+
+    def __init__(self, channel: grpc.aio.Channel) -> None:
+        self._gate = GrpcApprovalsClient(channel, SecretStr(GATE_TOKEN))
+        self._waits = GrpcApprovalsClient(channel, SecretStr(WAIT_TOKEN))
+        self.request, self.claim = self._gate.request, self._gate.claim
+        self.add_words, self.await_outcome = self._waits.add_words, self._waits.await_outcome
 
 
 class AppPort:
@@ -98,7 +117,7 @@ class AppPort:
 
 
 async def serve(app: ApprovalsApp) -> tuple[grpc.aio.Server, str, health_aio.HealthServicer]:
-    server = grpc.aio.server(interceptors=[BearerTokenInterceptor(SecretStr(TOKEN))])
+    server = grpc.aio.server(interceptors=[interceptor(SecretStr(GATE_TOKEN), SecretStr(WAIT_TOKEN))])
     pb_grpc.add_ApprovalRequestsServicer_to_server(ApprovalRequestsServicer(app), server)
     health = health_aio.HealthServicer()
     health_pb2_grpc.add_HealthServicer_to_server(health, server)
@@ -114,7 +133,7 @@ async def port(request: pytest.FixtureRequest, world: StoreWorld) -> AsyncIterat
         return
     server, address, _ = await serve(world.app)
     async with grpc.aio.insecure_channel(address) as channel:
-        yield GrpcApprovalsClient(channel, SecretStr(TOKEN))
+        yield SplitClient(channel)
     await server.stop(None)
 
 
@@ -236,6 +255,115 @@ async def test_every_method_needs_the_bearer_token_and_health_does_not(world: St
         await server.stop(None)
 
 
+async def test_each_token_calls_only_its_own_methods(world: StoreWorld) -> None:
+    server, address, _ = await serve(world.app)
+    try:
+        async with grpc.aio.insecure_channel(address) as channel:
+            stub = pb_grpc.ApprovalRequestsStub(channel)
+            call = pb.Call(client=AGENT, server=STUB, params=params())
+            ref = pb.TicketRef(client=AGENT, ticket="t-1")
+            for refused in (
+                stub.Request(call, metadata=bearer(WAIT_TOKEN)),
+                stub.Claim(call, metadata=bearer(WAIT_TOKEN)),
+                stub.AddWords(pb.AddWordsRequest(client=AGENT, ticket="t-1"), metadata=bearer(GATE_TOKEN)),
+                stub.AwaitOutcome(ref, metadata=bearer(GATE_TOKEN)).read(),
+            ):
+                with pytest.raises(grpc.aio.AioRpcError) as raised:
+                    await refused
+                assert raised.value.code() == grpc.StatusCode.PERMISSION_DENIED
+        assert await world.row(Ticket("t-1")) is None  # nothing was opened
+    finally:
+        await server.stop(None)
+
+
+@pytest.mark.parametrize(
+    "act",
+    [
+        lambda port: port.add_words(AGENT, "t-1\x00", "r", None),
+        lambda port: outcomes(port.await_outcome(AGENT, "t-1\x00")),
+    ],
+)
+async def test_a_ticket_that_is_not_ticket_shaped_is_unknown(port: Any, act: Any) -> None:
+    await port.request(AGENT, STUB, params())  # "t-1" exists
+    answer = await act(port)
+    assert answer in (ports.WaitError.UNKNOWN, [ports.WaitError.UNKNOWN])
+
+
+async def test_words_or_a_call_holding_nul_are_refused_not_failed(port: Any, world: StoreWorld) -> None:
+    ticket = (await port.request(AGENT, STUB, params())).ticket
+    for reason, work_ref in (("a\x00b", None), (None, "\x00")):
+        assert await port.add_words(AGENT, ticket, reason, work_ref) is ports.WaitError.WORDS_MALFORMED
+    for client, server, body in (
+        (AGENT, STUB, params(name="stub\x00write")),
+        (ClientName("claude\x00cloud"), STUB, params()),
+        (AGENT, ServerName("approval\x00stub"), params()),
+    ):
+        assert await port.request(client, server, body) == ports.Rejected("malformed")
+        assert await port.claim(client, server, body) == ports.Rejected("malformed")
+    assert [kind for kind, _, _ in await world.events(Ticket(ticket))] == ["opened"]
+
+
+async def test_an_unexpected_failure_is_internal_and_tells_nothing(caplog: pytest.LogCaptureFixture) -> None:
+    def failing(_author: object) -> Any:
+        raise RuntimeError("the agent's secret words")
+
+    app = ApprovalsApp(
+        uow=failing, clock=FakeClock(), tickets=FakeTickets(), changes=FakeStore().changes, deadlines=D,
+        stub_server=STUB,
+    )  # fmt: skip
+    server, address, _ = await serve(app)
+    try:
+        async with grpc.aio.insecure_channel(address) as channel:
+            stub = pb_grpc.ApprovalRequestsStub(channel)
+            for failed in (
+                stub.Request(
+                    pb.Call(client=AGENT, server=STUB, params=params()), metadata=bearer(GATE_TOKEN)
+                ),
+                stub.AwaitOutcome(
+                    pb.TicketRef(client=AGENT, ticket="t-1"), metadata=bearer(WAIT_TOKEN)
+                ).read(),
+            ):
+                with pytest.raises(grpc.aio.AioRpcError) as raised:
+                    await failed
+                assert (raised.value.code(), raised.value.details()) == (
+                    grpc.StatusCode.INTERNAL,
+                    "internal error",
+                )
+    finally:
+        await server.stop(None)
+    assert "RuntimeError" in caplog.text
+    assert "secret words" not in caplog.text
+
+
+async def test_calls_past_the_cap_are_resource_exhausted(
+    world: StoreWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(main, "MAX_CONCURRENT_RPCS", 1)
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port_number = s.getsockname()[1]
+    settings = ServeSettings(
+        stub_server=STUB, requests_port=port_number, call_gate_token=SecretStr(GATE_TOKEN),
+        wait_token=SecretStr(WAIT_TOKEN),
+    )  # fmt: skip
+    server = main.build_server(settings, world.app, health_aio.HealthServicer())
+    await server.start()
+    ticket = await world.ticket()
+    try:
+        async with grpc.aio.insecure_channel(f"127.0.0.1:{port_number}") as channel:
+            stub = pb_grpc.ApprovalRequestsStub(channel)
+            held = stub.AwaitOutcome(pb.TicketRef(client=AGENT, ticket=ticket), metadata=bearer(WAIT_TOKEN))
+            assert await held.read() == pb.OutcomeEvent(waiting=pb.Empty())  # one call in flight: the cap
+            with pytest.raises(grpc.aio.AioRpcError) as raised:
+                await stub.Claim(
+                    pb.Call(client=AGENT, server=STUB, params=params()), metadata=bearer(GATE_TOKEN)
+                )
+            assert raised.value.code() == grpc.StatusCode.RESOURCE_EXHAUSTED
+            held.cancel()
+    finally:
+        await server.stop(None)
+
+
 async def test_three_lost_version_races_are_aborted() -> None:
     store = FakeStore(lose_races=3)
     app = ApprovalsApp(
@@ -253,7 +381,7 @@ async def test_three_lost_version_races_are_aborted() -> None:
             with pytest.raises(grpc.aio.AioRpcError) as raised:
                 await stub.Request(
                     pb.Call(client=AGENT, server=STUB, params=params()),
-                    metadata=(("authorization", f"Bearer {TOKEN}"),),
+                    metadata=bearer(GATE_TOKEN),
                 )
         assert raised.value.code() == grpc.StatusCode.ABORTED
     finally:
@@ -265,14 +393,15 @@ async def test_the_store_being_down_is_unavailable(world: StoreWorld, database: 
     engine = create_engine(down)
     app = world.build(SqlUnitOfWorkFactory(engine, world.clock), world.clock, world.tickets, world.changes)
     server, address, _ = await serve(app)
-    metadata = (("authorization", f"Bearer {TOKEN}"),)
     try:
         async with grpc.aio.insecure_channel(address) as channel:
             stub = pb_grpc.ApprovalRequestsStub(channel)
             with pytest.raises(grpc.aio.AioRpcError) as raised:
-                await stub.Claim(pb.Call(client=AGENT, server=STUB, params=params()), metadata=metadata)
+                await stub.Claim(
+                    pb.Call(client=AGENT, server=STUB, params=params()), metadata=bearer(GATE_TOKEN)
+                )
             assert raised.value.code() == grpc.StatusCode.UNAVAILABLE
-            stream = stub.AwaitOutcome(pb.TicketRef(client=AGENT, ticket="t"), metadata=metadata)
+            stream = stub.AwaitOutcome(pb.TicketRef(client=AGENT, ticket="t"), metadata=bearer(WAIT_TOKEN))
             with pytest.raises(grpc.aio.AioRpcError) as raised:
                 await stream.read()
             assert raised.value.code() == grpc.StatusCode.UNAVAILABLE

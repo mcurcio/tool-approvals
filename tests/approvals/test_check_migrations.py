@@ -1,4 +1,5 @@
-"""`scripts/check_migrations.py`: expand migrations only add; drops and type changes need phase "contract"."""
+"""`scripts/check_migrations.py`: expand migrations only add what the old code can live with; anything else
+needs phase "contract"."""
 
 import importlib.util
 import sys
@@ -49,9 +50,21 @@ def test_the_packaged_migrations_pass() -> None:
         'op.alter_column("approvals", "version", type_=sa.BigInteger())',
         'op.execute("ALTER TABLE approvals DROP COLUMN reason")',
         'op.execute("ALTER TABLE approvals ALTER COLUMN version TYPE bigint")',
+        'op.add_column("approvals", sa.Column("note", sa.Text, nullable=False))',
+        'op.add_column("approvals", column=sa.Column("note", sa.Text, nullable=False))',
+        'op.alter_column("approvals", "reason", nullable=False)',
+        'op.alter_column("approvals", "reason", new_column_name="why")',
+        'op.rename_table("approvals", "requests")',
+        'op.create_check_constraint("reason_short", "approvals", "length(reason) < 10")',
+        'op.create_unique_constraint("one_ticket", "approvals", ["ticket", "client"])',
+        'op.create_index("approvals_by_client", "approvals", ["client"], unique=True)',
+        'op.execute("ALTER TABLE approvals ALTER COLUMN reason SET NOT NULL")',
+        'op.execute("ALTER TABLE approvals RENAME COLUMN reason TO why")',
+        'op.execute("ALTER TABLE approvals ADD CONSTRAINT c CHECK (version > 0)")',
+        'op.execute("CREATE UNIQUE INDEX x ON approvals (client)")',
     ],
 )
-def test_an_expand_migration_may_not_drop_or_change_a_type(tmp_path: Path, upgrade: str) -> None:
+def test_an_expand_migration_may_not_break_the_running_code(tmp_path: Path, upgrade: str) -> None:
     path = migration(tmp_path, "expand", upgrade)
     assert checker.check(path) != []
     assert checker.main([str(tmp_path)]) == 1
@@ -65,6 +78,8 @@ def test_an_expand_migration_may_not_drop_or_change_a_type(tmp_path: Path, upgra
         'op.create_index("approvals_by_state", "approvals", ["state"])',
         'op.alter_column("approvals", "reason", comment="why")',
         'op.execute("CREATE INDEX x ON approvals (state)")',
+        'op.add_column("approvals", sa.Column("note", sa.Text, nullable=False, server_default="x"))',
+        'op.alter_column("approvals", "reason", nullable=True)',
     ],
 )
 def test_an_expand_migration_may_add(tmp_path: Path, upgrade: str) -> None:
@@ -76,3 +91,15 @@ def test_every_migration_declares_its_phase(tmp_path: Path) -> None:
     path.write_text("def upgrade() -> None:\n    pass\n")
     assert "declare phase" in checker.check(path)[0]
     assert checker.check(migration(tmp_path, "sideways", "pass")) != []
+
+
+def test_a_table_created_in_the_same_migration_takes_any_rule(tmp_path: Path) -> None:
+    upgrade = (
+        'op.create_table("notes", sa.Column("id", sa.Text, nullable=False))\n'
+        '    op.create_index("notes_by_id", "notes", ["id"], unique=True)\n'
+        '    op.create_check_constraint("id_short", "notes", "length(id) < 10")\n'
+        '    op.add_column("notes", sa.Column("body", sa.Text, nullable=False))'
+    )
+    assert checker.check(migration(tmp_path, "expand", upgrade)) == []
+    on_another_table = upgrade + '\n    op.create_index("a", "approvals", ["client"], unique=True)'
+    assert len(checker.check(migration(tmp_path, "expand", on_another_table))) == 1

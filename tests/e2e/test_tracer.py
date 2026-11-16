@@ -20,6 +20,7 @@ from mcp.shared._httpx_utils import create_mcp_http_client
 
 from tests.e2e.conftest import (
     CLIENT,
+    E2E_TIMEOUT,
     HEADER,
     HOLD_EXPOSED,
     OTHER_CLIENT,
@@ -42,8 +43,10 @@ from tests.scripted_approvals import E, Script
 from tool_approvals.call_gate.core import UNAVAILABLE_TEXT, WAITING_TEXT
 from tool_approvals.call_gate.wait_tool import NOT_CONFIGURED_TEXT
 from tool_approvals.contract import approval_requests_pb2 as pb
+from tool_approvals.contract import ext_mcp_pb2 as ext_mcp_pb
+from tool_approvals.contract import ext_mcp_pb2_grpc as ext_mcp_grpc
 
-pytestmark = [pytest.mark.e2e, pytest.mark.asyncio(loop_scope="session")]
+pytestmark = [pytest.mark.e2e, pytest.mark.asyncio(loop_scope="session"), pytest.mark.timeout(E2E_TIMEOUT)]
 
 ALLOWED_PARAMS_KEYS: Final = {"name", "arguments", "_meta"}
 TASKS_EXTENSION: Final = "io.modelcontextprotocol/tasks"
@@ -192,6 +195,17 @@ async def test_without_approvals_ungated_calls_pass_and_gated_ones_say_unavailab
         assert [s.body["params"]["name"] for s in stack.stub.tool_calls()] == ["stub_hold"]
     finally:
         await stack.restart_approvals()
+
+
+async def test_the_guardrail_answers_only_agentgateways_token(stack: Stack) -> None:
+    # Every call in this module passes the guardrail, so agentgateway does send the token; nothing else may.
+    request = ext_mcp_pb.McpRequest(service_names=[STUB_SERVER], method="tools/call")
+    async with grpc.aio.insecure_channel(stack.callgate_guardrail) as channel:
+        stub = ext_mcp_grpc.ExtMcpStub(channel)
+        for metadata in ((), (("authorization", "Bearer wrong"),)):
+            with pytest.raises(grpc.aio.AioRpcError) as raised:
+                await stub.CheckRequest(request, metadata=metadata)
+            assert raised.value.code() == grpc.StatusCode.UNAUTHENTICATED
 
 
 async def test_readiness_never_depends_on_approvals(stack: Stack) -> None:
