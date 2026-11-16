@@ -69,6 +69,14 @@ included; there is no `failed` status. Planned (milestone 4): `tasks/cancel`; `t
 id can read that wait's outcome, as SEP-2663 allows. A leaked id cannot open a wait, answer or spend a yes: those
 still need the attested principal.
 
+**Turning Tasks off.** `wait.tasks: disabled` neither advertises nor serves the extension: a declaring client gets
+the held result, and `tasks/get` is an unknown method. Use it where clients cannot read a task back, such as the
+known limit below.
+
+**Known limit through agentgateway v1.7.0.** On protocol `2026-07-28` agentgateway v1.7.0 refuses a `tasks/get`
+without an `Mcp-Name` header, and the MCP Python SDK does not send one, so an SDK client behind agentgateway can
+open a Wait Task but not read it ([agentgateway](agentgateway.md)).
+
 **The gated call itself is never a task.** A gateway's hook judges one request; a task's follow-up requests
 (`tasks/*`) would not pass through it. So the gate rejects a gated call that declares Tasks (`task-requested`), and
 the agent makes the call again without asking for a task.
