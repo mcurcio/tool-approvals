@@ -4,9 +4,10 @@ One HTTP listener, one route at MCP_PATH multiplexing every tool server as a tar
 prefixed `<server>_`), agents authenticated by JWT. With a guardrail, the gate's `ext_mcp` hook is the last
 processor: fail closed, `tools/call` in the request phase, over TLS with the bearer, handed the JWT's `sub` as the
 principal, and never the agent's own `authorization` header (the gate reads no header; the agent's credential is
-not the gate's to see). The wait target gets a request timeout above the wait server's max_hold: agentgateway
-otherwise gives a held call 10 s to send response headers, and on the 2026-07-28 protocol the wait server sends
-nothing until the hold ends.
+not the gate's to see). v1.7.0's strict jwtAuth already removes that header once it has verified it; the filter
+holds whatever the route's authentication is. The wait target gets a request timeout above the wait server's
+max_hold: on the 2026-07-28 protocol the wait server sends nothing until a hold ends, and agentgateway answers a call
+that outlives the request timeout with HTTP 500 and JSON-RPC -32603 "failed to send message" (measured on v1.7.0).
 """
 
 from collections.abc import Mapping
