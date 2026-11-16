@@ -1,9 +1,9 @@
 """What the agent is told to do next after a wait report: the one home of the wait server's wording."""
 
-import json
 from typing import Final, assert_never
 
 from tool_approvals.kernel.requests import TicketError, TooManyWaits, WaitReport, WaitState
+from tool_approvals.kernel.wording import comment_sentence
 from tool_approvals.kernel.words import MAX_REASON_CHARS, MAX_WORK_REF_CHARS, WordsError
 from tool_approvals.wait.core.hold import WaitUnavailable
 
@@ -18,8 +18,7 @@ _STATES: Final = {
         "original call again to ask afresh."
     ),
     WaitState.USED: (
-        "The approval for this call was already used, so the call ran once already. Make the original call again "
-        "to ask for a new approval."
+        "The approval for this call was already used. Make the original call again to ask for a new approval."
     ),
     WaitState.CANCELLED: "This wait was cancelled. Wait again with the same ticket if you still need the answer.",
     WaitState.STILL_WAITING: (
@@ -47,17 +46,11 @@ NO_PRINCIPAL: Final = (
 )
 
 
-def _quoted(text: str) -> str:
-    """`text` as one JSON string literal: quoted and escaped, so a person's words can never read as the wait
-    server's own."""
-    return json.dumps(text, ensure_ascii=False)
-
-
 def next_step(report: WaitReport) -> str:
     """Plain words for the agent, per state: what happened and what to do next (the approver's comment, if any,
     as quoted text)."""
     if report.state is WaitState.REFUSED:
-        said = "They left no comment." if report.comment is None else f"Their comment: {_quoted(report.comment)}."
+        said = comment_sentence(report.comment)
         return f"A person refused the call. {said} Making the call again is refused while their answer stands."
     return _STATES[report.state]
 

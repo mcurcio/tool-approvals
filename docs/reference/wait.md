@@ -39,7 +39,7 @@ Without Tasks, the call is held open until the Approval has an outcome, for at m
 | `approved` | A person approved: make the original call again, exactly as before; it runs once |
 | `refused` | A person refused (their comment, if any, quoted); calling again is refused while their answer stands |
 | `expired` | No answer in time, or the yes was not used in time: call again to ask afresh |
-| `used` | The yes was already spent, so the call ran once already: call again to ask for a new approval |
+| `used` | The approval was already used: call again to ask for a new approval |
 | `still-waiting` | No answer yet and this wait has ended (`max_hold` passed, the server is stopping, or a newer wait on the same ticket replaced it): wait again with the same ticket |
 
 Each principal holds at most one live wait per ticket (a new one ends the old with `still-waiting`) and at most
