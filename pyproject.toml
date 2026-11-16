@@ -1,0 +1,238 @@
+[project]
+name = "tool-approvals"
+# The released version lives only in the git tag that semantic-release makes (.releaserc.json);
+# a build that needs it is handed the tag. This placeholder is never edited by hand.
+version = "0.0.0"
+description = "A human-approval guardrail for agent tool calls behind an MCP or HTTP gateway"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.13"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.170",
+    "import-linter>=2.16",
+    "mypy>=2.4",
+    "pytest>=9.2",
+    "pytest-timeout>=2.4",
+    "pytest-xdist>=3.8",
+    "ruff>=0.17.5",
+]
+
+[build-system]
+requires = ["uv_build>=0.13.5,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv]
+required-version = ">=0.13.5"
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "S", "PT", "PL", "C4", "PIE", "RET", "TID", "TC"]
+ignore = [
+    "PLR2004", # magic values in comparisons: tests compare against literals
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S603", "S607"]
+"scripts/**" = ["S603", "S607"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.mypy]
+strict = true
+python_version = "3.13"
+files = ["src", "tests", "scripts"]
+mypy_path = "src"
+warn_unreachable = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--strict-markers", "--strict-config", "-ra"]
+xfail_strict = true
+timeout = 60
+
+# Import contracts C1-C8: the module map's layering, enforced in CI by `lint-imports`.
+# IO (the I/O and wire libraries no core may import) is spelled out in C1 and C5-cores.
+[tool.importlinter]
+root_package = "tool_approvals"
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+id = "C1"
+name = "kernel imports nothing in tool_approvals and no I/O or wire library"
+type = "forbidden"
+source_modules = ["tool_approvals.kernel"]
+forbidden_modules = [
+    "tool_approvals.gate",
+    "tool_approvals.wait",
+    "tool_approvals.approvals",
+    "tool_approvals.contract",
+    "tool_approvals.config",
+    "tool_approvals.auth",
+    "tool_approvals.serving",
+    "tool_approvals.requests_client",
+    "tool_approvals.cli",
+    "grpc",
+    "google",
+    "mcp",
+    "mcp_types",
+    "sqlalchemy",
+    "psycopg",
+    "alembic",
+    "starlette",
+    "uvicorn",
+    "httpx",
+    "authlib",
+    "jinja2",
+    "pydantic",
+    "ruamel",
+    "envoy",
+    "xds",
+    "udpa",
+    "validate",
+]
+
+[[tool.importlinter.contracts]]
+id = "C2"
+name = "gate, wait and approvals are independent"
+type = "independence"
+modules = ["tool_approvals.gate", "tool_approvals.wait", "tool_approvals.approvals"]
+
+[[tool.importlinter.contracts]]
+id = "C3-gate"
+name = "gate: main > mappings | policy > core"
+type = "layers"
+containers = ["tool_approvals.gate"]
+layers = ["main", "mappings | policy", "core"]
+
+[[tool.importlinter.contracts]]
+id = "C3-wait"
+name = "wait: main > mcp > core"
+type = "layers"
+containers = ["tool_approvals.wait"]
+layers = ["main", "mcp", "core"]
+
+[[tool.importlinter.contracts]]
+id = "C3-approvals"
+name = "approvals: main > edges | infra > app > domain"
+type = "layers"
+containers = ["tool_approvals.approvals"]
+layers = ["main", "edges | infra", "app", "domain"]
+
+[[tool.importlinter.contracts]]
+id = "C4-layers"
+name = "shared packages: requests_client > serving | auth > config > contract | kernel"
+type = "layers"
+# tool_approvals.contract includes the generated wire packages beneath it.
+layers = [
+    "tool_approvals.requests_client",
+    "tool_approvals.serving | tool_approvals.auth",
+    "tool_approvals.config",
+    "tool_approvals.contract | tool_approvals.kernel",
+]
+
+[[tool.importlinter.contracts]]
+id = "C4-services"
+name = "no shared package imports a service"
+type = "forbidden"
+source_modules = [
+    "tool_approvals.requests_client",
+    "tool_approvals.serving",
+    "tool_approvals.auth",
+    "tool_approvals.config",
+    "tool_approvals.contract",
+    "tool_approvals.kernel",
+]
+forbidden_modules = [
+    "tool_approvals.gate",
+    "tool_approvals.wait",
+    "tool_approvals.approvals",
+    "tool_approvals.cli",
+]
+
+[[tool.importlinter.contracts]]
+id = "C5-cores"
+name = "the pure cores import no contract and no I/O or wire library"
+type = "forbidden"
+source_modules = [
+    "tool_approvals.gate.core",
+    "tool_approvals.wait.core",
+    "tool_approvals.approvals.domain",
+    "tool_approvals.approvals.app",
+]
+forbidden_modules = [
+    "tool_approvals.contract",
+    "grpc",
+    "google",
+    "mcp",
+    "mcp_types",
+    "sqlalchemy",
+    "psycopg",
+    "alembic",
+    "starlette",
+    "uvicorn",
+    "httpx",
+    "authlib",
+    "jinja2",
+    "pydantic",
+    "ruamel",
+    "envoy",
+    "xds",
+    "udpa",
+    "validate",
+]
+
+[[tool.importlinter.contracts]]
+id = "C5-store"
+name = "the store imports no contract"
+type = "forbidden"
+source_modules = ["tool_approvals.approvals.infra.store"]
+forbidden_modules = ["tool_approvals.contract"]
+
+[[tool.importlinter.contracts]]
+id = "C6"
+name = "only answers and the store reach the answer issuer"
+type = "protected"
+protected_modules = ["tool_approvals.approvals.domain.issuer"]
+allowed_importers = ["tool_approvals.approvals.app.answers", "tool_approvals.approvals.infra.store"]
+
+[[tool.importlinter.contracts]]
+id = "C7-protected"
+name = "only the answer surfaces and main reach app.answers"
+type = "protected"
+protected_modules = ["tool_approvals.approvals.app.answers"]
+allowed_importers = [
+    "tool_approvals.approvals.edges.desk",
+    "tool_approvals.approvals.edges.answers",
+    "tool_approvals.approvals.main",
+]
+
+[[tool.importlinter.contracts]]
+id = "C7-forbidden"
+name = "the agents' side reaches no answer path"
+type = "forbidden"
+source_modules = [
+    "tool_approvals.approvals.edges.requests",
+    "tool_approvals.approvals.app.requests",
+    "tool_approvals.approvals.app.waits",
+    "tool_approvals.approvals.infra.channels",
+]
+forbidden_modules = [
+    "tool_approvals.approvals.app.answers",
+    "tool_approvals.approvals.edges.desk",
+    "tool_approvals.approvals.edges.answers",
+]
+
+[[tool.importlinter.contracts]]
+id = "C8"
+name = "only the gate and wait composition roots reach the requests client"
+type = "protected"
+protected_modules = ["tool_approvals.requests_client"]
+allowed_importers = ["tool_approvals.gate.main", "tool_approvals.wait.main"]
