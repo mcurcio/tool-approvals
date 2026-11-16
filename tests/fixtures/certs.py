@@ -4,6 +4,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+import trustme
+
 
 @dataclass(frozen=True, slots=True)
 class TlsFiles:
@@ -14,4 +16,10 @@ class TlsFiles:
 
 def tls_files(directory: Path, hosts: Sequence[str]) -> TlsFiles:
     """Write a new CA and a server certificate for `hosts` under `directory`."""
-    raise NotImplementedError
+    ca = trustme.CA()
+    issued = ca.issue_cert(*hosts)
+    files = TlsFiles(ca=directory / "ca.pem", cert=directory / "cert.pem", key=directory / "key.pem")
+    ca.cert_pem.write_to_path(str(files.ca))
+    files.cert.write_bytes(b"".join(blob.bytes() for blob in issued.cert_chain_pems))
+    issued.private_key_pem.write_to_path(str(files.key))
+    return files
