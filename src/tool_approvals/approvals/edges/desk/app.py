@@ -161,7 +161,7 @@ class _Desk:
     async def login(self, request: Request) -> Response:
         ticket = _ticket(request.query_params.get("ticket", ""))
         sign_in = self._signed_in(request)
-        detail = None if sign_in is None else await self._answers.review(sign_in.groups, ticket)
+        detail = None if sign_in is None else await self._review(sign_in, ticket)
         if detail is AnswerError.UNKNOWN_TICKET:
             raise _refusal(detail)
         # Without a sign-in (or as one no approver of it), the requirement cannot be read: sign in plainly first.
@@ -281,8 +281,15 @@ class _Desk:
             sign_in_moment=sign_in.moment,
         )
 
+    async def _review(self, sign_in: SignIn, ticket: Ticket) -> ApprovalDetail | AnswerError:
+        """AnswerService.review, with the store's failure as the 503 page."""
+        try:
+            return await self._answers.review(sign_in.groups, ticket)
+        except StoreUnavailable as failed:
+            raise HTTPException(503, "The approval could not be read just now.") from failed
+
     async def _detail(self, sign_in: SignIn, ticket: Ticket) -> ApprovalDetail:
-        detail = await self._answers.review(sign_in.groups, ticket)
+        detail = await self._review(sign_in, ticket)
         if not isinstance(detail, ApprovalDetail):
             raise _refusal(detail)
         return detail

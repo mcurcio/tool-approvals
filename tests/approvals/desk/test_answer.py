@@ -13,6 +13,7 @@ from tests.approvals.desk.driver import answer_fields
 from tests.approvals.domain.examples import AGENT, SERVER, WAITER, call_ref
 from tests.fixtures.oidc_provider import hidden_fields
 from tool_approvals.approvals.app.answers import AnswerService, ApprovalDetail
+from tool_approvals.approvals.app.ports import StoreUnavailable
 from tool_approvals.approvals.edges.desk.app import CONTENT_SECURITY_POLICY, desk_app
 from tool_approvals.approvals.edges.desk.pages import visible
 from tool_approvals.config.views import IdpView
@@ -206,3 +207,21 @@ async def _signed_in_cookies(desk: Desk) -> dict[str, str]:
     person = desk.person()
     assert (await person.open(await desk.world.ticket())).status_code == 200
     return person.browser.cookies
+
+
+class _StoreDown(AnswerService):
+    async def review(self, viewer: frozenset[GroupRef], ticket: Ticket) -> ApprovalDetail | AnswerError:
+        raise StoreUnavailable("the database connection failed")
+
+
+async def test_a_store_that_cannot_answer_shows_the_try_again_page(desk: Desk) -> None:
+    down = _StoreDown(desk.world.uow, desk.world.rules, desk.world.surface)
+    app = desk_app(down, desk.view, IdpView(desk.idp.issuer, CLIENT_ID, "unused", "groups"), desk.world.rules.scale)
+    transport = httpx.ASGITransport(app, raise_app_exceptions=False)
+    cookies = await _signed_in_cookies(desk)
+    ticket = await desk.world.ticket(call_ref("/other"))
+    async with httpx.AsyncClient(transport=transport, base_url=DESK_URL, cookies=cookies) as http:
+        for path in (f"/approvals/{ticket}", f"/login?ticket={ticket}"):
+            response = await http.get(path)
+            assert (response.status_code, "Try again" in response.text) == (503, True), path
+            assert response.headers["content-security-policy"] == POLICY
