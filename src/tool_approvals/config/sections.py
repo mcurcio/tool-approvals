@@ -239,7 +239,7 @@ class ApprovalsListeners(Section):
 
 class Database(Section):
     dsn: Secret
-    lock_timeout: Duration = timedelta(seconds=5)
+    lock_timeout: Duration = timedelta(seconds=1)  # at most a quarter of gate.check_budget (config.checks)
 
 
 class Caps(Section):

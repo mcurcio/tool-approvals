@@ -12,6 +12,7 @@ from tests.approvals.edges.conftest import EDGE_RULES, Edge, serving_edge
 from tests.approvals.store.world import StoreWorld, holding, opened
 from tests.fixtures.certs import TlsFiles
 from tool_approvals.approvals.domain.answer import Verdict
+from tool_approvals.approvals.edges.requests import COMMIT_RESERVE
 from tool_approvals.approvals.infra.store.locks import LOCK_CLASS_PRINCIPAL
 from tool_approvals.kernel.calls import MAX_PARAMS_BYTES, RejectReason
 from tool_approvals.kernel.names import Principal, RequirementName, Ticket, WaitId
@@ -32,6 +33,7 @@ from tool_approvals.kernel.requests import (
 )
 from tool_approvals.kernel.words import MAX_REASON_CHARS, AgentWords, WordsError
 from tool_approvals.requests_client.client import RequestsClient
+from tool_approvals.serving.deadlines import within
 
 UNKNOWN = RequirementName("no-such-requirement")
 MALFORMED = replace(CALL_REF, params=b'{"name":')
@@ -183,3 +185,15 @@ async def test_a_store_that_does_not_answer_in_time_is_unavailable(dsn: str, edg
         with pytest.raises(RequestsUnavailable) as failed:
             await slow.hook.request(CALL_REF, HUMAN.name)
     assert _code(failed) is grpc.StatusCode.UNAVAILABLE
+
+
+async def test_a_claim_whose_deadline_leaves_no_time_to_commit_spends_nothing(edge: Edge) -> None:
+    ticket = await _ticket(edge)
+    await edge.world.answer(ticket, Verdict.APPROVE)
+    short = COMMIT_RESERVE / 2  # the caller stops waiting before a commit could be acknowledged
+    with within(short), pytest.raises(RequestsUnavailable) as refused:
+        await edge.hook.claim(CALL_REF, HUMAN.name)
+    assert _code(refused) is grpc.StatusCode.UNAVAILABLE  # Approvals refused it, before the caller's deadline
+    assert (await edge.world.row(ticket))["state"] == "approved"
+    with within(timedelta(seconds=5)):
+        assert await edge.hook.claim(CALL_REF, HUMAN.name) == Claimed()

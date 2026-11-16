@@ -185,7 +185,7 @@ gate:
 | Key | Meaning |
 |---|---|
 | `listeners.health` | `/healthz` and `/readyz` over plain HTTP ([operations](../operations.md#health-endpoints)) |
-| `check_budget` | The whole check (policy, claim, request) must finish within it, or the call is refused as `unavailable`. Must be below every `hook_timeout`. Default `5s` |
+| `check_budget` | The whole check (policy, claim, request) must finish within it, or the call is refused as `unavailable`. Must be below every `hook_timeout`. What is left of it is sent to Approvals as each call's gRPC deadline, and Approvals commits nothing (no yes is spent) once too little of it is left to answer in time. Default `5s` |
 | `approvals` | Approvals' requests listener as a gRPC target (`dns:///host:port`: every address the name resolves to is used in turn), the CA that signed its certificate (system roots when left out), and the gate's bearer |
 | `check_api` | The [Check API](check-api.md): `grpc`, `json`, or both. `exposed_wait_tool` is named in the refusal's words |
 | `ext_mcp` | The [agentgateway](agentgateway.md) hook. `principal_key`: the key in the processor's `metadata` that carries the principal. `hook_timeout`: the gateway's own timeout on the hook (agentgateway's default is 10 s) |
@@ -233,7 +233,7 @@ approvals: # `approvals migrate` reads only approvals.database
     health: { host: 0.0.0.0, port: 8081 }
   database:
     dsn: { file: /run/secrets/approvals-dsn } # postgresql://approvals@db.example.com/approvals, direct, no pooler
-    lock_timeout: 5s # default
+    lock_timeout: 1s # default; at most a quarter of gate.check_budget
   retention: 90d # default; at least the longest answer deadline
   caps:
     waiting_per_principal: 10 # default
@@ -255,7 +255,7 @@ approvals: # `approvals migrate` reads only approvals.database
 | `listeners.requests` | ApprovalRequests (gRPC), for the gate and the wait server only. Needs `tls` |
 | `listeners.approvers` | The [desk](desk.md), plain HTTP behind a TLS-terminating proxy that serves `public_url` |
 | `database.dsn` | Any libpq connection string, straight to Postgres with no pooler in between: Approvals holds a `LISTEN` connection and takes advisory locks ([operations](../operations.md#postgres)) |
-| `database.lock_timeout` | How long a unit of work waits for any lock (a principal's, a row's, the commit-order lock) before it fails and the request is refused as unavailable. Default `5s` |
+| `database.lock_timeout` | How long a unit of work waits for any lock (a principal's, a row's, the commit-order lock) before it fails and the request is refused as unavailable; never longer than what is left of the caller's deadline. At most a quarter of `gate.check_budget` when the file has both: one check can meet four lock waits in a row (claim's row and commit-order locks, then request's principal and commit-order locks). Default `1s` |
 | `retention` | An ended Approval (with its waits, answer and events) is deleted this long after it ended. At least the longest `answer_deadline`. Default `90d` |
 | `caps.waiting_per_principal` | Approvals one principal may have waiting; past it the gate answers `queue_full`. Default `10` |
 | `caps.live_waits_per_principal` | Open waits one principal may hold; past it a wait is refused. Default `10` |
@@ -279,6 +279,7 @@ Besides each value's grammar and the unknown-key and duplicate-key refusals:
 - `gate.check_budget` below every configured `hook_timeout`; every policy `require` and `default` a known
   requirement or `none`.
 - `approvals.desk.surface` a known surface; `approvals.retention` at least the longest `answer_deadline`.
+- `approvals.database.lock_timeout` at most a quarter of `gate.check_budget`, when the file has both sections.
 
 When a command starts it also checks that its sections are present and its secrets resolve (and that each desk key
 is at least 32 bytes). A change takes a restart; there is no reload.

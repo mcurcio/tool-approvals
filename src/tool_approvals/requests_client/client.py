@@ -32,6 +32,7 @@ from tool_approvals.kernel.requests import (
     WaitState,
 )
 from tool_approvals.kernel.words import AgentWords
+from tool_approvals.serving.deadlines import remaining
 
 # Every resolved address gets a subchannel and calls rotate over them; with the server's maximum connection age
 # the client re-resolves, so replicas added later take load.
@@ -41,7 +42,9 @@ _SERVICE_CONFIG: Final = json.dumps({"loadBalancingConfig": [{"round_robin": {}}
 class RequestsClient:
     """A channel to `dns:///` targets with round_robin, TLS, and the bearer sent per call. Every method raises
     `RequestsUnavailable` when no confirmed answer arrives (a transport error, an unexpected status, a reply kind
-    it does not know); none retries a call whose outcome is unknown."""
+    it does not know); none retries a call whose outcome is unknown. Request, Claim and OpenWait are sent with the
+    caller's remaining deadline (`serving.deadlines`) as their gRPC timeout, so Approvals knows how long the
+    caller still waits and commits nothing it would not hear back about."""
 
     def __init__(self, channel: grpc.aio.Channel) -> None:
         self._channel: Final = channel
@@ -64,7 +67,7 @@ class RequestsClient:
     async def request(self, call: CallRef, requirement: RequirementName) -> RequestResult:
         try:
             reply = await self._stub.Request(
-                requests_pb2.RequestRequest(call=call_ref_message(call), requirement=requirement)
+                requests_pb2.RequestRequest(call=call_ref_message(call), requirement=requirement), timeout=_timeout()
             )
             return request_result(reply)
         except (grpc.aio.AioRpcError, UnknownReply) as failed:
@@ -73,7 +76,7 @@ class RequestsClient:
     async def claim(self, call: CallRef, requirement: RequirementName) -> ClaimResult:
         try:
             reply = await self._stub.Claim(
-                requests_pb2.ClaimRequest(call=call_ref_message(call), requirement=requirement)
+                requests_pb2.ClaimRequest(call=call_ref_message(call), requirement=requirement), timeout=_timeout()
             )
             return claim_result(reply)
         except (grpc.aio.AioRpcError, UnknownReply) as failed:
@@ -86,7 +89,7 @@ class RequestsClient:
         if words is not None and words.work_ref is not None:
             message.work_ref = words.work_ref
         try:
-            return open_wait_result(await self._stub.OpenWait(message))
+            return open_wait_result(await self._stub.OpenWait(message, timeout=_timeout()))
         except (grpc.aio.AioRpcError, UnknownReply) as failed:
             raise RequestsUnavailable(f"open_wait: {_why(failed)}") from failed
 
@@ -115,6 +118,12 @@ class RequestsClient:
                 stream.cancel()
             if not delivered:
                 raise RequestsUnavailable("await_outcome: the stream ended without a report")
+
+
+def _timeout() -> float | None:
+    """The caller's remaining deadline in seconds (none left: zero, which gRPC refuses at once); None without one."""
+    left = remaining()
+    return None if left is None else max(0.0, left.total_seconds())
 
 
 def _why(failed: Exception) -> str:

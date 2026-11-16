@@ -112,7 +112,7 @@ approvals: # `approvals migrate` reads only approvals.database
     health: { host: 0.0.0.0, port: 8081 }
   database:
     dsn: { file: /run/secrets/approvals-dsn } # postgresql://approvals@db.example.com/approvals, direct, no pooler
-    lock_timeout: 5s # default
+    lock_timeout: 1s # default; at most a quarter of gate.check_budget
   retention: 90d # default; at least the longest answer deadline
   caps:
     waiting_per_principal: 10 # default

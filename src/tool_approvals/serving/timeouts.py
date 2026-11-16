@@ -7,17 +7,20 @@ from datetime import timedelta
 from typing import Literal
 
 from tool_approvals.kernel.timeouts import Stopped, StopSignal, TimedOut
+from tool_approvals.serving.deadlines import within
 
 
 class AsyncioTimeouts:
-    """Satisfies `tool_approvals.kernel.timeouts.Timeouts` on the running asyncio loop."""
+    """Satisfies `tool_approvals.kernel.timeouts.Timeouts` on the running asyncio loop. The limit is also the
+    work's deadline (`serving.deadlines`), so a remote call inside it is sent with what is left."""
 
     async def run[T](
         self, limit: timedelta | None, work: Callable[[], Awaitable[T]], stop: StopSignal | None = None
     ) -> T | TimedOut | Stopped:
         if stop is not None and stop.is_set():
             return Stopped()
-        task: asyncio.Future[T] = asyncio.ensure_future(work())
+        with within(limit):  # the task copies the context it is created in, deadline included
+            task: asyncio.Future[T] = asyncio.ensure_future(work())
         stopping: asyncio.Future[Literal[True]] | None = None if stop is None else asyncio.ensure_future(stop.wait())
         racers: list[asyncio.Future[T] | asyncio.Future[Literal[True]]] = (
             [task] if stopping is None else [task, stopping]

@@ -2,7 +2,9 @@
 under the EVENTS lock.
 
 An attempt's transaction sets `lock_timeout` first, so every lock it waits on (the principal's, a row's, EVENTS)
-gives up in time. Its commit flushes the changed aggregates (each UPDATE conditional on the version read), then,
+gives up in time: the configured value, or less when the caller's deadline (`serving.deadlines`) leaves less, set
+again before the commit's own lock waits. Past that deadline an attempt neither starts nor commits
+(StoreUnavailable). Its commit flushes the changed aggregates (each UPDATE conditional on the version read), then,
 under the EVENTS lock, inserts the drained events, sends a NOTIFY per touched ticket (delivered only when the
 transaction commits) and commits.
 """
@@ -38,6 +40,7 @@ from tool_approvals.approvals.infra.store.tables import (
     waits,
 )
 from tool_approvals.kernel.names import Fingerprint, Principal, Ticket
+from tool_approvals.serving.deadlines import remaining
 
 _LIVE: Final = (State.WAITING, State.APPROVED)
 _CLOCK: Final = select(func.clock_timestamp())
@@ -45,22 +48,39 @@ _NOTIFY: Final = text("SELECT pg_notify(:channel, ticket) FROM unnest(CAST(:tick
 
 
 def sql_unit_of_work(engine: AsyncEngine, lock_timeout: timedelta) -> UnitOfWorkFactory:
-    """A factory of units of work on `engine`; a lock wait past `lock_timeout` raises StoreUnavailable."""
+    """A factory of units of work on `engine`; a lock wait past `lock_timeout`, or past the caller's deadline,
+    raises StoreUnavailable."""
     sessions = async_sessionmaker(engine, sync_session_class=StoreSession, expire_on_commit=False)
-    timeout = f"{max(1, int(lock_timeout.total_seconds() * 1000))}ms"
 
     @asynccontextmanager
     async def unit_of_work(by: Actor) -> AsyncIterator[UnitOfWork]:
         # Closing the session ends its transaction: rolled back unless committed.
         async with sessions() as session:
             with _translated():
-                await session.execute(select(func.set_config("lock_timeout", timeout, True)))
+                await _limit_lock_waits(session, lock_timeout)
                 now = await _clock(session)
-            unit = _SqlUnitOfWork(session, by, now)
+            unit = _SqlUnitOfWork(session, by, now, lock_timeout)
             session.info[STAMP] = unit
             yield unit
 
     return unit_of_work
+
+
+async def _limit_lock_waits(session: AsyncSession, lock_timeout: timedelta) -> None:
+    """Set the transaction's lock_timeout to `lock_timeout`, or to the caller's remaining deadline if shorter;
+    StoreUnavailable once that deadline has passed."""
+    _deadline_not_passed()
+    left = remaining()
+    limit = lock_timeout if left is None else min(lock_timeout, left)
+    # Whole milliseconds, at least one: lock_timeout 0 would mean no limit at all.
+    timeout = f"{max(1, int(limit.total_seconds() * 1000))}ms"
+    await session.execute(select(func.set_config("lock_timeout", timeout, True)))
+
+
+def _deadline_not_passed() -> None:
+    left = remaining()
+    if left is not None and left <= timedelta(0):
+        raise StoreUnavailable("the caller's deadline has passed: nothing is committed")
 
 
 async def _clock(session: AsyncSession) -> datetime:
@@ -105,10 +125,11 @@ def _translated() -> Iterator[None]:
 class _SqlUnitOfWork:
     """Satisfies `UnitOfWork` and the mapping's `Stamp` (who and when its flushes write)."""
 
-    def __init__(self, session: AsyncSession, by: Actor, now: datetime) -> None:
+    def __init__(self, session: AsyncSession, by: Actor, now: datetime, lock_timeout: timedelta) -> None:
         self._session = session
         self._by = by
         self._now = now
+        self._lock_timeout = lock_timeout
         self._approvals = _SqlApprovals(session)
 
     @property
@@ -132,6 +153,8 @@ class _SqlUnitOfWork:
     @_translating
     async def commit(self) -> None:
         session = self._session
+        if remaining() is not None:
+            await _limit_lock_waits(session, self._lock_timeout)  # the row and EVENTS waits get only what is left
         await session.flush()
         deleted: set[Ticket] = session.info.get(DELETED, set())
         loaded = [
@@ -150,6 +173,7 @@ class _SqlUnitOfWork:
         changed: set[Ticket] = session.info.get(CHANGED, set())
         if changed:
             await session.execute(_NOTIFY, {"channel": NOTIFY_CHANNEL, "tickets": sorted(changed)})
+        _deadline_not_passed()  # a caller that has stopped waiting never has a yes spent for it
         await session.commit()
         for approval in loaded:
             approval.events.clear()

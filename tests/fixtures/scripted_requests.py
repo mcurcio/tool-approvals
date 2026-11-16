@@ -49,6 +49,8 @@ class Script:
     delay: timedelta = timedelta(0)  # before every answer
     calls: list[tuple[str, object]] = field(default_factory=list)  # (method, the kernel-typed arguments)
     drops: dict[WaitId, int] = field(default_factory=dict)
+    # Each unary call's gRPC time remaining as it arrived (None: sent without a deadline), in order.
+    deadlines: list[float | None] = field(default_factory=list)
 
 
 def scripted_requests(script: Script, tls: TlsFiles, bearer: str) -> AbstractAsyncContextManager[RequestsClientView]:
@@ -89,10 +91,12 @@ class _Scripted(requests_pb2_grpc.ApprovalRequestsServiceServicer):
 
     async def Request(self, request: requests_pb2.RequestRequest, context: _Context) -> requests_pb2.RequestResponse:
         self._script.calls.append(("request", (call_ref(request.call), RequirementName(request.requirement))))
+        self._script.deadlines.append(context.time_remaining())
         return request_response(await self._next(self._script.request, context))
 
     async def Claim(self, request: requests_pb2.ClaimRequest, context: _Context) -> requests_pb2.ClaimResponse:
         self._script.calls.append(("claim", (call_ref(request.call), RequirementName(request.requirement))))
+        self._script.deadlines.append(context.time_remaining())
         return claim_response(await self._next(self._script.claim, context))
 
     async def OpenWait(self, request: requests_pb2.OpenWaitRequest, context: _Context) -> requests_pb2.OpenWaitResponse:
@@ -100,6 +104,7 @@ class _Scripted(requests_pb2_grpc.ApprovalRequestsServiceServicer):
         work_ref = request.work_ref if request.HasField("work_ref") else None
         words = None if reason is None and work_ref is None else AgentWords(reason, work_ref)
         self._script.calls.append(("open_wait", (Principal(request.principal), Ticket(request.ticket), words)))
+        self._script.deadlines.append(context.time_remaining())
         return open_wait_response(await self._next(self._script.open_wait, context))
 
     async def AwaitOutcome(

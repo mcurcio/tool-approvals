@@ -7,7 +7,7 @@ needs `requirements`.
 
 from collections import Counter
 from collections.abc import Iterator
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from tool_approvals.config.sections import NO_APPROVAL, Listener
 from tool_approvals.kernel.names import AssuranceName
@@ -15,6 +15,12 @@ from tool_approvals.kernel.requirements import meets_floor
 
 if TYPE_CHECKING:
     from tool_approvals.config.file import ConfigFile
+
+# The lock waits one check can meet in a row, each bounded by approvals.database.lock_timeout: Claim's row lock and
+# EVENTS lock, then Request's principal lock and EVENTS lock. All of them must fit in gate.check_budget, so a slow
+# lock is refused by Approvals as unavailable (and logged there as a lock wait) well before the gate's budget runs
+# out mid-commit.
+LOCK_WAITS_PER_CHECK: Final = 4
 
 
 def problems(cfg: "ConfigFile") -> list[str]:
@@ -27,6 +33,7 @@ def problems(cfg: "ConfigFile") -> list[str]:
         *_listeners(cfg),
         *_gate(cfg),
         *_approvals(cfg),
+        *_lock_waits(cfg),
     ]
 
 
@@ -145,3 +152,14 @@ def _approvals(cfg: "ConfigFile") -> Iterator[str]:
     deadlines = [section.answer_deadline for section in (cfg.requirements or {}).values()]
     if deadlines and approvals.retention < max(deadlines):
         yield "approvals.retention: below the longest answer deadline"
+
+
+def _lock_waits(cfg: "ConfigFile") -> Iterator[str]:
+    """approvals.database.lock_timeout well below gate.check_budget, when the file configures both."""
+    if cfg.gate is None or cfg.approvals is None:
+        return
+    if cfg.approvals.database.lock_timeout * LOCK_WAITS_PER_CHECK > cfg.gate.check_budget:
+        yield (
+            f"approvals.database.lock_timeout: more than 1/{LOCK_WAITS_PER_CHECK} of gate.check_budget "
+            f"({LOCK_WAITS_PER_CHECK} lock waits in a row must fit in one check)"
+        )

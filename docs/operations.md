@@ -63,6 +63,9 @@ create tables in it (`approvals migrate` creates the schema).
 - Every connection sets TCP keepalives and `idle_in_transaction_session_timeout` (30 s), so a stalled holder
   cannot keep a lock; a unit of work that waits longer than `approvals.database.lock_timeout` for a lock is refused
   as unavailable, and the agent's call with it.
+- Deadlines nest: the gate sends what is left of `gate.check_budget` as each call's gRPC deadline, and Approvals
+  waits on no lock past it and commits nothing once less than 250 ms of it is left, so a yes is never spent for a
+  check that has already given up.
 - All deadlines and sign-in ages are judged by the database's clock.
 - An ended Approval is deleted `approvals.retention` after it ended (default 90 days). Longer audit is yours to
   keep: there is no audit export yet (planned, milestone 3).

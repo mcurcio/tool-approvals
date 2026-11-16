@@ -174,6 +174,26 @@ async def test_a_caller_deadline_cancels_a_slow_answer(scripted: Scripted) -> No
     assert outcome == TimedOut()
 
 
+async def test_request_claim_and_open_wait_carry_the_callers_remaining_deadline(scripted: Scripted) -> None:
+    scripted.script.request.append(QueueFull())
+    scripted.script.claim.append(NotApproved())
+    scripted.script.open_wait.append(TooManyWaits())
+
+    async def each() -> None:
+        await scripted.client.claim(CALL, REQUIREMENT)
+        await scripted.client.request(CALL, REQUIREMENT)
+        await scripted.client.open_wait(Principal("agent-1"), Ticket("t"), None)
+
+    assert await AsyncioTimeouts().run(timedelta(seconds=4), each) is None
+    assert len(scripted.script.deadlines) == 3
+    for left in scripted.script.deadlines:
+        assert left is not None
+        assert 0 < left <= 4
+    scripted.script.claim.append(NotApproved())
+    await scripted.client.claim(CALL, REQUIREMENT)  # no deadline around it: sent without one
+    assert scripted.script.deadlines[-1] is None
+
+
 async def test_a_wrong_bearer_is_unavailable(tls: TlsFiles, bearer: str) -> None:
     script = Script(request=[QueueFull()])
     async with scripted_requests(script, tls, bearer) as view:

@@ -97,6 +97,11 @@ def test_refused(case: Mapping[str, Any], tmp_path: Path) -> None:
         assert text in problem
 
 
+def test_a_lock_timeout_of_a_quarter_of_the_check_budget_passes(tmp_path: Path) -> None:
+    case = {"set": {"approvals.database.lock_timeout": "2s", "gate.check_budget": "8s"}}
+    load(_write(tmp_path, _edit(_yaml().load(EXAMPLE), case)))
+
+
 def test_a_duplicate_key_is_refused_with_its_line(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
     path.write_text(EXAMPLE.read_text().replace("version: 1\n", "version: 1\nversion: 1\n", 1))

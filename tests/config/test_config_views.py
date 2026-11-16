@@ -106,7 +106,7 @@ def _approvals_document(tmp_path: Path) -> Any:
 def test_the_approvals_view_resolves_its_secrets_and_kernel_values(tmp_path: Path) -> None:
     view = approvals_view(load(_write(tmp_path, _approvals_document(tmp_path))), {"IDP_SECRET": "idp-secret"})
     assert view.database.dsn == "postgresql://approvals@db.example.com/approvals"  # one trailing newline dropped
-    assert view.database.lock_timeout == timedelta(seconds=5)
+    assert view.database.lock_timeout == timedelta(seconds=1)
     assert view.idp.client_secret == "idp-secret"  # noqa: S105 - a test value
     assert view.idp.groups_claim == "groups"
     assert view.desk.session_key == SESSION_KEY

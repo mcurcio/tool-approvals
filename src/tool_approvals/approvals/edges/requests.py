@@ -1,6 +1,8 @@
 """ApprovalRequests over gRPC: the agents' side of Approvals, behind registry authentication (GrpcAuth)."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
+from contextlib import contextmanager
+from datetime import timedelta
 from typing import Any, Final, NoReturn
 
 import grpc
@@ -21,14 +23,20 @@ from tool_approvals.contract_mapping.requests import (
 from tool_approvals.kernel.names import CallerName, Principal, RequirementName, Ticket, WaitId, is_ticket, is_wait_id
 from tool_approvals.kernel.requests import TicketError, WaitReport, WaitState
 from tool_approvals.kernel.words import AgentWords, WordsError
+from tool_approvals.serving.deadlines import within
 
 _UNKNOWN_WAIT: Final = WaitReport(WaitState.UNKNOWN_WAIT, comment=None, opened_at=None, updated_at=None, ttl=None)
 _NUL: Final = "\x00"
+# Kept back from the caller's gRPC deadline: the time a commit's acknowledgement and the reply need to reach the
+# caller. A unit of work commits nothing once the rest of the deadline has passed, so a caller that has stopped
+# waiting never has a yes spent (or a ticket or wait made) on its behalf.
+COMMIT_RESERVE: Final = timedelta(milliseconds=250)
 
 
 class RequestsServicer(requests_pb2_grpc.ApprovalRequestsServiceServicer):
     """Translates the wire to the use cases and back, passing `current_caller`'s name as `via`. A use case's
-    StoreUnavailable is the status UNAVAILABLE."""
+    StoreUnavailable is the status UNAVAILABLE. Request, Claim and OpenWait run within the caller's deadline less
+    COMMIT_RESERVE (`serving.deadlines`): past it the unit of work waits on no lock and commits nothing."""
 
     def __init__(self, requests: RequestService, waits: WaitService) -> None:
         self._requests = requests
@@ -40,7 +48,10 @@ class RequestsServicer(requests_pb2_grpc.ApprovalRequestsServiceServicer):
         context: grpc.aio.ServicerContext[requests_pb2.RequestRequest, requests_pb2.RequestResponse],
     ) -> requests_pb2.RequestResponse:
         try:
-            result = await self._requests.request(call_ref(request.call), RequirementName(request.requirement), _via())
+            with _caller_deadline(context):
+                result = await self._requests.request(
+                    call_ref(request.call), RequirementName(request.requirement), _via()
+                )
         except StoreUnavailable as failed:
             await _unavailable(context, failed)
         return request_response(result)
@@ -51,7 +62,10 @@ class RequestsServicer(requests_pb2_grpc.ApprovalRequestsServiceServicer):
         context: grpc.aio.ServicerContext[requests_pb2.ClaimRequest, requests_pb2.ClaimResponse],
     ) -> requests_pb2.ClaimResponse:
         try:
-            result = await self._requests.claim(call_ref(request.call), RequirementName(request.requirement), _via())
+            with _caller_deadline(context):
+                result = await self._requests.claim(
+                    call_ref(request.call), RequirementName(request.requirement), _via()
+                )
         except StoreUnavailable as failed:
             await _unavailable(context, failed)
         return claim_response(result)
@@ -74,9 +88,10 @@ class RequestsServicer(requests_pb2_grpc.ApprovalRequestsServiceServicer):
             return open_wait_response(TicketError.NOT_YOUR_TICKET)
         no_words = words.reason is None and words.work_ref is None
         try:
-            result = await self._waits.open_wait(
-                Principal(request.principal), Ticket(request.ticket), None if no_words else words, _via()
-            )
+            with _caller_deadline(context):
+                result = await self._waits.open_wait(
+                    Principal(request.principal), Ticket(request.ticket), None if no_words else words, _via()
+                )
         except StoreUnavailable as failed:
             await _unavailable(context, failed)
         return open_wait_response(result)
@@ -94,6 +109,14 @@ class RequestsServicer(requests_pb2_grpc.ApprovalRequestsServiceServicer):
                 yield await_outcome_response(report)
         except StoreUnavailable as failed:
             await _unavailable(context, failed)
+
+
+@contextmanager
+def _caller_deadline(context: grpc.aio.ServicerContext[Any, Any]) -> Iterator[None]:
+    """The block within the caller's deadline less COMMIT_RESERVE; without a deadline, none."""
+    left = context.time_remaining()
+    with within(None if left is None else timedelta(seconds=left) - COMMIT_RESERVE):
+        yield
 
 
 def _via() -> CallerName:
