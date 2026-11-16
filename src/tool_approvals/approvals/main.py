@@ -59,7 +59,7 @@ async def serve_until(view: ApprovalsView, stopping: asyncio.Event) -> int:
         feed = PgChangeFeed(view.database.dsn)
         requests = RequestService(uow, new_ticket, rules)
         waits = WaitService(uow, new_wait_id, feed, rules)
-        waker = DeadlineWaker(uow, feed, rules, AsyncioTimeouts())
+        waker = DeadlineWaker(uow, feed, rules, AsyncioTimeouts(), view.database.lock_timeout)
         desk = desk_app(AnswerService(uow, rules, view.desk.surface), view.desk, view.idp, view.scale)
         server = grpc_server(view.requests, [GrpcAuth(Registry(view.registry), REQUESTS_METHODS)])
         requests_pb2_grpc.add_ApprovalRequestsServiceServicer_to_server(RequestsServicer(requests, waits), server)

@@ -3,7 +3,9 @@ the principal lock and the EVENTS lock settle."""
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable
+from datetime import timedelta
 
+import psycopg
 import pytest
 
 from tests.approvals.domain.examples import AGENT, APPROVER, CALL_REF, DESK, HOOK, HUMAN, OTHER_AGENT, WAITER, call_ref
@@ -193,3 +195,27 @@ async def test_the_waker_skips_a_row_a_writer_holds(world: StoreWorld) -> None:
             assert await world.waker._pass_due() == 0  # skipped, not waited on
         await writer.commit()
     assert await world.waker._pass_due() == 1
+
+
+async def test_the_waker_looks_again_after_a_holder_of_a_due_row_rolls_back(dsn: str, world: StoreWorld) -> None:
+    """A holder that rolls back commits nothing and so notifies nothing: the waker, which skipped the row, must not
+    sleep until some unrelated change."""
+    short = StoreWorld(dsn, world.engine, lock_timeout=timedelta(milliseconds=500))
+    ticket = await short.ticket()
+    await short.age(ticket)
+    async with await psycopg.AsyncConnection.connect(dsn) as holder, running_feed(short.feed):
+        await holder.execute("SELECT 1 FROM approvals WHERE ticket = %s FOR NO KEY UPDATE", (ticket,))
+        stop = asyncio.Event()
+        waker = asyncio.create_task(short.waker.run(stop))
+        try:
+            await asyncio.sleep(0.3)  # the waker has looked, skipped the held row, and gone to sleep
+            assert (await short.row(ticket))["state"] == "waiting"
+            await holder.rollback()  # no commit, no NOTIFY
+
+            async def expired() -> bool:
+                return bool((await short.row(ticket))["state"] == "expired")
+
+            await eventually(expired, timedelta(seconds=3))
+        finally:
+            stop.set()
+            await waker

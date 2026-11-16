@@ -15,11 +15,16 @@ _NOTHING_DUE: Final = timedelta(0)
 
 
 class DeadlineWaker:
-    def __init__(self, uow: UnitOfWorkFactory, feed: ChangeFeed, rules: Rules, timeouts: Timeouts) -> None:
+    def __init__(
+        self, uow: UnitOfWorkFactory, feed: ChangeFeed, rules: Rules, timeouts: Timeouts, locked_retry: timedelta
+    ) -> None:
+        """`locked_retry`: how long to sleep at most when what is due is locked by another unit of work, which may
+        roll back and so commit (and notify) nothing; Approvals passes its lock_timeout."""
         self._uow = uow
         self._feed = feed
         self._rules = rules
         self._timeouts = timeouts
+        self._locked_retry = locked_retry
 
     async def run(self, stop: StopSignal) -> None:
         """Until `stop`: pass every due Approval's deadlines, then sleep until the next due moment (database time,
@@ -34,8 +39,9 @@ class DeadlineWaker:
                     if sleep is not None and sleep <= _NOTHING_DUE:
                         if passed:
                             continue
-                        # Due, yet none came back: another unit of work holds them (SKIP LOCKED). Its commit wakes us.
-                        sleep = None
+                        # Due, yet none came back: another unit of work holds them (SKIP LOCKED). Its commit wakes
+                        # us; a rollback sends nothing, so look again after locked_retry at the latest.
+                        sleep = self._locked_retry
                     woken = await self._timeouts.run(sleep, lambda: _changed(changes), stop)
                     if isinstance(woken, Stopped):
                         return

@@ -18,6 +18,7 @@ from tool_approvals.kernel.requests import WaitState
 from tool_approvals.kernel.timeouts import Stopped, StopSignal, TimedOut
 
 T1 = Ticket("ticket-1")
+LOCKED_RETRY = timedelta(seconds=1)
 
 
 class SteppedTimeouts:
@@ -69,7 +70,9 @@ async def asleep(timeouts: SteppedTimeouts, store: MemoryStore) -> timedelta | N
 async def test_the_waker_ends_what_is_due_sleeps_until_the_next_and_wakes_on_a_change() -> None:
     world = World()
     store, timeouts, stop = world.store, SteppedTimeouts(), asyncio.Event()
-    waker = asyncio.create_task(DeadlineWaker(store.unit_of_work, store.feed, world.rules, timeouts).run(stop))
+    waker = asyncio.create_task(
+        DeadlineWaker(store.unit_of_work, store.feed, world.rules, timeouts, LOCKED_RETRY).run(stop)
+    )
     assert await asleep(timeouts, store) is None  # nothing is due at all
 
     await world.requests.request(CALL_REF, HUMAN.name, HOOK)  # a change wakes it
@@ -107,7 +110,9 @@ async def test_the_waker_passes_a_backlog_in_batches_and_subscribes_again_when_t
     for n in range(3):
         await world.requests.request(call_ref(f"/{n}"), HUMAN.name, HOOK)
     store.clock += HUMAN.answer_deadline
-    waker = asyncio.create_task(DeadlineWaker(store.unit_of_work, store.feed, world.rules, timeouts).run(stop))
+    waker = asyncio.create_task(
+        DeadlineWaker(store.unit_of_work, store.feed, world.rules, timeouts, LOCKED_RETRY).run(stop)
+    )
     assert await asleep(timeouts, store) == RETENTION
     assert [approval.state for approval in map(store.stored, sorted(store.tickets())) if approval] == [
         State.EXPIRED

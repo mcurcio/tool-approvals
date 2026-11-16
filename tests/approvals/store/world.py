@@ -142,7 +142,7 @@ class StoreWorld:
         self.requests = RequestService(uow, new_ticket, self.rules)
         self.waits = WaitService(uow, new_wait_id, self.feed, self.rules)
         self.answers = AnswerService(uow, self.rules, self.surface)
-        self.waker = DeadlineWaker(uow, self.feed, self.rules, AsyncioTimeouts())
+        self.waker = DeadlineWaker(uow, self.feed, self.rules, AsyncioTimeouts(), self.lock_timeout)
 
     def with_rules(self, **changes: Any) -> "StoreWorld":
         return StoreWorld(self.dsn, self.engine, replace(self.rules, **changes), self.surface, self.lock_timeout)
