@@ -1,15 +1,64 @@
 """The e2e stack (compose): Postgres, migrate, Approvals, gate and wait from this commit's image, agentgateway,
-Envoy and the echo tool; the scripted IdP on the host. What S1.7's tracer and conformance cases drive."""
+Envoy and the echo tool; the scripted IdP on the host. What S1.7's tracer and conformance cases drive.
 
-from collections.abc import Mapping
-from contextlib import AbstractAsyncContextManager
+`stack(tmp)` renders every file the containers read into `tmp` (one service configuration, a test CA and its
+certificate, the registry's bearers, the agents' key set, both gateway configurations), runs compose.yaml as its
+own project and tears it down. The gateways reach the gate's hooks through host relays (`SlowRelay`), so
+`GateControl.slow` can hold the gate's answers back. The image is $TOOL_APPROVALS_E2E_IMAGE, never pulled.
+"""
+
+import asyncio
+import json
+import os
+import secrets
+import sys
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Final, Literal, Protocol
+
+import httpx
+import psycopg
 
 from tests.conformance.gateways import GatewayUnderTest
+from tests.e2e import agentgateway, envoy
+from tests.e2e.agents import AUDIENCE, ISSUER, AgentKeys
+from tests.e2e.clients import HttpMcpGateway
+from tests.e2e.relay import SlowRelay
+from tests.e2e.wiring import AgentJwt, Hook, WaitTarget
+from tests.fixtures.certs import tls_files
 from tests.fixtures.echo_tool import EchoTool
+from tests.fixtures.ports import free_port
+from tool_approvals.auth.registry import issue_bearer
+from tool_approvals.config.methods import Method
+
+IMAGE_ENV: Final = "TOOL_APPROVALS_E2E_IMAGE"
+COMPOSE_FILE: Final = Path(__file__).with_name("compose.yaml")
+TOOL_SERVERS: Final = ("files", "notes")  # echo tool routes behind both gateways
+WAIT_SERVER: Final = "approvals-wait"  # wait_route.server
+PRINCIPAL_HEADER: Final = "x-approvals-principal"
+PRINCIPAL_KEY: Final = "principal"  # gate.ext_mcp.principal_key
+SERVER_KEY: Final = "server"  # gate.ext_authz.server_key
+EXT_AUTHZ_TIMEOUT: Final = timedelta(seconds=70)  # gate.ext_authz.hook_timeout, and Envoy's raised timeout
+REQUIREMENT: Final = "reviewed"
+GATED_TOOL: Final = "delete_file"  # on `files`, the one call the policy sends for approval
+DESK_SURFACE: Final = "desk"
+IDP_CLIENT_ID: Final = "approvals-desk"
+APPROVER_GROUP: Final = "approvers"
+# The container side of every port the compose file names.
+GATE_CHECK_JSON_PORT: Final = 8443
+GATE_EXT_MCP_PORT: Final = 9444
+GATE_EXT_AUTHZ_PORT: Final = 9445
+WAIT_MCP_PORT: Final = 8443
+APPROVALS_REQUESTS_PORT: Final = 9443
+APPROVALS_DESK_PORT: Final = 8080
+HEALTH_PORT: Final = 8081
+ECHO_PORT: Final = 8080
+POSTGRES_PORT: Final = 5432
+_HOSTS: Final = ("gate", "wait", "approvals", "host.docker.internal", "localhost", "127.0.0.1")
+_READY_TIMEOUT_S: Final = 60.0
 
 
 class DeskDriver(Protocol):
@@ -56,6 +105,378 @@ class Stack:
     gate: GateControl
 
 
+class ComposeError(RuntimeError):
+    pass
+
+
+class Compose:
+    """compose.yaml as one project of its own."""
+
+    def __init__(self, directory: Path, image: str, desk_port: int) -> None:
+        self.project = f"ta-e2e-{secrets.token_hex(4)}"
+        self._env = {**os.environ, IMAGE_ENV: image, "E2E_DIR": str(directory), "DESK_PORT": str(desk_port)}
+
+    async def run(self, *args: str) -> str:
+        """`docker compose <args>`'s output; ComposeError (with the output) on a non-zero exit."""
+        command = ("docker", "compose", "--project-name", self.project, "--file", str(COMPOSE_FILE), *args)
+        process = await asyncio.create_subprocess_exec(
+            *command, env=self._env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
+        )
+        output, _ = await process.communicate()
+        text = output.decode(errors="replace")
+        if process.returncode != 0:
+            raise ComposeError(f"docker compose {' '.join(args)} exited {process.returncode}:\n{text}")
+        return text
+
+    async def up(self, *services: str) -> None:
+        """Start `services` (every service when none is named) and wait until each is healthy or running."""
+        await self.run("up", "--detach", "--wait", "--wait-timeout", str(int(_READY_TIMEOUT_S)), *services)
+
+    async def port(self, service: str, container_port: int) -> int:
+        published = (await self.run("port", service, str(container_port))).strip()
+        return int(published.rpartition(":")[2])
+
+    async def logs(self) -> str:
+        try:
+            return await self.run("logs", "--no-color", "--tail", "100")
+        except ComposeError as failed:
+            return str(failed)
+
+    async def down(self) -> None:
+        await self.run("down", "--volumes", "--remove-orphans", "--timeout", "2")
+
+
+@dataclass(frozen=True, slots=True)
+class Rendered:
+    directory: Path  # E2E_DIR
+    records: Path  # the echo tool's record directory
+    agents: AgentKeys
+    gate_hook_bearer: str  # the gateways' bearer to the gate's hooks
+    check_api_bearer: str
+    postgres_password: str
+    desk_port: int  # where the desk is published on the host (its public URL)
+
+
+def render(
+    tmp: Path,
+    *,
+    guardrails: bool,
+    ext_mcp: tuple[str, int] = ("gate", GATE_EXT_MCP_PORT),
+    ext_authz: tuple[str, int] = ("gate", GATE_EXT_AUTHZ_PORT),
+    idp_port: int | None = None,
+) -> Rendered:
+    """Write E2E_DIR under `tmp`. `guardrails` False renders gateways that route straight to the tool servers;
+    `ext_mcp` and `ext_authz` are where the gateways dial the gate's hooks (a relay, or the gate itself)."""
+    directory = tmp / "e2e"
+    mounted, records = directory / "mounted", directory / "records"
+    tls_dir, secret_dir = mounted / "tls", mounted / "secrets"
+    for made in (mounted, tls_dir, secret_dir, records):
+        made.mkdir(parents=True)
+    tls_files(tls_dir, _HOSTS)
+    agents = AgentKeys()
+    agents.write_jwks(mounted / "jwks.json")
+
+    callers = {
+        "gateway-hook": (Method.CHECK,),  # both gateways' hook calls into the gate
+        "check-client": (Method.CHECK,),  # a plain HTTP Check API caller
+        "gate": (Method.REQUEST, Method.CLAIM),
+        "wait-server": (Method.OPEN_WAIT, Method.AWAIT_OUTCOME),
+        "gateway-wait-route": (Method.WAIT_CALL,),
+    }
+    bearers: dict[str, str] = {}
+    registry = []
+    for name, grants in callers.items():
+        bearer, sha256_hex = issue_bearer()
+        bearers[name] = bearer
+        registry.append(
+            {"name": name, "kind": "caller", "credential": {"bearer_sha256": sha256_hex}, "grants": list(grants)}
+        )
+    postgres_password = secrets.token_urlsafe(24)
+    desk_port = free_port()
+    secret_values = {
+        "postgres-password": postgres_password,
+        "approvals-dsn": f"postgresql://approvals:{postgres_password}@postgres:{POSTGRES_PORT}/approvals",
+        "gate-approvals-bearer": bearers["gate"],
+        "wait-approvals-bearer": bearers["wait-server"],
+        "idp-client-secret": secrets.token_urlsafe(24),
+        "desk-session-key": secrets.token_urlsafe(32),
+        "desk-form-key": secrets.token_urlsafe(32),
+    }
+    for name, value in secret_values.items():
+        (secret_dir / name).write_text(value)
+
+    service_config = _service_config(registry, idp_port or free_port(), desk_port)
+    (mounted / "config.yaml").write_text(json.dumps(service_config, indent=2))
+    agents_jwt = AgentJwt(issuer=ISSUER, audience=AUDIENCE, jwks_file="/e2e/jwks.json")
+    ca = "/e2e/tls/ca.pem"
+    hook_bearer = bearers["gateway-hook"]
+    agw = agentgateway.config(
+        servers={name: f"http://echo:{ECHO_PORT}{envoy.mcp_path(name)}" for name in TOOL_SERVERS},
+        agents=agents_jwt,
+        guardrail=(Hook(*ext_mcp, ca_file=ca, bearer=hook_bearer), PRINCIPAL_KEY) if guardrails else None,
+        wait=(
+            WaitTarget(WAIT_SERVER, f"https://wait:{WAIT_MCP_PORT}/mcp", ca, bearers["gateway-wait-route"])
+            if guardrails
+            else None
+        ),
+    )
+    (mounted / "agentgateway.yaml").write_text(json.dumps(agw, indent=2))
+    env = envoy.config(
+        servers=dict.fromkeys(TOOL_SERVERS, ("echo", ECHO_PORT)),
+        agents=agents_jwt,
+        guardrail=(Hook(*ext_authz, ca_file=ca, bearer=hook_bearer), EXT_AUTHZ_TIMEOUT, SERVER_KEY)
+        if guardrails
+        else None,
+    )
+    (mounted / "envoy.json").write_text(json.dumps(env, indent=2))
+
+    # The containers run as other users: everything readable, the record directory writable.
+    for path in mounted.rglob("*"):
+        path.chmod(0o755 if path.is_dir() else 0o644)
+    mounted.chmod(0o755)
+    directory.chmod(0o755)
+    records.chmod(0o777)
+    return Rendered(
+        directory=directory,
+        records=records,
+        agents=agents,
+        gate_hook_bearer=hook_bearer,
+        check_api_bearer=bearers["check-client"],
+        postgres_password=postgres_password,
+        desk_port=desk_port,
+    )
+
+
+def _service_config(registry: Sequence[Mapping[str, object]], idp_port: int, desk_port: int) -> dict[str, object]:
+    """The one configuration file every tool-approvals container reads (paths as the containers see them)."""
+    tls = {"cert": "/e2e/tls/cert.pem", "key": "/e2e/tls/key.pem"}
+    health = {"host": "0.0.0.0", "port": HEALTH_PORT}  # noqa: S104 (inside its container)
+
+    def listener(port: int) -> dict[str, object]:
+        return {"host": "0.0.0.0", "port": port, "tls": tls}  # noqa: S104 (inside its container)
+
+    def secret(name: str) -> dict[str, str]:
+        return {"file": f"/e2e/secrets/{name}"}
+
+    exposed_wait_tool = agentgateway.tool_name(WAIT_SERVER, "approval_wait")
+    return {
+        "version": 1,
+        "registry": list(registry),
+        "assurance": [{"name": "password", "acr": ["1"]}, {"name": "passkey", "acr": ["2"]}],
+        "floor": {"min_assurance": "passkey", "max_sign_in_age": "5m"},
+        "requirements": {
+            REQUIREMENT: {
+                "approver_groups": [{"claim": "groups", "value": APPROVER_GROUP}],
+                "allowed_surfaces": [DESK_SURFACE],
+                "min_assurance": "passkey",
+                "max_sign_in_age": "5m",
+                "answer_deadline": "1h",
+                "use_window": "15m",
+            }
+        },
+        "surfaces": [{"name": DESK_SURFACE, "kind": "native", "cap": "passkey", "binds_digest": True}],
+        "wait_route": {"server": WAIT_SERVER, "principal_header": PRINCIPAL_HEADER},
+        "gate": {
+            "listeners": {"health": health},
+            "approvals": {
+                "address": f"dns:///approvals:{APPROVALS_REQUESTS_PORT}",
+                "ca": "/e2e/tls/ca.pem",
+                "credential": secret("gate-approvals-bearer"),
+            },
+            "check_api": {"json": listener(GATE_CHECK_JSON_PORT), "exposed_wait_tool": exposed_wait_tool},
+            "ext_mcp": {
+                "listener": listener(GATE_EXT_MCP_PORT),
+                "principal_key": PRINCIPAL_KEY,
+                "exposed_wait_tool": exposed_wait_tool,
+            },
+            "ext_authz": {
+                "listener": listener(GATE_EXT_AUTHZ_PORT),
+                "hook_timeout": f"{int(EXT_AUTHZ_TIMEOUT.total_seconds())}s",
+                "principal_path": [envoy.JWT_FILTER, envoy.JWT_PAYLOAD_KEY, "sub"],
+                "server_key": SERVER_KEY,
+                "exposed_wait_tool": exposed_wait_tool,
+            },
+            "policy": {
+                "kind": "rules",
+                "rules": [{"server": "files", "tool": GATED_TOOL, "require": REQUIREMENT}],
+                "default": "none",
+            },
+        },
+        "wait": {
+            "listeners": {"mcp": listener(WAIT_MCP_PORT), "health": health},
+            "approvals": {
+                "address": f"dns:///approvals:{APPROVALS_REQUESTS_PORT}",
+                "ca": "/e2e/tls/ca.pem",
+                "credential": secret("wait-approvals-bearer"),
+            },
+        },
+        "approvals": {
+            "listeners": {
+                "requests": listener(APPROVALS_REQUESTS_PORT),
+                "approvers": {"host": "0.0.0.0", "port": APPROVALS_DESK_PORT},  # noqa: S104 (inside its container)
+                "health": health,
+            },
+            "database": {"dsn": secret("approvals-dsn")},
+            "idp": {
+                "issuer": f"http://host.docker.internal:{idp_port}",
+                "client_id": IDP_CLIENT_ID,
+                "client_secret": secret("idp-client-secret"),
+            },
+            "desk": {
+                "surface": DESK_SURFACE,
+                "public_url": f"http://127.0.0.1:{desk_port}",
+                "session_key": secret("desk-session-key"),
+                "form_key": secret("desk-form-key"),
+            },
+        },
+    }
+
+
+def image() -> str:
+    """The image built from this commit; the e2e tests are skipped without it (tests/e2e/conftest.py)."""
+    return os.environ[IMAGE_ENV]
+
+
+@asynccontextmanager
+async def project(rendered: Rendered) -> AsyncIterator[Compose]:
+    """compose.yaml over `rendered`, torn down on exit; its logs on stderr when the block fails."""
+    compose = Compose(rendered.directory, image(), rendered.desk_port)
+    try:
+        yield compose
+    except BaseException:
+        print(await compose.logs(), file=sys.stderr)
+        raise
+    finally:
+        await compose.down()
+
+
+async def gateways(compose: Compose, rendered: Rendered, echo: EchoTool) -> dict[str, GatewayUnderTest]:
+    """Both gateways, once each reports ready: agentgateway multiplexes every server on one route, Envoy routes
+    each server's own path."""
+    agw_port = await compose.port("agentgateway", agentgateway.PORT)
+    envoy_port = await compose.port("envoy", envoy.PORT)
+    await _ready(
+        f"http://127.0.0.1:{await compose.port('agentgateway', agentgateway.READINESS_PORT)}"
+        f"{agentgateway.READINESS_PATH}"
+    )
+    await _ready(f"http://127.0.0.1:{await compose.port('envoy', envoy.ADMIN_PORT)}{envoy.READINESS_PATH}")
+    return {
+        "agentgateway": HttpMcpGateway(
+            "agentgateway",
+            url_of=lambda _server: f"http://127.0.0.1:{agw_port}{agentgateway.MCP_PATH}",
+            tool_of=agentgateway.tool_name,
+            raw_server=TOOL_SERVERS[0],
+            agents=rendered.agents,
+            echo=echo,
+        ),
+        "envoy": HttpMcpGateway(
+            "envoy",
+            url_of=lambda server: f"http://127.0.0.1:{envoy_port}{envoy.mcp_path(server)}",
+            tool_of=lambda _server, tool: tool,
+            raw_server=TOOL_SERVERS[0],
+            agents=rendered.agents,
+            echo=echo,
+        ),
+    }
+
+
+async def _ready(url: str) -> None:
+    """Until `url` answers 200: the gateway images carry no tool a compose healthcheck could run."""
+    async with httpx.AsyncClient(timeout=2.0) as http, asyncio.timeout(_READY_TIMEOUT_S):
+        while True:
+            try:
+                if (await http.get(url)).status_code == 200:
+                    return
+            except httpx.TransportError:
+                pass
+            await asyncio.sleep(0.1)
+
+
+class _PostgresStore:
+    def __init__(self, port: int, password: str) -> None:
+        self._dsn = f"postgresql://approvals:{password}@127.0.0.1:{port}/approvals"
+
+    async def approval(self, ticket: str) -> StoredApproval | None:
+        async with await psycopg.AsyncConnection.connect(self._dsn) as connection:
+            cursor = await connection.execute(
+                "SELECT ticket, principal, server, tool, arguments_json, state::text FROM approvals WHERE ticket = %s",
+                (ticket,),
+            )
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return StoredApproval(row[0], row[1], row[2], row[3], bytes(row[4]), row[5])
+
+
+class _GateControl:
+    def __init__(self, compose: Compose, relays: Sequence[SlowRelay], ports: dict[int, int]) -> None:
+        self._compose = compose
+        self._relays = relays
+        self._ports = ports  # the gate's container port to its published port, refreshed on each start
+
+    async def refresh(self) -> None:
+        for container_port in list(self._ports):
+            self._ports[container_port] = await self._compose.port("gate", container_port)
+
+    async def stop(self) -> None:
+        await self._compose.run("stop", "--timeout", "2", "gate")
+
+    async def start(self) -> None:
+        await self._compose.up("gate")
+        await self.refresh()  # a restarted container may be published on new ports
+
+    async def slow(self, delay: timedelta | None) -> None:
+        for relay in self._relays:
+            relay.slow(delay)
+
+
+class _DeskAwaitingIdp:
+    async def answer(
+        self, ticket: str, verdict: Literal["approve", "refuse"], *, acr: str, comment: str | None = None
+    ) -> int:
+        raise NotImplementedError(
+            "the desk driver signs in through S1.6's scripted IdP (tests/fixtures/oidc_provider.py)"
+        )
+
+
+def _published_gate(published: Mapping[int, int], container_port: int) -> Callable[[], tuple[str, int]]:
+    return lambda: ("127.0.0.1", published[container_port])
+
+
+@asynccontextmanager
+async def _stack(tmp: Path) -> AsyncIterator[Stack]:
+    published = {GATE_EXT_MCP_PORT: 0, GATE_EXT_AUTHZ_PORT: 0}  # filled in once the gate runs
+    relays = {port: SlowRelay(_published_gate(published, port)) for port in published}
+    relay_ports = {port: free_port() for port in published}
+    rendered = render(
+        tmp,
+        guardrails=True,
+        ext_mcp=("host.docker.internal", relay_ports[GATE_EXT_MCP_PORT]),
+        ext_authz=("host.docker.internal", relay_ports[GATE_EXT_AUTHZ_PORT]),
+    )
+    echo = EchoTool(rendered.records)
+    for port, relay in relays.items():
+        await relay.start(relay_ports[port])
+    try:
+        async with project(rendered) as compose:
+            await compose.up("postgres", "migrate", "approvals", "gate", "wait", "echo")
+            control = _GateControl(compose, list(relays.values()), published)
+            await control.refresh()
+            await compose.up("agentgateway", "envoy")
+            yield Stack(
+                gateways=await gateways(compose, rendered, echo),
+                check_api_url=f"https://127.0.0.1:{await compose.port('gate', GATE_CHECK_JSON_PORT)}/v1/check",
+                check_api_bearer=rendered.check_api_bearer,
+                echo=echo,
+                desk=_DeskAwaitingIdp(),
+                store=_PostgresStore(await compose.port("postgres", POSTGRES_PORT), rendered.postgres_password),
+                gate=control,
+            )
+    finally:
+        for relay in relays.values():
+            await relay.close()
+
+
 def stack(tmp: Path) -> AbstractAsyncContextManager[Stack]:
     """Start the stack (images built from this commit), yield it, tear it down."""
-    raise NotImplementedError
+    return _stack(tmp)
