@@ -3,6 +3,10 @@
 The caller is the client header agentgateway set through the guardrail (``Pass(client)`` for the wait
 server), never anything the agent sends. Failures are ``isError`` text results whose text says what to do
 next; a final outcome is a structured result whose text repeats ``next_step``.
+
+``initialize`` and ``tools/list`` need no bearer, so the tool-list check lists the tool from the release env
+alone; ``tools/call`` needs ``APPROVAL_WAIT_MCP_TOKEN`` (else 401) and, until every runtime setting is
+present, fails closed with an error result.
 """
 
 import asyncio
@@ -18,8 +22,8 @@ from starlette.requests import Request
 
 from tool_approvals.call_gate.core import UNAVAILABLE_TEXT, refused_text
 from tool_approvals.call_gate.ports import ApprovalsPort, ApprovalsUnavailable, Outcome, WaitError
-from tool_approvals.call_gate.settings import CallGateSettings
-from tool_approvals.mcp_serving import stateless_mcp_app
+from tool_approvals.call_gate.settings import ApprovalWaitSettings
+from tool_approvals.mcp_serving import bearer_matches, stateless_mcp_app
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Mapping
@@ -48,6 +52,9 @@ DESCRIPTION: Final = (
     "and a one-line reason (and optionally a work_ref, such as an issue or PR). Returns when the human "
     "answers, the request expires, or the server restarts; follow next_step."
 )
+# Additive: a wait records the agent's words on its own request and changes nothing else.
+ANNOTATIONS: Final = types.ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=True)
+NOT_CONFIGURED_TEXT: Final = "This wait server is missing its runtime settings, so no wait can run."
 _STOPPING_STATE: Final = "wait_tool_stopping"
 
 type WaitState = Literal["approved", "refused", "expired", "used", "still_waiting"]
@@ -96,17 +103,20 @@ def _final(outcome: Outcome) -> types.CallToolResult:
 
 
 class _WaitTool:
-    def __init__(self, port: ApprovalsPort, settings: CallGateSettings, stopping: asyncio.Event) -> None:
+    def __init__(
+        self, port: ApprovalsPort | None, settings: ApprovalWaitSettings, stopping: asyncio.Event
+    ) -> None:
         self._port = port
         self._settings = settings
         self._stopping = stopping
 
     def tool(self) -> types.Tool:
         return types.Tool(
-            name=self._settings.wait_tool,
+            name=self._settings.tool,
             description=DESCRIPTION,
             input_schema=INPUT_SCHEMA,
             output_schema=OUTPUT_SCHEMA,
+            annotations=ANNOTATIONS,
         )
 
     async def list_tools(
@@ -117,39 +127,41 @@ class _WaitTool:
     async def call_tool(
         self, ctx: ServerRequestContext[Any], params: types.CallToolRequestParams
     ) -> types.CallToolResult:
-        if params.name != self._settings.wait_tool:
+        runtime, port, request = self._settings.runtime, self._port, ctx.request
+        if runtime is None or port is None:
+            return _error(NOT_CONFIGURED_TEXT)
+        # The HTTP layer already answered 401 without the bearer; this holds even if the two ever disagree.
+        if not (isinstance(request, Request) and bearer_matches(request.headers, runtime.mcp_token)):
+            return _error("Unauthorized.")
+        if params.name != self._settings.tool:
             return _error(f"Unknown tool {params.name!r}.")
         arguments: Mapping[str, Any] = params.arguments or {}
         problem = jsonschema.exceptions.best_match(_INPUT_VALIDATOR.iter_errors(arguments))
         if problem is not None:
             return _error(f"Invalid arguments: {problem.message}. Call again with valid arguments.")
-        request = ctx.request
-        client = request.headers.get(self._settings.client_header) if isinstance(request, Request) else None
+        client = request.headers.get(self._settings.client_header)
         if not client:
             return _error("The gateway did not name the caller; this wait cannot run.")
         ticket: str = arguments["ticket"]
         try:
-            error = await self._port.add_words(
-                client, ticket, arguments.get("reason"), arguments.get("work_ref")
-            )
+            error = await port.add_words(client, ticket, arguments.get("reason"), arguments.get("work_ref"))
             if error is not None:
                 return _wait_error(error, ticket)
-            return await self._until_final(client, ticket)
+            return await self._until_final(port, client, ticket)
         except ApprovalsUnavailable:
-            again = self._settings.wait_tool_exposed_name
-            return _error(f'{UNAVAILABLE_TEXT}: call {again} again with ticket "{ticket}".')
+            return _error(f'{UNAVAILABLE_TEXT}: call this tool again with ticket "{ticket}".')
 
-    async def _first_final(self, client: str, ticket: str) -> Outcome | WaitError:
+    async def _first_final(self, port: ApprovalsPort, client: str, ticket: str) -> Outcome | WaitError:
         # The port's iterator is an async generator; closing it cancels its gRPC stream at once.
-        outcomes = cast("AsyncGenerator[Outcome | WaitError]", self._port.await_outcome(client, ticket))
+        outcomes = cast("AsyncGenerator[Outcome | WaitError]", port.await_outcome(client, ticket))
         async with aclosing(outcomes):
             async for outcome in outcomes:
                 if not (isinstance(outcome, Outcome) and outcome.state == "waiting"):
                     return outcome
         raise ApprovalsUnavailable("the outcome stream ended without a final outcome")
 
-    async def _until_final(self, client: str, ticket: str) -> types.CallToolResult:
-        final = asyncio.ensure_future(self._first_final(client, ticket))
+    async def _until_final(self, port: ApprovalsPort, client: str, ticket: str) -> types.CallToolResult:
+        final = asyncio.ensure_future(self._first_final(port, client, ticket))
         stopping = asyncio.ensure_future(self._stopping.wait())
         try:
             await asyncio.wait((final, stopping), return_when=asyncio.FIRST_COMPLETED)
@@ -160,10 +172,7 @@ class _WaitTool:
                     with suppress(asyncio.CancelledError):
                         await task
         if not final.done() or final.cancelled():
-            step = (
-                f"Still waiting for a human answer. Call {self._settings.wait_tool_exposed_name} again "
-                f'with ticket "{ticket}".'
-            )
+            step = f'Still waiting for a human answer. Call this tool again with ticket "{ticket}".'
             return _result("still_waiting", None, step)
         outcome = final.result()
         if isinstance(outcome, WaitError):
@@ -171,11 +180,12 @@ class _WaitTool:
         return _final(outcome)
 
 
-def build_wait_app(port: ApprovalsPort, settings: CallGateSettings) -> Starlette:
+def build_wait_app(port: ApprovalsPort | None, settings: ApprovalWaitSettings) -> Starlette:
+    """The wait server; ``port`` is None while the runtime settings are missing (every call then fails)."""
     stopping = asyncio.Event()
     tool = _WaitTool(port, settings, stopping)
-    server: Server[Any] = Server("call-gate", on_list_tools=tool.list_tools, on_call_tool=tool.call_tool)
-    app = stateless_mcp_app(server, settings.mcp_token)
+    server: Server[Any] = Server("approval-wait", on_list_tools=tool.list_tools, on_call_tool=tool.call_tool)
+    app = stateless_mcp_app(server, call_token=settings.mcp_token)
     setattr(app.state, _STOPPING_STATE, stopping)
     return app
 

@@ -1,4 +1,4 @@
-"""The T2 tracer against real agentgateway v1.7.0 (interfaces page, T2 acceptance).
+"""The T2 tracer against real agentgateway v1.7.0 (interfaces page, T2 and T2b acceptance).
 
 Each test scripts the Approvals answers it needs; the scripted server and the stub record what reached them.
 """
@@ -28,14 +28,19 @@ from tests.e2e.conftest import (
     STUB_SERVER,
     STUB_TOOL,
     WAIT_EXPOSED,
+    WAIT_RELEASE_ENV,
+    WAIT_TOOL,
     Stack,
     docker,
+    env_args,
     published,
+    read_only,
     run_call_gate,
     wait_serving,
 )
 from tests.scripted_approvals import E, Script
 from tool_approvals.call_gate.core import UNAVAILABLE_TEXT, WAITING_TEXT
+from tool_approvals.call_gate.wait_tool import NOT_CONFIGURED_TEXT
 from tool_approvals.contract import approval_requests_pb2 as pb
 
 pytestmark = [pytest.mark.e2e, pytest.mark.asyncio(loop_scope="session")]
@@ -43,6 +48,15 @@ pytestmark = [pytest.mark.e2e, pytest.mark.asyncio(loop_scope="session")]
 ALLOWED_PARAMS_KEYS: Final = {"name", "arguments", "_meta"}
 TASKS_EXTENSION: Final = "io.modelcontextprotocol/tasks"
 LISTENERS: Final = ("iac", "bare")
+# Past agentgateway's 10 s to response headers and the MCP SDK's 15 s before it sends them.
+LONG_HOLD_SECONDS: Final = int(os.environ.get("E2E_LONG_WAIT_SECONDS", "20"))
+STUB_RAN: Final = "Nothing changed (stub). Headers seen: "
+RUNTIME_PLACEHOLDER: Final = "http://runtime-placeholder.invalid"  # iac's tool-list check
+WAIT_RUNTIME_ENV: Final = (
+    "APPROVAL_WAIT_APPROVALS_TOKEN",
+    "APPROVAL_WAIT_APPROVALS_URL",
+    "APPROVAL_WAIT_MCP_TOKEN",
+)
 
 
 def client_for(url: str, headers: dict[str, str]) -> Client:
@@ -67,6 +81,12 @@ async def call(
 
 def text(result: types.CallToolResult) -> str:
     return "".join(c.text for c in result.content if isinstance(c, types.TextContent))
+
+
+def stub_saw_no_client_header(result: types.CallToolResult) -> bool:
+    reported = text(result)
+    assert reported.startswith(STUB_RAN), reported
+    return HEADER not in reported[len(STUB_RAN) : -1].split(", ")
 
 
 def seen(script: Script, name: str) -> list[Any]:
@@ -128,7 +148,7 @@ async def test_the_wait_releases_on_the_outcome_and_the_repeat_runs(stack: Stack
     ]
     stack.script.claim.append(pb.ClaimReply(claimed=E))
     repeat = await call(stack, STUB_EXPOSED, {"text": "hello"})
-    assert text(repeat) == "Nothing changed (stub). Client header seen: false."
+    assert stub_saw_no_client_header(repeat)
     assert len(stack.stub.tool_calls()) == 1
 
 
@@ -148,7 +168,7 @@ async def test_a_spoofed_client_header_on_a_wait_call_does_not_win(stack: Stack,
 async def test_a_spoofed_client_header_never_reaches_the_stub(stack: Stack, listener: str) -> None:
     stack.script.claim.append(pb.ClaimReply(claimed=E))
     result = await call(stack, STUB_EXPOSED, {"text": "x"}, listener=listener, extra={HEADER: OTHER_CLIENT})
-    assert text(result) == "Nothing changed (stub). Client header seen: false."
+    assert stub_saw_no_client_header(result)
     stack.script.claim.append(pb.ClaimReply(claimed=E))
     ungated = await call(stack, HOLD_EXPOSED, {"seconds": 1}, listener=listener, extra={HEADER: OTHER_CLIENT})
     assert not ungated.is_error
@@ -179,7 +199,7 @@ async def test_readiness_never_depends_on_approvals(stack: Stack) -> None:
     stack.containers.append(name)
     await run_call_gate(
         image_name=stack.image, name=name, network=stack.network, alias=name,
-        approvals_address="host.docker.internal:1", mcp_token="unused",
+        approvals_url="http://host.docker.internal:1",
     )  # fmt: skip
     address = f"127.0.0.1:{await published(name, 9000)}"
     assert await wait_serving(address, READINESS_SERVICE) == health_pb2.HealthCheckResponse.SERVING
@@ -291,25 +311,29 @@ async def test_claude_code_params(stack: Stack, tmp_path: Any) -> None:
         )
 
 
-@pytest.mark.skipif(not os.environ.get("E2E_LONG_WAIT_SECONDS"), reason="manual: set E2E_LONG_WAIT_SECONDS")
-async def test_a_long_wait_returns(stack: Stack) -> None:
-    seconds = float(os.environ["E2E_LONG_WAIT_SECONDS"])
+async def test_held_calls_outlive_the_header_windows_on_both_holding_targets(stack: Stack) -> None:
+    """A wait and a stub hold, each past agentgateway's 10 s and the SDK's 15 s (erratum
+    E-ta-t4-wait-cut-at-10s): both return through the gateway."""
+    assert LONG_HOLD_SECONDS >= 20
     stack.script.add_words.append(pb.AddWordsReply(accepted=E))
     stack.script.streams.append(([pb.OutcomeEvent(waiting=E), None, pb.OutcomeEvent(approved=E)], "hang"))
+    holding = asyncio.create_task(call(stack, HOLD_EXPOSED, {"seconds": LONG_HOLD_SECONDS}))
     waiting = asyncio.create_task(call(stack, WAIT_EXPOSED, {"ticket": "tk-long"}))
     await stack.script.subscribed.wait()
-    await asyncio.sleep(seconds)
-    assert not waiting.done()
+    await asyncio.sleep(LONG_HOLD_SECONDS)
+    assert not waiting.done(), waiting.exception()
     stack.script.release.set()
     result = await waiting
-    assert result.structured_content is not None
+    assert result.structured_content is not None, text(result)
     assert result.structured_content["state"] == "approved"
+    held = await holding
+    assert text(held) == f"Held {LONG_HOLD_SECONDS} seconds (stub). Nothing changed."
 
 
 async def test_the_image_refuses_to_start_without_its_settings(stack: Stack) -> None:
-    for command in ("call-gate", "stub-tool"):
+    for command in ("call-gate", "approval-wait", "stub-tool"):
         process = await asyncio.create_subprocess_exec(
-            "docker", "run", "--rm", stack.image, command,
+            "docker", "run", "--rm", *read_only(stack.image), command,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
         )  # fmt: skip
         out, _ = await process.communicate()
@@ -317,24 +341,69 @@ async def test_the_image_refuses_to_start_without_its_settings(stack: Stack) -> 
         assert b"ValidationError" in out
 
 
-async def test_the_image_serves_the_stub(stack: Stack) -> None:
-    name = f"ta-stub-{secrets.token_hex(4)}"
+async def start_mcp_image(stack: Stack, command: str, env: dict[str, str]) -> str:
+    """The image's ``command``, read-only as uid 65532 with only ``env``; its MCP URL once it answers."""
+    name = f"ta-{command}-{secrets.token_hex(4)}"
     stack.containers.append(name)
     await docker(
-        "run", "-d", "--name", name, "-p", "127.0.0.1::8080",
-        "-e", "STUB_TOOL_MCP_TOKEN=image-token", "-e", f"STUB_TOOL_NAME={STUB_TOOL}",
-        "-e", f"STUB_TOOL_CLIENT_HEADER={HEADER}", stack.image, "stub-tool",
+        "run", "-d", "--name", name, "-p", "127.0.0.1::8080", *env_args(env), *read_only(stack.image), command
     )  # fmt: skip
-    base = f"http://127.0.0.1:{await published(name, 8080)}"
+    url = f"http://127.0.0.1:{await published(name, 8080)}/mcp"
     async with httpx.AsyncClient() as http, asyncio.timeout(30):
-        while True:
+        while True:  # a container announces nothing to the host; ask until it answers (any status)
             try:
-                health = await http.get(f"{base}/healthz")
-                break
+                await http.post(url, json={})
+                return url
             except httpx.TransportError:
                 await asyncio.sleep(0.2)
-        assert health.status_code == 200
-        assert (await http.post(f"{base}/mcp", json={})).status_code == 401
-    async with client_for(f"{base}/mcp", {"authorization": "Bearer image-token"}) as client:
+
+
+def effect(tool: types.Tool) -> str:
+    """iac's ``ToolEffect.from_annotations``: only real booleans count."""
+    hints = tool.annotations
+    if hints is not None and hints.read_only_hint is True:
+        return "read"
+    if hints is not None and hints.destructive_hint is False:
+        return "additive"
+    return "destructive"
+
+
+async def listed_without_a_bearer(url: str) -> dict[str, str]:
+    async with client_for(url, {}) as client:
+        return {t.name: effect(t) for t in (await client.list_tools()).tools}
+
+
+async def test_the_tool_list_check_procedure_lists_each_server(stack: Stack) -> None:
+    """iac's tool-list check: release env only, then each runtime variable set to the placeholder."""
+    placeholders = dict.fromkeys(WAIT_RUNTIME_ENV, RUNTIME_PLACEHOLDER)
+    for env in (WAIT_RELEASE_ENV, {**WAIT_RELEASE_ENV, **placeholders}):
+        assert await listed_without_a_bearer(await start_mcp_image(stack, "approval-wait", env)) == {
+            WAIT_TOOL: "additive"
+        }
+    stub_url = await start_mcp_image(stack, "stub-tool", {"STUB_TOOL_NAME": STUB_TOOL})
+    assert await listed_without_a_bearer(stub_url) == {STUB_TOOL: "destructive", "stub_hold": "read"}
+
+
+async def test_the_wait_image_refuses_a_call_without_the_bearer(stack: Stack) -> None:
+    placeholders = dict.fromkeys(WAIT_RUNTIME_ENV, RUNTIME_PLACEHOLDER)
+    url = await start_mcp_image(stack, "approval-wait", {**WAIT_RELEASE_ENV, **placeholders})
+    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": WAIT_TOOL, "arguments": {}}}
+    async with httpx.AsyncClient() as http:
+        response = await http.post(
+            url, json=body, headers={"accept": "application/json, text/event-stream", HEADER: CLIENT}
+        )
+    assert response.status_code == 401
+    release_only = await start_mcp_image(stack, "approval-wait", WAIT_RELEASE_ENV)
+    async with client_for(release_only, {"authorization": "Bearer any", HEADER: CLIENT}) as client:
+        result = await client.call_tool(WAIT_TOOL, {"ticket": "tk"})
+    assert result.is_error
+    assert text(result) == NOT_CONFIGURED_TEXT
+
+
+async def test_the_image_serves_the_stub_without_auth(stack: Stack) -> None:
+    url = await start_mcp_image(stack, "stub-tool", {"STUB_TOOL_NAME": STUB_TOOL})
+    async with httpx.AsyncClient() as http:
+        assert (await http.get(url.removesuffix("/mcp") + "/healthz")).status_code == 200
+    async with client_for(url, {}) as client:
         result = await client.call_tool(STUB_TOOL, {"text": "x"})
-    assert text(result) == "Nothing changed (stub). Client header seen: false."
+    assert stub_saw_no_client_header(result)

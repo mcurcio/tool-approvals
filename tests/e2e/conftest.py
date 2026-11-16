@@ -1,5 +1,7 @@
-"""The e2e stack: real agentgateway v1.7.0 and the Call Gate from this repo's image, in Docker; the scripted
-Approvals server and the stub tool in the test process, where the tests can see what reaches them.
+"""The e2e stack: real agentgateway v1.7.0 and the Call Gate's two commands (`call-gate`, the guardrail, and
+`approval-wait`, the second upstream) from this repo's image, in Docker; the scripted Approvals server and the
+stub tool in the test process, where the tests can see what reaches them. Every command of the image runs as
+the pod does: uid 65532, read-only root, no tmpfs.
 
 Run with ``uv run pytest -m e2e`` (Docker required). ``TOOL_APPROVALS_IMAGE`` names a prebuilt image;
 otherwise the fixture builds one from the working tree.
@@ -20,7 +22,6 @@ import httpx
 import pytest
 import pytest_asyncio
 from grpc_health.v1 import health_pb2, health_pb2_grpc
-from pydantic import SecretStr
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from tests.e2e.gateway import (
@@ -44,6 +45,7 @@ CLIENT: Final = "claude-cloud"
 OTHER_CLIENT: Final = "lan-probe"
 HEADER: Final = "x-approval-client"
 WAIT_SERVER: Final = "approval"
+WAIT_ALIAS: Final = "approval-wait"
 WAIT_TOOL: Final = "wait"
 STUB_SERVER: Final = "approval-stub"
 STUB_TOOL: Final = "stub_write"
@@ -68,6 +70,11 @@ async def docker(*args: str, check: bool = True, with_stderr: bool = False) -> s
             f"docker {' '.join(args)} exited {process.returncode}:\n{out.decode()}{err.decode()}"
         )
     return (out + err).decode() if with_stderr else out.decode()
+
+
+def read_only(image_name: str) -> list[str]:
+    """``docker run`` arguments that start the image as the pod does: uid 65532, read-only root, no tmpfs."""
+    return ["--read-only", "--user", "65532:65532", image_name]
 
 
 async def published(container: str, port: int) -> int:
@@ -164,23 +171,42 @@ async def image() -> str:
     return "tool-approvals:e2e"
 
 
-async def run_call_gate(
-    *, image_name: str, name: str, network: str, alias: str, approvals_address: str, mcp_token: str
-) -> None:
+def env_args(env: dict[str, str]) -> list[str]:
+    return [arg for k, v in env.items() for arg in ("-e", f"{k}={v}")]
+
+
+async def run_call_gate(*, image_name: str, name: str, network: str, alias: str, approvals_url: str) -> None:
     env = {
-        "CALL_GATE_MCP_TOKEN": mcp_token,
-        "CALL_GATE_APPROVALS_ADDRESS": approvals_address,
+        "CALL_GATE_GUARDRAIL_PORT": "9000",
+        "CALL_GATE_APPROVALS_URL": approvals_url,
         "CALL_GATE_APPROVALS_TOKEN": APPROVALS_TOKEN,
         "CALL_GATE_WAIT_SERVER": WAIT_SERVER,
-        "CALL_GATE_WAIT_TOOL": WAIT_TOOL,
         "CALL_GATE_WAIT_TOOL_EXPOSED_NAME": WAIT_EXPOSED,
         "CALL_GATE_CLIENT_HEADER": HEADER,
     }
-    env_args = [arg for k, v in env.items() for arg in ("-e", f"{k}={v}")]
     await docker(
         "run", "-d", "--name", name, "--network", network, "--network-alias", alias,
         "--add-host", "host.docker.internal:host-gateway", "-p", "127.0.0.1::9000",
-        *env_args, image_name, "call-gate",
+        *env_args(env), *read_only(image_name), "call-gate",
+    )  # fmt: skip
+
+
+WAIT_RELEASE_ENV: Final = {"APPROVAL_WAIT_TOOL": WAIT_TOOL, "APPROVAL_WAIT_CLIENT_HEADER": HEADER}
+
+
+async def run_approval_wait(
+    *, image_name: str, name: str, network: str, approvals_url: str, mcp_token: str
+) -> None:
+    env = {
+        **WAIT_RELEASE_ENV,
+        "APPROVAL_WAIT_MCP_TOKEN": mcp_token,
+        "APPROVAL_WAIT_APPROVALS_URL": approvals_url,
+        "APPROVAL_WAIT_APPROVALS_TOKEN": APPROVALS_TOKEN,
+    }
+    await docker(
+        "run", "-d", "--name", name, "--network", network, "--network-alias", WAIT_ALIAS,
+        "--add-host", "host.docker.internal:host-gateway",
+        *env_args(env), *read_only(image_name), "approval-wait",
     )  # fmt: skip
 
 
@@ -200,13 +226,19 @@ async def run_agentgateway(
     stub_token: str,
     config_dir: Path,
 ) -> None:
-    """agentgateway, configured like iac's render, before the Call Gate (alias `callgate`) and the stub."""
+    """agentgateway, configured like iac's render, before the guardrail (alias `callgate`), the wait server
+    (alias `approval-wait`) and the stub."""
     stub_port = stub_url.rsplit(":", 1)[1]
     config = render(
         keys=keys,
         targets=(
-            Target(WAIT_SERVER, f"http://callgate:8080{MCP_PATH}", "APPROVAL_TOKEN"),
-            Target(STUB_SERVER, f"http://host.docker.internal:{stub_port}{MCP_PATH}", "STUB_TOKEN"),
+            Target(WAIT_SERVER, f"http://{WAIT_ALIAS}:8080{MCP_PATH}", "APPROVAL_TOKEN", holds_calls=True),
+            Target(
+                STUB_SERVER,
+                f"http://host.docker.internal:{stub_port}{MCP_PATH}",
+                "STUB_TOKEN",
+                holds_calls=True,
+            ),
         ),
         grants=(
             Grant(CLIENT, WAIT_SERVER, WAIT_TOOL),
@@ -234,7 +266,7 @@ async def stack(tmp_path_factory: pytest.TempPathFactory) -> AsyncIterator[Stack
     run = secrets.token_hex(4)
     image_name = await image()
     network = f"ta-e2e-{run}"
-    callgate, agw = f"ta-callgate-{run}", f"ta-agw-{run}"
+    callgate, wait, agw = f"ta-callgate-{run}", f"ta-wait-{run}", f"ta-agw-{run}"
     keys = {CLIENT: secrets.token_urlsafe(32), OTHER_CLIENT: secrets.token_urlsafe(32)}
     stub_token, wait_token = secrets.token_urlsafe(24), secrets.token_urlsafe(24)
 
@@ -249,19 +281,21 @@ async def stack(tmp_path_factory: pytest.TempPathFactory) -> AsyncIterator[Stack
         restarted, _ = await serve(script, f"{HOST_BIND}:{approvals_port}")
         servers.append(restarted)
 
-    stub = Recorder(
-        build_stub_app(
-            StubToolSettings(mcp_token=SecretStr(stub_token), name=STUB_TOOL, client_header=HEADER)
-        )
-    )
+    stub = Recorder(build_stub_app(StubToolSettings(name=STUB_TOOL)))
     containers: list[str] = []
+    approvals_url = f"http://host.docker.internal:{approvals_port}"
     async with running(stub, host=HOST_BIND) as stub_url:
         try:
             await docker("network", "create", network)
             containers.append(callgate)
             await run_call_gate(
                 image_name=image_name, name=callgate, network=network, alias="callgate",
-                approvals_address=f"host.docker.internal:{approvals_port}", mcp_token=wait_token,
+                approvals_url=approvals_url,
+            )  # fmt: skip
+            containers.append(wait)
+            await run_approval_wait(
+                image_name=image_name, name=wait, network=network, approvals_url=approvals_url,
+                mcp_token=wait_token,
             )  # fmt: skip
             containers.append(agw)
             await run_agentgateway(
@@ -311,11 +345,6 @@ class RealStack:
         return {"authorization": f"Bearer {self.keys[client]}"}
 
 
-def read_only(image_name: str) -> list[str]:
-    """Every Approvals command runs as the pod does: uid 65532, read-only root, no tmpfs."""
-    return ["--read-only", "--user", "65532:65532", image_name]
-
-
 async def migrate_when_postgres_listens(network: str, image_name: str, pg_env: list[str]) -> None:
     # Postgres's image announces readiness only in its log; the harness retries the migration until it lands.
     args = ["run", "--rm", "--network", network, *pg_env, *read_only(image_name), "approvals", "migrate"]
@@ -338,16 +367,12 @@ async def real_stack(tmp_path_factory: pytest.TempPathFactory) -> AsyncIterator[
     image_name = await image()
     network = f"ta-real-{run}"
     postgres, approvals = f"ta-pg-{run}", f"ta-approvals-{run}"
-    callgate, agw = f"ta-callgate-real-{run}", f"ta-agw-real-{run}"
+    callgate, wait, agw = f"ta-callgate-real-{run}", f"ta-wait-real-{run}", f"ta-agw-real-{run}"
     keys = {CLIENT: secrets.token_urlsafe(32), OTHER_CLIENT: secrets.token_urlsafe(32)}
     stub_token, wait_token, pg_password = (secrets.token_urlsafe(24) for _ in range(3))
     pg = {"PGHOST": "postgres", "PGPORT": "5432", "PGDATABASE": "approvals", "PGUSER": "approvals"}
     pg_env = [arg for k, v in {**pg, "PGPASSWORD": pg_password}.items() for arg in ("-e", f"{k}={v}")]
-    stub = Recorder(
-        build_stub_app(
-            StubToolSettings(mcp_token=SecretStr(stub_token), name=STUB_TOOL, client_header=HEADER)
-        )
-    )
+    stub = Recorder(build_stub_app(StubToolSettings(name=STUB_TOOL)))
     containers: list[str] = []
     async with running(stub, host=HOST_BIND) as stub_url:
         try:
@@ -371,7 +396,12 @@ async def real_stack(tmp_path_factory: pytest.TempPathFactory) -> AsyncIterator[
             containers.append(callgate)
             await run_call_gate(
                 image_name=image_name, name=callgate, network=network, alias="callgate",
-                approvals_address="approvals:9090", mcp_token=wait_token,
+                approvals_url="http://approvals:9090",
+            )  # fmt: skip
+            containers.append(wait)
+            await run_approval_wait(
+                image_name=image_name, name=wait, network=network, approvals_url="http://approvals:9090",
+                mcp_token=wait_token,
             )  # fmt: skip
             containers.append(agw)
             await run_agentgateway(

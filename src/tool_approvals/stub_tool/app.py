@@ -1,5 +1,6 @@
-"""Two tools that change nothing: ``STUB_TOOL_NAME(text)`` reports whether the Call Gate's client header
-reached it, and ``stub_hold(seconds)`` answers after that long. ``GET /healthz`` answers 200 unauthenticated.
+"""Two tools that change nothing: ``STUB_TOOL_NAME(text)`` reports the names of the headers that reached it
+(so a probe sees the Call Gate's client header never does), and ``stub_hold(seconds)`` answers after that
+long. No inbound auth; ``GET /healthz`` answers 200.
 """
 
 import asyncio
@@ -32,6 +33,9 @@ HOLD_SCHEMA: Final[dict[str, Any]] = {
 }
 
 
+HOLD_ANNOTATIONS: Final = types.ToolAnnotations(read_only_hint=True)
+
+
 def _text(text: str, *, error: bool = False) -> types.CallToolResult:
     return types.CallToolResult(content=[types.TextContent(type="text", text=text)], is_error=error)
 
@@ -58,6 +62,7 @@ class _StubTools:
                     name=HOLD_TOOL,
                     description=f"Stub: answers after 1-{MAX_HOLD_SECONDS} seconds; changes nothing.",
                     input_schema=HOLD_SCHEMA,
+                    annotations=HOLD_ANNOTATIONS,
                 ),
             ]
         )
@@ -77,8 +82,8 @@ class _StubTools:
             await asyncio.sleep(seconds)
             return _text(f"Held {seconds} seconds (stub). Nothing changed.")
         request = ctx.request
-        seen = isinstance(request, Request) and self._settings.client_header in request.headers
-        return _text(f"Nothing changed (stub). Client header seen: {'true' if seen else 'false'}.")
+        names = sorted({k.lower() for k in request.headers}) if isinstance(request, Request) else []
+        return _text(f"Nothing changed (stub). Headers seen: {', '.join(names)}.")
 
 
 async def _healthz(_request: Request) -> PlainTextResponse:
@@ -90,6 +95,4 @@ def build_stub_app(settings: StubToolSettings) -> Starlette:
     server: Server[Any] = Server(
         "approval-stub", on_list_tools=tools.list_tools, on_call_tool=tools.call_tool
     )
-    return stateless_mcp_app(
-        server, settings.mcp_token, routes=[Route("/healthz", _healthz, methods=["GET"])]
-    )
+    return stateless_mcp_app(server, routes=[Route("/healthz", _healthz, methods=["GET"])])

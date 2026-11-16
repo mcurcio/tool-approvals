@@ -1,7 +1,9 @@
-"""The one console script: ``tool-approvals call-gate | stub-tool | approvals serve|migrate|answer``.
+"""The one console script:
+``tool-approvals call-gate | approval-wait | stub-tool | approvals serve|migrate|answer``.
 
 Settings are read before anything listens, so a missing or invalid value fails startup (pydantic's
-``ValidationError``) and the process is never ready.
+``ValidationError``) and the process is never ready. ``approval-wait`` alone starts without its runtime env
+(its calls then fail closed), because the tool-list check starts it with the release env only.
 
 ``approvals answer <ticket> approve|refuse [--comment TEXT]`` exits 0 when answered, 2 for an unknown ticket,
 3 when the ticket is not for the stub server, 4 when it is not waiting or past its answer deadline.
@@ -21,7 +23,8 @@ from tool_approvals.approvals.edges.settings import ApprovalsSettings, MigrateSe
 from tool_approvals.approvals.infra.database import DatabaseSettings
 from tool_approvals.approvals.infra.migrate import migrate
 from tool_approvals.call_gate import main as call_gate
-from tool_approvals.call_gate.settings import CallGateSettings
+from tool_approvals.call_gate import wait_main as approval_wait
+from tool_approvals.call_gate.settings import ApprovalWaitSettings, CallGateSettings
 from tool_approvals.stub_tool import main as stub_tool
 from tool_approvals.stub_tool.settings import StubToolSettings
 
@@ -37,7 +40,8 @@ ANSWER_EXIT_CODES: Final[Mapping[StubAnswer, int]] = {
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="tool-approvals")
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("call-gate", help="the agentgateway guardrail and the wait tool")
+    commands.add_parser("call-gate", help="the agentgateway guardrail")
+    commands.add_parser("approval-wait", help="the wait tool (an MCP server)")
     commands.add_parser("stub-tool", help="the stub MCP server for the tracer")
     service = commands.add_parser("approvals", help="the Approvals service")
     actions = service.add_subparsers(dest="action", required=True)
@@ -55,6 +59,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     match args.command, getattr(args, "action", None):
         case "call-gate", _:
             asyncio.run(call_gate.serve(CallGateSettings()))
+        case "approval-wait", _:
+            asyncio.run(approval_wait.serve(ApprovalWaitSettings()))
         case "stub-tool", _:
             asyncio.run(stub_tool.serve(StubToolSettings()))
         case "approvals", "serve":

@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# The tool-approvals image: one console script (`tool-approvals call-gate | stub-tool | approvals serve|migrate|answer`),
+# The tool-approvals image: one console script (`tool-approvals call-gate | approval-wait | stub-tool | approvals ...`),
 # no secrets, uid 65532. Bytecode is compiled at build time, so no command writes to the (read-only) root.
 ARG PYTHON_IMAGE=python:3.13-slim-trixie
 

@@ -6,6 +6,11 @@ F's live tracer is the check, and both are bumped together on an agentgateway up
 - the forwarded-headers filter (`_FORWARDED_HEADERS`, a request `transformations.replace`);
 - one `mcpAuthorization` allow rule per (client, server, tool);
 - `prefixMode: always` and `sseKeepAlive` (slice E);
+- `policies.http.requestTimeout` on each target that holds calls (the wait server and the stub):
+  agentgateway v1.7.0 gives an MCP upstream call 10 s to send its response headers
+  (`proxy/httpproxy.rs` 5411-5414), while the MCP SDK on protocol 2026-07-28 sends a held call's headers
+  only after 15 s (`tool_approvals.mcp_serving`); past the headers the SSE stream is not cut (erratum
+  E-ta-t4-wait-cut-at-10s);
 - slice F's guardrail: a remote processor on `tools/call` requests, fail closed, `client` from
   `apiKey.client` and `gated` the "||" of F's per-call predicate.
 
@@ -21,6 +26,8 @@ from typing import Any, Final
 AGENTGATEWAY_IMAGE: Final = "ghcr.io/agentgateway/agentgateway:v1.7.0"
 MCP_PATH: Final = "/mcp"
 READINESS_PORT: Final = 15021
+# Time to a held call's response headers: past the SDK's 15 s, well short of any wait it bounds.
+HELD_CALL_REQUEST_TIMEOUT: Final = "60s"
 IAC_PORT: Final = 3000
 BARE_PORT: Final = 3001
 
@@ -41,6 +48,7 @@ class Target:
     name: str
     url: str
     token_env: str
+    holds_calls: bool = False  # a tool call may stay open past the SDK's 15 s before its headers
 
 
 @dataclass(frozen=True)
@@ -101,7 +109,10 @@ def render(
                 {
                     "name": t.name,
                     "mcp": {"host": t.url},
-                    "policies": {"backendAuth": {"key": f"${{{t.token_env}}}"}},
+                    "policies": {
+                        "backendAuth": {"key": f"${{{t.token_env}}}"},
+                        **({"http": {"requestTimeout": HELD_CALL_REQUEST_TIMEOUT}} if t.holds_calls else {}),
+                    },
                 }
                 for t in targets
             ],

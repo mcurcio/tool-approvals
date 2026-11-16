@@ -2,9 +2,9 @@
 Gate and `approvals serve` from this repo's image, Postgres 18; answers come from `approvals answer` run in
 the Approvals container, as the live tracer does with `kubectl exec`.
 
-The 3-minute hold the page asks for is cut at 10 s by agentgateway (erratum E-ta-t4-wait-cut-at-10s in iac's
-`.claude/errata.md`), so it is a strict xfail; the release, the single repeat and the third call's new
-ticket are checked after a hold under that cut.
+The release, the single repeat and the third call's new ticket are checked after a short hold and after the
+3-minute hold the page asks for (past agentgateway's 10 s to response headers, which the wait target's
+`requestTimeout` lifts: erratum E-ta-t4-wait-cut-at-10s in iac's `.claude/errata.md`).
 """
 
 import asyncio
@@ -23,7 +23,7 @@ from tests.e2e.conftest import STUB_EXPOSED, WAIT_EXPOSED, RealStack, docker
 pytestmark = [pytest.mark.e2e, pytest.mark.asyncio(loop_scope="session")]
 
 LONG_HOLD_SECONDS: Final = float(os.environ.get("E2E_REAL_WAIT_SECONDS", "180"))
-SHORT_HOLD_SECONDS: Final = 5.0  # under agentgateway's 10 s cut
+SHORT_HOLD_SECONDS: Final = 5.0
 STUB_RAN: Final = "Nothing changed (stub)."
 
 
@@ -72,11 +72,6 @@ async def test_a_held_wait_releases_on_the_answer_and_the_yes_is_spent_once(real
     await held_wait(real_stack, {"text": "short hold"}, SHORT_HOLD_SECONDS)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="erratum E-ta-t4-wait-cut-at-10s: agentgateway cuts the wait call at 10 s (upstream call timeout)",
-)
 async def test_a_three_minute_wait_releases_on_the_answer(real_stack: RealStack) -> None:
     await held_wait(real_stack, {"text": "long hold"}, LONG_HOLD_SECONDS)
 
