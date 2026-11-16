@@ -126,7 +126,7 @@ class Approval:
     @classmethod
     def open(cls, call: CallIdentity, requirement: Requirement, ticket: Ticket, by: Actor, now: datetime) -> Self:
         """A new Waiting Approval, its answer deadline `now + requirement.answer_deadline`; event OPENED."""
-        approval = cls.__new__(cls)
+        approval = cls()  # through the class's own constructor, which a persistence mapping instruments
         approval.ticket = ticket
         approval.call = call
         approval.requirement = requirement
