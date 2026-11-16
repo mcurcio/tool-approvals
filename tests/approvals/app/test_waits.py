@@ -154,7 +154,7 @@ async def test_a_wait_on_an_answered_approval_keeps_no_words() -> None:
     await requested(world)
     await answer(world, Verdict.APPROVE)
     wait = await world.waits.open_wait(AGENT, T1, WORDS, WAITER)
-    assert isinstance(wait, str)
+    assert not isinstance(wait, TicketError | WordsError | TooManyWaits)
     stored = world.store.stored(T1)
     assert stored is not None
     assert stored.words is None
