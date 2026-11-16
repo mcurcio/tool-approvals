@@ -10,33 +10,33 @@ from hypothesis import strategies as st
 from tool_approvals.kernel.calls import (
     ALLOWED_PARAMS_KEYS,
     CLIENT_CAPABILITIES_META_KEY,
+    MAX_JSON_DEPTH,
     MAX_PARAMS_BYTES,
     TASKS_EXTENSION,
     CallIdentity,
     CallRejected,
     ParsedCall,
-    Principal,
     RejectReason,
-    ServerName,
-    ToolName,
-    is_ticket,
     parse_call,
 )
+from tool_approvals.kernel.names import Principal, ServerName, ToolName, is_ticket
 
 PRINCIPAL = Principal("agent-1")
 SERVER = ServerName("tools")
 
+# Argument keys and strings never hold a NUL (test_malformed_params); st.text() already leaves out lone surrogates.
+texts = st.text(st.characters(codec="utf-8", exclude_characters="\x00"))
 json_values = st.recursive(
     st.none()
     | st.booleans()
     | st.integers()
     | st.floats(allow_nan=False, allow_infinity=False)
-    | st.text()
+    | texts
     | st.just("arguments"),
-    lambda children: st.lists(children, max_size=4) | st.dictionaries(st.text(), children, max_size=4),
+    lambda children: st.lists(children, max_size=4) | st.dictionaries(texts, children, max_size=4),
     max_leaves=12,
 )
-json_objects = st.dictionaries(st.text() | st.just("arguments"), json_values, max_size=4)
+json_objects = st.dictionaries(texts | st.just("arguments"), json_values, max_size=4)
 # Strings that would fool a scanner looking for the text "arguments" rather than the top-level key.
 tricky_strings = st.text() | st.builds(
     lambda before, after: f'{before}"arguments":{{"x":1}}, "arguments": {after}',
@@ -56,8 +56,8 @@ def _encode(members: list[tuple[str, object]], ws: str, ensure_ascii: bool) -> b
 
 @st.composite
 def params_members(draw: st.DrawFn) -> list[tuple[str, object]]:
-    name = draw(tricky_strings.filter(lambda text: "\x00" not in text) | st.just("arguments"))
-    members: list[tuple[str, object]] = [("name", name)]  # a NUL in it: test_malformed_params
+    name = draw(tricky_strings.filter(lambda text: text and "\x00" not in text) | st.just("arguments"))
+    members: list[tuple[str, object]] = [("name", name)]  # empty, or a NUL in it: test_malformed_params
     if draw(st.booleans()):
         members.append(("arguments", draw(json_objects)))
     if draw(st.booleans()):
@@ -139,7 +139,7 @@ def test_changing_any_argument_value_changes_the_identity(arguments: dict[str, o
 
 @given(members=params_members(), key=st.text(), value=json_values)
 def test_an_unknown_top_level_key_is_malformed(members: list[tuple[str, object]], key: str, value: object) -> None:
-    assume(key not in ALLOWED_PARAMS_KEYS)
+    assume(key not in ALLOWED_PARAMS_KEYS and key != "task")
     params = _encode([*members, (key, value)], "", True)
     assume(len(params) <= MAX_PARAMS_BYTES)
     assert _rejected(params) is RejectReason.MALFORMED
@@ -150,18 +150,47 @@ def test_an_unknown_top_level_key_is_malformed(members: list[tuple[str, object]]
     other_extensions=st.dictionaries(st.text(), json_values, max_size=3),
     as_list=st.booleans(),
     other_meta=metas,
+    ensure_ascii=st.booleans(),
 )
 def test_meta_declaring_the_tasks_extension_is_refused(
     members: list[tuple[str, object]],
     other_extensions: dict[str, object],
     as_list: bool,
     other_meta: dict[str, object],
+    ensure_ascii: bool,
 ) -> None:
     extensions_map = {**other_extensions, TASKS_EXTENSION: {}}
     extensions: object = list(extensions_map) if as_list else extensions_map
     meta = {**other_meta, CLIENT_CAPABILITIES_META_KEY: {"extensions": extensions}}
-    params = _encode([*((k, v) for k, v in members if k != "_meta"), ("_meta", meta)], "", True)
+    params = _encode([*((k, v) for k, v in members if k != "_meta"), ("_meta", meta)], "", ensure_ascii)
     assume(len(params) <= MAX_PARAMS_BYTES)
+    assert _rejected(params) is RejectReason.TASK_REQUESTED
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        pytest.param(b'{"name": "a", "task": {"ttl": 60000}}', id="task member"),
+        pytest.param(b'{"name": "a", "arguments": {}, "task": {}}', id="task member with arguments"),
+        pytest.param(b'{"name": "a", "t\\u0061sk": {}}', id="escaped task member"),
+        pytest.param(
+            b'{"name": "a", "_m\\u0065ta": {"io.modelcontextprotocol/clientCapabilities": '
+            b'{"extensions": {"io.modelcontextprotocol/tasks": {}}}}}',
+            id="escaped _meta key",
+        ),
+        pytest.param(
+            b'{"name": "a", "_meta": {"io.modelcontextprotocol\\/clientCapabilities": '
+            b'{"extensions": {"io.modelcontextprotocol\\/t\\u0061sks": {}}}}}',
+            id="escaped extension ids",
+        ),
+        pytest.param(
+            b'{"name": "a", "_meta": {"io.modelcontextprotocol/clientCapabilities": '
+            b'{"extensions": ["io\\u002emodelcontextprotocol\\u002ftasks"]}}}',
+            id="escaped extension id in a list",
+        ),
+    ],
+)
+def test_a_task_request_however_written_is_refused(params: bytes) -> None:
     assert _rejected(params) is RejectReason.TASK_REQUESTED
 
 
@@ -179,6 +208,7 @@ def test_other_client_capabilities_are_not_a_task_request() -> None:
         pytest.param(b"{}", id="no name"),
         pytest.param(b'{"name": 1}', id="number name"),
         pytest.param(b'{"name": null}', id="null name"),
+        pytest.param(b'{"name": ""}', id="empty name"),
         pytest.param(b'{"name": "\\ud800"}', id="lone surrogate name"),
         pytest.param(b'{"name": "a\\u0000b"}', id="NUL in name"),
         pytest.param(b'{"name": "a", "arguments": null}', id="null arguments"),
@@ -193,6 +223,14 @@ def test_other_client_capabilities_are_not_a_task_request() -> None:
         pytest.param(b'{"name": "a", "_meta": {"p": 1, "p": 2}}', id="duplicate key in _meta"),
         pytest.param(b'{"name": "a", "arguments": {"x": NaN}}', id="NaN"),
         pytest.param(b'{"name": "a", "arguments": {"x": Infinity}}', id="Infinity"),
+        pytest.param(b'{"name": "a", "arguments": {"x": 1e400}}', id="number overflowing to inf"),
+        pytest.param(b'{"name": "a", "arguments": {"x": [-1E+400]}}', id="number overflowing to -inf"),
+        pytest.param(b'{"name": "a", "arguments": {"\\ud800": 1}}', id="lone surrogate in argument key"),
+        pytest.param(b'{"name": "a", "arguments": {"x": "a\\udfffb"}}', id="lone surrogate in argument string"),
+        pytest.param(b'{"name": "a", "arguments": {"x": [{"y": ["\\ud83d"]}]}}', id="deep lone surrogate"),
+        pytest.param(b'{"name": "a", "arguments": {"a\\u0000b": 1}}', id="NUL in argument key"),
+        pytest.param(b'{"name": "a", "arguments": {"x": "a\\u0000"}}', id="NUL in argument string"),
+        pytest.param(b'{"name": "a", "arguments": {"x": {"y": ["\\u0000"]}}}', id="deep NUL"),
         pytest.param(b'{"name": "a"} {}', id="trailing data"),
         pytest.param(b'{"name": "a"}x', id="trailing garbage"),
         pytest.param(b'{"name": "a",}', id="trailing comma"),
@@ -239,13 +277,26 @@ def test_is_ticket(text: str, ticket: bool) -> None:
     assert is_ticket(text) is ticket
 
 
-def test_deep_nesting_within_the_size_limit_never_raises() -> None:
-    nested = b"[" * 8000 + b"]" * 8000
-    result = parse_call(PRINCIPAL, SERVER, b'{"name": "a", "arguments": {"x": ' + nested + b"}}")
-    # A RecursionError, where the parser has one, is MALFORMED.
-    assert result == CallRejected(RejectReason.MALFORMED) or (
-        isinstance(result, ParsedCall) and result.identity.arguments_json == b'{"x": ' + nested + b"}"
-    )
+def _nested(depth: int) -> bytes:
+    """Params nesting exactly `depth` objects and arrays, the params object the first."""
+    inner = depth - 2  # the params object and `arguments`
+    return b'{"name": "a", "arguments": {"x": ' + b"[" * inner + b'"[{"' + b"]" * inner + b"}}"
+
+
+def test_nesting_up_to_the_depth_limit_is_accepted() -> None:
+    assert MAX_JSON_DEPTH == 32
+    params = _nested(MAX_JSON_DEPTH)
+    assert _parsed(params).identity.arguments_json == params[len(b'{"name": "a", "arguments": ') : -1]
+
+
+@pytest.mark.parametrize("depth", [MAX_JSON_DEPTH + 1, 8000])
+def test_nesting_past_the_depth_limit_is_malformed(depth: int) -> None:
+    assert _rejected(_nested(depth)) is RejectReason.MALFORMED
+
+
+def test_large_finite_numbers_and_large_integers_are_kept() -> None:
+    parsed = _parsed(b'{"name": "a", "arguments": {"x": 1e308, "y": 123456789012345678901234567890}}')
+    assert parsed.arguments == {"x": 1e308, "y": 123456789012345678901234567890}
 
 
 def test_size_limit_is_inclusive() -> None:

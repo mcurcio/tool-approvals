@@ -37,14 +37,22 @@ are **squash-merged with the pull request's title as the commit message**, so th
 |---|---|
 | `feat:` | Minor |
 | `fix:`, `perf:`, `build(deps):` | Patch |
-| `feat!:`, `fix!:` or a `BREAKING CHANGE:` footer | Minor while on `0.x`; major after 1.0 |
+| `feat!:`, `fix!:` or a `BREAKING CHANGE:` footer | Minor |
 | `docs:`, `test:`, `refactor:`, `ci:`, `chore:`, `style:` | None |
 
-Use a scope where it helps (`feat(gate): …`). Dependabot's pull requests use `build(deps)`.
+A breaking change raises the minor version only while the project is on `0.x`: that rule
+(`{"breaking": true, "release": "minor"}` in `.releaserc.json`) is deleted when the project goes 1.0.
+`tests/release_rules.test.mjs` runs these rules through the pinned commit analyzer in CI.
+
+Use a scope where it helps (`feat(gate): …`). Dependabot's pull requests use the prefixes `.github/dependabot.yml`
+sets: `build(deps)` for a runtime Python dependency (a patch release), `build(deps-dev)` for a development
+dependency or the release tooling, and `ci(deps)` for GitHub Actions (no release).
 
 Releases are automatic: on every merge to `main` that passes CI, [semantic-release](https://semantic-release.gitbook.io)
 works out the version from the commits, tags it, writes `CHANGELOG.md` and publishes the GitHub release. Never
-tag or edit a version by hand.
+tag or edit a version by hand, except the one-time seed tag: the `0.x` line starts from `v0.1.0`, which a
+maintainer pushes once before the first release (with no `v*` tag semantic-release would cut 1.0.0, so the release
+job refuses to run until it exists).
 
 ## Deny-list check
 

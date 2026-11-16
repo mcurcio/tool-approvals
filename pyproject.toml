@@ -31,7 +31,7 @@ required-version = ">=0.13.5"
 [tool.ruff]
 line-length = 120
 target-version = "py313"
-# A byte-identical copy of the publishing step's scanner (tests/test_denylist_copy.py): its style is set there.
+# The scanner is vendored from a maintained copy (tests/test_denylist_copy.py pins it): its style is set there.
 extend-exclude = ["scripts/denylist.py"]
 
 [tool.ruff.lint]
@@ -60,7 +60,10 @@ xfail_strict = true
 timeout = 60
 
 # Import contracts C1-C8: the module map's layering, enforced in CI by `lint-imports`.
-# IO (the I/O and wire libraries no core may import) is spelled out in C1 and C5-cores.
+# IO (the I/O and wire libraries no core may import: every planned dependency's top-level modules and the
+# standard library's network, process and database modules) is spelled out in C1 and C5-cores; TOML cannot share
+# a list, so tests/test_import_contracts.py keeps the two identical. Telemetry (OpenTelemetry) lives in `serving`,
+# never in the kernel or a core.
 [tool.importlinter]
 root_package = "tool_approvals"
 include_external_packages = true
@@ -70,17 +73,13 @@ id = "C1"
 name = "kernel imports nothing in tool_approvals and no I/O or wire library"
 type = "forbidden"
 source_modules = ["tool_approvals.kernel"]
+# Every other top-level module of the package, present or future (the kernel itself overlaps and is skipped).
 forbidden_modules = [
-    "tool_approvals.gate",
-    "tool_approvals.wait",
-    "tool_approvals.approvals",
-    "tool_approvals.contract",
-    "tool_approvals.config",
-    "tool_approvals.auth",
-    "tool_approvals.serving",
-    "tool_approvals.requests_client",
-    "tool_approvals.cli",
+    "tool_approvals.*",
     "grpc",
+    "grpc_health",
+    "grpc_reflection",
+    "grpc_status",
     "google",
     "mcp",
     "mcp_types",
@@ -91,6 +90,7 @@ forbidden_modules = [
     "uvicorn",
     "httpx",
     "authlib",
+    "itsdangerous",
     "jinja2",
     "pydantic",
     "ruamel",
@@ -98,6 +98,18 @@ forbidden_modules = [
     "xds",
     "udpa",
     "validate",
+    "opentelemetry",
+    "asyncio",
+    "ftplib",
+    "http",
+    "multiprocessing",
+    "selectors",
+    "smtplib",
+    "socket",
+    "sqlite3",
+    "ssl",
+    "subprocess",
+    "urllib",
 ]
 
 [[tool.importlinter.contracts]]
@@ -111,6 +123,7 @@ id = "C3-gate"
 name = "gate: main > mappings | policy > core"
 type = "layers"
 containers = ["tool_approvals.gate"]
+exhaustive = true
 layers = ["main", "mappings | policy", "core"]
 
 [[tool.importlinter.contracts]]
@@ -118,6 +131,7 @@ id = "C3-wait"
 name = "wait: main > mcp > core"
 type = "layers"
 containers = ["tool_approvals.wait"]
+exhaustive = true
 layers = ["main", "mcp", "core"]
 
 [[tool.importlinter.contracts]]
@@ -125,6 +139,7 @@ id = "C3-approvals"
 name = "approvals: main > edges | infra > app > domain"
 type = "layers"
 containers = ["tool_approvals.approvals"]
+exhaustive = true
 layers = ["main", "edges | infra", "app", "domain"]
 
 [[tool.importlinter.contracts]]
@@ -171,6 +186,9 @@ source_modules = [
 forbidden_modules = [
     "tool_approvals.contract",
     "grpc",
+    "grpc_health",
+    "grpc_reflection",
+    "grpc_status",
     "google",
     "mcp",
     "mcp_types",
@@ -181,6 +199,7 @@ forbidden_modules = [
     "uvicorn",
     "httpx",
     "authlib",
+    "itsdangerous",
     "jinja2",
     "pydantic",
     "ruamel",
@@ -188,6 +207,18 @@ forbidden_modules = [
     "xds",
     "udpa",
     "validate",
+    "opentelemetry",
+    "asyncio",
+    "ftplib",
+    "http",
+    "multiprocessing",
+    "selectors",
+    "smtplib",
+    "socket",
+    "sqlite3",
+    "ssl",
+    "subprocess",
+    "urllib",
 ]
 
 [[tool.importlinter.contracts]]
@@ -217,7 +248,7 @@ allowed_importers = [
 
 [[tool.importlinter.contracts]]
 id = "C7-forbidden"
-name = "the agents' side reaches no answer path"
+name = "the agents' side reaches no answer path and no answer issuer"
 type = "forbidden"
 source_modules = [
     "tool_approvals.approvals.edges.requests",
@@ -229,6 +260,7 @@ forbidden_modules = [
     "tool_approvals.approvals.app.answers",
     "tool_approvals.approvals.edges.desk",
     "tool_approvals.approvals.edges.answers",
+    "tool_approvals.approvals.domain.issuer",
 ]
 
 [[tool.importlinter.contracts]]

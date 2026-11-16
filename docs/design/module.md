@@ -3,8 +3,9 @@
 The Python packages, what each may import, what each module promises, and how Approvals uses Postgres. Read the
 [system](system.md) and [service](service.md) designs first.
 
-> **Status:** design. Milestone 0 lays out the package skeleton and enforces the import contracts below; the
-> modules are filled in from milestone 1 ([roadmap](system.md#delivery-milestones)).
+> **Status:** design. Milestone 0 lays out the package skeleton, enforces the import contracts below and builds
+> `kernel.names` and the call parser in `kernel.calls` (parse and identity); every other module, and the parts of
+> `kernel.calls` marked planned, is filled in from milestone 1 ([roadmap](system.md#delivery-milestones)).
 
 ## Summary
 
@@ -64,11 +65,12 @@ The Python packages, what each may import, what each module promises, and how Ap
  requests_client/ ApprovalRequests over gRPC (satisfies GateRequests and WaitRequests structurally)
  serving/  gRPC options, uvicorn runner, proto3-JSON route, health, telemetry   auth/  registry, one decider
  config/   one YAML file, per-command views, floor and cross-section checks      contract/  generated stubs
- kernel/   names · calls (parse, identity, span reader, shown digest) · requirements · requests (result types)
+ kernel/   names · calls (parse, identity; planned: span reader, shown digest) · requirements · requests
 ```
 
 **Import contracts** (import-linter, blocking in CI; `ta.` = `tool_approvals.`; "I/O" = any network, database,
-wire, web, template, validation or YAML library):
+wire, web, template, validation, YAML or telemetry library, the standard library's network, process and
+database modules included):
 
 | id | Contract | Type |
 |---|---|---|
@@ -78,7 +80,7 @@ wire, web, template, validation or YAML library):
 | C4 | Shared packages: `requests_client` > `serving` \| `auth` > `config` > `contract` \| `kernel`; none imports a service | layers + forbidden |
 | C5 | `gate.core`, `wait.core`, `approvals.domain`, `approvals.app` import no I/O library and no `contract`; `approvals.infra.store` imports no `contract` | forbidden |
 | C6 | `approvals.domain.issuer` (the only holder of the `Answer` constructor key) is importable only by `approvals.app.answers` and `approvals.infra.store` (which rebuilds stored answers through it) | protected |
-| C7 | `approvals.app.answers` is importable only by `edges.desk`, `edges.answers` and `main`; `edges.requests`, `app.requests`, `app.waits` and `infra.channels` import none of `app.answers`, `edges.desk`, `edges.answers` | protected + forbidden |
+| C7 | `approvals.app.answers` is importable only by `edges.desk`, `edges.answers` and `main`; `edges.requests`, `app.requests`, `app.waits` and `infra.channels` import none of `app.answers`, `edges.desk`, `edges.answers`, `domain.issuer` | protected + forbidden |
 | C8 | `requests_client` is importable only by `gate.main` and `wait.main` | protected |
 
 `pyproject.toml` holds the exact contracts.
@@ -87,7 +89,7 @@ wire, web, template, validation or YAML library):
 
 | Module | Takes | Gives | Never |
 |---|---|---|---|
-| `kernel.calls` | principal, server, params bytes; a JSON-RPC body | `CallIdentity` or `CallRejected`; the params span; the shown digest (computed only here) | Re-encode; accept duplicate or escaped-duplicate keys, a duplicate `method` or `params`, trailing data, extra top-level keys, a Tasks declaration |
+| `kernel.calls` | principal, server, params bytes; planned: a JSON-RPC body | `CallIdentity` or `CallRejected`; planned: the params span, the shown digest (computed only here) | Re-encode; accept duplicate or escaped-duplicate keys, trailing data, extra top-level keys, a task request (a `task` member or a Tasks declaration in `_meta`), nesting past 32 levels, a number that overflows a float, an empty name, a NUL or lone surrogate in a name or an argument key or string; planned: a duplicate `method` or `params` |
 | `kernel.requirements` | assurance scale, requirements | `stricter`, `meets_floor`, `qualify` | Read an identity provider or a clock |
 | `gate.core` | a call (principal, server, params, gateway attributes), a deadline | the verdict | Know a wire, a gateway or the wait server |
 | `gate.mappings.*` | one gateway's hook message | a call; the verdict in the gateway's encoding; `ext_mcp` sets the principal header on the wait route | Read caller or server from the body; send the wait route to policy |
@@ -196,7 +198,7 @@ would reveal the list).
 
 | Module | Proof |
 |---|---|
-| `kernel.calls` | Hypothesis: identity ignores `_meta` and changes with any argument byte; the span reader returns exact bytes under any whitespace; every refusal above |
+| `kernel.calls` | Hypothesis: identity ignores `_meta` and changes with any argument byte; every refusal above; planned: the span reader returns exact bytes under any whitespace |
 | Pure cores | Fakes for their ports; every verdict and error |
 | Mappings | **Conformance suite per gateway** (real agentgateway, real Envoy): the gate is the last processor (a fixture tool records the bytes it receives), exact bytes, attested server, header replacement on the wait route, fail closed when the gate is stopped or slow |
 | Check API, policy | The same golden cases over gRPC and JSON; OPA and an AuthZEN PDP as real images |

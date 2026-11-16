@@ -1,14 +1,27 @@
 """Deny-list scanner: finds listed words in text, a git tree and git history.
 
-The one scanner behind the publish gate. It owns matching (what counts as a hit)
-and what of a commit or tree is scanned; it does not push. Standard library only,
-so a byte-identical copy can run in a public repository's CI.
+It owns matching (what counts as a hit) and what of a commit or tree is scanned;
+it never pushes or publishes anything. Standard library only, so it can be vendored
+unchanged into any repository and run by its CI.
 
 A result names only the kind of field and where it was (a commit id, or a label
 the caller chose), never the word, the line or the path, so a report of a hit
 never repeats what it refused.
 
-Command line (what a public repository's CI runs on its copy)::
+What counts as a hit (``count_hits``): text is first normalised (format characters
+such as a zero-width space or a soft hyphen removed, then Unicode NFKC, which folds
+fullwidth letters to plain ones); then a listed word matches case-insensitively, the
+spaces inside a listed phrase matching any run of whitespace, newlines included. A
+match must start and end at a word edge: next to a character that is not an ASCII
+letter or digit, the text's start or end, or a change of case inside an identifier
+(``my|Word``, ``HTTP|Word``). So ``lab`` hits ``my-lab``, ``LAB_1``, ``myLab`` and
+``labEl``, but not ``label`` or ``lab1``. A file starting with a UTF-16 or UTF-32
+byte-order mark is decoded by it. A compressed or archive file (gzip, zip and formats
+built on it, bzip2, xz, zstd, 7z, rar) is never read: it is refused outright as an
+``archive`` hit. Not handled: look-alike letters from other scripts, URL-encoding,
+base64 and other encodings of a word.
+
+Command line (what a CI job runs)::
 
     python denylist.py tree <dir>                      # every path and file
     python denylist.py commits [--repo R] -- <rev>...  # every commit in the range
@@ -18,24 +31,26 @@ directory it walks every regular file. ``commits`` takes ``git rev-list`` argume
 
 The word list is read only from standard input, or from the file descriptor
 ``--words-fd`` names; never from the environment or an argument. Each hit prints
-``denylist: <kind> <sha|tree>``. Exit status: 0 clean, 1 a hit, 2 setup failure (an
-empty list, an unreadable list, a git failure).
+``denylist: <kind> <sha|tree>``. Exit status: 0 clean, 1 a hit (a listed word or an
+archive), 2 setup failure (an empty or unreadable list, a git or OS error).
 """
 
 from __future__ import annotations
 
 import argparse
+import codecs
 import os
 import re
 import subprocess
 import sys
+import unicodedata
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Iterable, Iterator, Sequence
 
 __all__ = [
     "Hit",
@@ -47,7 +62,16 @@ __all__ = [
     "scan_tree",
 ]
 
-HitKind = Literal["message", "author", "committer", "path", "content", "ref", "text"]
+HitKind = Literal[
+    "message",
+    "author",
+    "committer",
+    "path",
+    "content",
+    "archive",
+    "ref",
+    "text",
+]
 
 _DIFF_FLAGS = (
     "-r",
@@ -58,8 +82,34 @@ _DIFF_FLAGS = (
 )
 _SUBMODULE_MODE = "160000"
 _BINARY_SNIFF = 8000
-_EDGE_BEFORE = "(?<![0-9A-Za-z])"
-_EDGE_AFTER = "(?![0-9A-Za-z])"
+# A change of case inside an identifier is a word edge: lower to upper (``myWord``),
+# and the last of a run of capitals before a lower-case letter (``HTTPWord``).
+_CASE_EDGE = "(?<=(?-i:[a-z]))(?=(?-i:[A-Z]))|(?<=(?-i:[A-Z]))(?=(?-i:[A-Z][a-z]))"
+_EDGE_BEFORE = f"(?:(?<![0-9A-Za-z])|{_CASE_EDGE})"
+_EDGE_AFTER = f"(?:(?![0-9A-Za-z])|{_CASE_EDGE})"
+# Longest first: UTF-32 LE's mark starts with UTF-16 LE's.
+_BOMS = (
+    (codecs.BOM_UTF32_LE, "utf-32"),
+    (codecs.BOM_UTF32_BE, "utf-32"),
+    (codecs.BOM_UTF16_LE, "utf-16"),
+    (codecs.BOM_UTF16_BE, "utf-16"),
+)
+_BOM_MARKS = tuple(bom for bom, _codec in _BOMS)
+_ARCHIVE_MAGIC = (
+    b"\x1f\x8b",  # gzip
+    b"PK\x03\x04",  # zip and every format built on it (jar, wheel, docx, apk, ...)
+    b"PK\x05\x06",  # an empty zip
+    b"PK\x07\x08",  # a spanned zip
+    b"\xfd7zXZ\x00",  # xz
+    b"(\xb5/\xfd",  # zstd
+    b"7z\xbc\xaf'\x1c",  # 7z
+    b"Rar!\x1a\x07",  # rar
+)
+_BZIP2 = (b"BZh", b"1AY&SY")  # "BZh", a block size digit, the first block's magic
+# A zip's end record can follow other data (a self-extracting or polyglot file): it
+# lies within its 22 bytes plus the longest comment (65,535) of the end.
+_ZIP_END = b"PK\x05\x06"
+_ZIP_END_REACH = 22 + 65_535
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,27 +126,40 @@ def load_words(text: str) -> tuple[str, ...]:
     return tuple(word for word in words if word and not word.startswith("#"))
 
 
+def _normalise(text: str) -> str:
+    """Drop format characters (Unicode category Cf), then apply NFKC."""
+    if text.isascii():
+        return text
+    kept = "".join(char for char in text if unicodedata.category(char) != "Cf")
+    return unicodedata.normalize("NFKC", kept)
+
+
 @lru_cache(maxsize=8)
 def _pattern(words: tuple[str, ...]) -> re.Pattern[str] | None:
-    if not words:
+    parts = {tuple(_normalise(word).split()) for word in words}
+    parts.discard(())
+    if not parts:
         return None
     # Longest first, so a phrase wins over a word it starts with.
-    ordered = sorted(set(words), key=len, reverse=True)
-    alternatives = "|".join(re.escape(word) for word in ordered)
+    ordered = sorted(parts, key=lambda part: len(" ".join(part)), reverse=True)
+    phrases = (r"\s+".join(re.escape(piece) for piece in part) for part in ordered)
+    alternatives = "|".join(phrases)
     pattern = rf"{_EDGE_BEFORE}(?:{alternatives}){_EDGE_AFTER}"
     return re.compile(pattern, re.IGNORECASE)
 
 
 def count_hits(text: str, words: Sequence[str]) -> int:
-    """Count listed words in ``text``, case-insensitively.
+    """Count listed words in ``text``: case-insensitive, after normalising both.
 
-    A match counts only where it is not adjacent to an ASCII letter or digit, so
-    a listed ``lab`` hits ``lab``, ``my-lab`` and ``LAB_1`` but not ``label``.
+    A match starts and ends at a word edge: next to a character that is not an
+    ASCII letter or digit, or at a change of case inside an identifier. A listed
+    ``lab`` hits ``my-lab``, ``LAB_1`` and ``myLab`` but not ``label``; the spaces in
+    a listed phrase match any run of whitespace, newlines included.
     """
     pattern = _pattern(tuple(words))
     if pattern is None:
         return 0
-    return sum(1 for _ in pattern.finditer(text))
+    return sum(1 for _ in pattern.finditer(_normalise(text)))
 
 
 def _git(repo: Path, *args: str) -> bytes:
@@ -108,16 +171,68 @@ def _text(data: bytes) -> str:
     return data.decode("utf-8", errors="replace")
 
 
-def _added_lines(patch: bytes) -> Iterator[bytes]:
-    """Yield the added lines of a unified diff, skipping file headers."""
+def _read_whole(data: bytes) -> bool:
+    """Whether a file is read whole: it has a UTF-16/32 mark, or a NUL early on."""
+    return data.startswith(_BOM_MARKS) or b"\0" in data[:_BINARY_SNIFF]
+
+
+def _decode(data: bytes) -> str:
+    """Decode a file: by its UTF-16/32 mark, else Latin-1 if binary, else UTF-8."""
+    for bom, codec in _BOMS:
+        if data.startswith(bom):
+            return data.decode(codec, errors="replace")
+    if b"\0" in data[:_BINARY_SNIFF]:
+        return data.decode("latin-1")
+    return _text(data)
+
+
+def _is_archive(data: bytes) -> bool:
+    """Whether a file is compressed or an archive, which the scanner cannot read."""
+    bzip2 = data.startswith(_BZIP2[0]) and data[4:10] == _BZIP2[1]
+    appended_zip = _ZIP_END in data[-_ZIP_END_REACH:]
+    return data.startswith(_ARCHIVE_MAGIC) or bzip2 or appended_zip
+
+
+def _blobs(repo: Path, ids: Sequence[str]) -> list[bytes]:
+    """Read every blob in ``ids`` with one ``git cat-file --batch``."""
+    if not ids:
+        return []
+    command = ["git", "-C", str(repo), "cat-file", "--batch"]
+    request = "".join(f"{blob}\n" for blob in ids).encode()
+    out = subprocess.run(command, input=request, check=True, capture_output=True).stdout
+    blobs: list[bytes] = []
+    pos = 0
+    for _ in ids:
+        end = out.find(b"\n", pos)
+        header = out[pos:end].split(b" ")
+        if end < 0 or len(header) != 3 or not header[2].isdigit():
+            raise subprocess.CalledProcessError(1, command)
+        start = end + 1
+        size = int(header[2])
+        blobs.append(out[start : start + size])
+        pos = start + size + 1
+    return blobs
+
+
+def _added_text(patch: bytes) -> Iterator[bytes]:
+    """Yield each file's added lines of a unified diff as one text, headers skipped.
+
+    Whole files, not single lines, so a listed phrase split across lines hits.
+    """
+    added: list[bytes] = []
     in_hunk = False
     for line in patch.split(b"\n"):
         if line.startswith(b"diff --git "):
+            if added:
+                yield b"\n".join(added)
+            added = []
             in_hunk = False
         elif line.startswith(b"@@"):
             in_hunk = True
         elif in_hunk and line.startswith(b"+"):
-            yield line[1:]
+            added.append(line[1:])
+    if added:
+        yield b"\n".join(added)
 
 
 def _changes(repo: Path, sha: str) -> list[tuple[str, str, str]]:
@@ -160,9 +275,15 @@ def _commit_hits(repo: Path, sha: str, words: Sequence[str]) -> list[Hit]:
     if any(count_hits(path, words) for _mode, _id, path in changes):
         found.append("path")
 
+    files = [
+        (blob, path)
+        for mode, blob, path in changes
+        if mode != _SUBMODULE_MODE and set(blob) != {"0"}
+    ]
+    contents = _blobs(repo, [blob for blob, _path in files])
     content = any(
-        count_hits(_text(line), words)
-        for line in _added_lines(
+        count_hits(_text(added), words)
+        for added in _added_text(
             _git(
                 repo,
                 "diff-tree",
@@ -178,12 +299,14 @@ def _commit_hits(repo: Path, sha: str, words: Sequence[str]) -> list[Hit]:
     if not content:
         binary = _binary_paths(repo, sha)
         content = any(
-            count_hits(_git(repo, "cat-file", "blob", blob).decode("latin-1"), words)
-            for mode, blob, path in changes
-            if path in binary and mode != _SUBMODULE_MODE and set(blob) != {"0"}
+            count_hits(_decode(data), words)
+            for (_blob, path), data in zip(files, contents, strict=True)
+            if path in binary or _read_whole(data)
         )
     if content:
         found.append("content")
+    if any(_is_archive(data) for data in contents):
+        found.append("archive")
     return [Hit(kind, sha) for kind in found]
 
 
@@ -194,24 +317,19 @@ def scan_commits(
 ) -> list[Hit]:
     """Scan every commit ``git rev-list <rev_range>`` names in ``repo``.
 
-    Per commit: the message; author and committer name and email; every changed
-    path; every added line of a text file; and the whole new content of a binary
-    file, read as Latin-1. A merge is diffed against its first parent, so content
-    a merge itself introduces is scanned too. One hit per kind per commit.
+    Per commit: the whole message; author and committer name and email; every
+    changed path; each text file's added lines, as one text; and the whole new
+    content of a binary file (decoded by its UTF-16/32 mark, else as Latin-1). A
+    changed compressed or archive file is an ``archive`` hit. A merge is diffed
+    against its first parent, so content a merge itself introduces is scanned too.
+    One hit per kind per commit.
     """
     shas = _text(_git(repo, "rev-list", *rev_range)).split()
     return [hit for sha in shas for hit in _commit_hits(repo, sha, words)]
 
 
-def _blob_text(data: bytes) -> str:
-    """Decode a whole file: Latin-1 when git would call it binary (a NUL early on)."""
-    if b"\0" in data[:_BINARY_SNIFF]:
-        return data.decode("latin-1")
-    return _text(data)
-
-
-def _head_files(repo: Path) -> tuple[str, list[str], Iterator[bytes]]:
-    """HEAD's id, every tracked path, and (lazily) every blob's bytes."""
+def _head_files(repo: Path) -> tuple[str, list[str], Iterable[bytes]]:
+    """HEAD's id, every tracked path, and every blob's bytes."""
     sha = _text(_git(repo, "rev-parse", "--verify", "HEAD^{commit}")).strip()
     paths: list[str] = []
     blobs: list[str] = []
@@ -222,10 +340,10 @@ def _head_files(repo: Path) -> tuple[str, list[str], Iterator[bytes]]:
         paths.append(_text(path))
         if kind == "blob":
             blobs.append(blob)
-    return sha, paths, (_git(repo, "cat-file", "blob", blob) for blob in blobs)
+    return sha, paths, _blobs(repo, blobs)
 
 
-def _plain_files(root: Path) -> tuple[str, list[str], Iterator[bytes]]:
+def _plain_files(root: Path) -> tuple[str, list[str], Iterable[bytes]]:
     """Every regular file under ``root``, ``.git`` and symlinks skipped."""
     files: list[Path] = []
     for directory, subdirs, names in os.walk(root):
@@ -243,8 +361,9 @@ def scan_tree(root: Path, words: Sequence[str]) -> list[Hit]:
 
     A git repository's root (it holds ``.git``) is scanned as tracked at HEAD and
     hits are at the HEAD commit id; any other directory is walked (every regular
-    file, ``.git`` and symlinks skipped) and hits are at ``tree``. Binary files are
-    read as Latin-1. One hit per kind.
+    file, ``.git`` and symlinks skipped) and hits are at ``tree``. Files are decoded
+    by their UTF-16/32 mark, binary ones read as Latin-1; a compressed or archive
+    file is an ``archive`` hit. One hit per kind.
     """
     if not root.is_dir():
         raise NotADirectoryError(root)
@@ -253,8 +372,14 @@ def scan_tree(root: Path, words: Sequence[str]) -> list[Hit]:
     found: list[HitKind] = []
     if any(count_hits(path, words) for path in paths):
         found.append("path")
-    if any(count_hits(_blob_text(data), words) for data in contents):
+    content = archive = False
+    for data in contents:
+        content = content or count_hits(_decode(data), words) > 0
+        archive = archive or _is_archive(data)
+    if content:
         found.append("content")
+    if archive:
+        found.append("archive")
     return [Hit(kind, where) for kind in found]
 
 

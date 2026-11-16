@@ -2,41 +2,38 @@
 
 `parse_call` is the one parser of params. The identity is the principal, the server, the tool name and the
 exact bytes of the top-level `arguments` value, never a re-encoding. `_meta` is left out (it carries a fresh
-progress token on every repeat), except that a `_meta` declaring the MCP Tasks extension is refused: a task's
-later steps would escape the one approved call. Duplicate keys, at any depth and however escaped, are refused:
-two JSON readers could see two different calls. A NUL in a name is refused: Postgres text cannot store it.
+progress token on every repeat), except that a call asking for a task is refused: a `_meta` declaring the MCP
+Tasks extension, or a `task` member (the 2025-11-25 protocol's task-augmented call). A task's later steps would
+escape the one approved call. Duplicate keys, at any depth and however escaped, are refused: two JSON readers
+could see two different calls. A NUL or a lone surrogate in a name, an argument key or an argument string is
+refused: Postgres text cannot store a NUL, and a lone surrogate has no UTF-8 bytes. Nesting deeper than
+MAX_JSON_DEPTH and a number too large for a float are refused too.
 """
 
 import hashlib
 import json
-import re
+import math
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Final, NewType
+from typing import Final
 
-Principal = NewType("Principal", str)  # the attested caller, as the gateway names it
-ServerName = NewType("ServerName", str)
-ToolName = NewType("ToolName", str)
-Ticket = NewType("Ticket", str)  # secrets.token_urlsafe(18): 24 characters of [A-Za-z0-9_-]
-Fingerprint = NewType("Fingerprint", bytes)  # SHA-256 of a CallIdentity
+from tool_approvals.kernel.names import Fingerprint, Principal, ServerName, ToolName
 
 MAX_PARAMS_BYTES: Final = 16_384
 ALLOWED_PARAMS_KEYS: Final = frozenset({"name", "arguments", "_meta"})
 CLIENT_CAPABILITIES_META_KEY: Final = "io.modelcontextprotocol/clientCapabilities"
 TASKS_EXTENSION: Final = "io.modelcontextprotocol/tasks"  # refused in _meta[clientCapabilities]["extensions"]
+# Objects and arrays open at once, the params object itself the first. A google.protobuf.Struct survives a binary
+# round trip through upb, whose recursion limit is 100, only up to 33 levels of objects (each costs a Struct, a
+# map entry and a Value); 32 keeps every accepted call within that, so a policy or store that carries arguments as
+# a Struct never meets a call it cannot read. It also bounds the decoder's recursion far below Python's limit.
+MAX_JSON_DEPTH: Final = 32
 
 _WHITESPACE: Final = frozenset(" \t\n\r")  # JSON's insignificant whitespace (RFC 8259 §2)
 _NUL: Final = "\x00"
-# Every ticket is URL-safe base64; anything else names no ticket and never reaches a store. The shape check is
-# looser than the issued length, so a change of ticket size needs no coordinated release.
-_TICKET_SHAPE: Final = re.compile(r"[A-Za-z0-9_-]{1,64}")
-
-
-def is_ticket(text: str) -> bool:
-    """Whether `text` could be a ticket at all (URL-safe base64, 1 to 64 characters)."""
-    return _TICKET_SHAPE.fullmatch(text) is not None
+_TASK_PARAMS_KEY: Final = "task"  # the 2025-11-25 protocol's task-augmented tools/call
 
 
 class RejectReason(StrEnum):
@@ -83,6 +80,16 @@ def _refuse_constant(name: str) -> object:
     raise _Malformed(f"not JSON: {name}")
 
 
+def _finite_float(text: str) -> float:
+    # 1e400 is valid JSON but overflows to inf, which no other reader agrees on. Integers are kept exact, however
+    # large (Python refuses more than 4300 digits): a residual, since a reader with 64-bit or float integers would
+    # see a different number.
+    value = float(text)
+    if not math.isfinite(value):
+        raise _Malformed("number out of range")
+    return value
+
+
 def _refuse_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
     # Keys arrive unescaped, so "a" and "a" are the same key here, as they are to every other reader.
     result = dict(pairs)
@@ -91,7 +98,31 @@ def _refuse_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return result
 
 
-_DECODER: Final = json.JSONDecoder(object_pairs_hook=_refuse_duplicates, parse_constant=_refuse_constant)
+_DECODER: Final = json.JSONDecoder(
+    object_pairs_hook=_refuse_duplicates, parse_constant=_refuse_constant, parse_float=_finite_float
+)
+
+
+def _check_depth(text: str) -> None:
+    """Refuse nesting deeper than MAX_JSON_DEPTH before the decoder recurses into it."""
+    depth = 0
+    in_string = escaped = False
+    for char in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char in "[{":
+            depth += 1
+            if depth > MAX_JSON_DEPTH:
+                raise _Malformed("nested too deep")
+        elif char in "]}":
+            depth -= 1
 
 
 def _skip_whitespace(text: str, index: int) -> int:
@@ -148,12 +179,27 @@ def _check_name(name: object) -> str:
     return name
 
 
+def _check_strings(value: object) -> None:
+    """Refuse a NUL or a lone surrogate in any key or string inside `value`."""
+    if isinstance(value, str):
+        _check_name(value)
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            _check_name(key)
+            _check_strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            _check_strings(item)
+
+
 def parse_call(principal: Principal, server: ServerName, params: bytes) -> ParsedCall | CallRejected:
     """The call, or why it will not be considered.
 
     The params must be at most MAX_PARAMS_BYTES of UTF-8 JSON: an object whose keys are within
-    ALLOWED_PARAMS_KEYS, with a string `name`, an object `arguments` if any, and no `_meta` declaring the Tasks
-    extension. The principal and the server are non-empty; no name holds a NUL.
+    ALLOWED_PARAMS_KEYS, with a non-empty string `name`, an object `arguments` if any, nesting at most
+    MAX_JSON_DEPTH deep, and no number that overflows a float. A `task` member or a `_meta` declaring the Tasks
+    extension is TASK_REQUESTED. The principal and the server are non-empty; no name and no argument key or string
+    holds a NUL or a lone surrogate.
     """
     if len(params) > MAX_PARAMS_BYTES:
         return CallRejected(RejectReason.TOO_LARGE)
@@ -163,26 +209,32 @@ def parse_call(principal: Principal, server: ServerName, params: bytes) -> Parse
         _check_name(principal)
         _check_name(server)  # the gateway's strings: a lone surrogate in them could not be fingerprinted either
         text = params.decode("utf-8")  # strict: a lossless round trip, so a span re-encodes to its bytes
+        _check_depth(text)
         members: dict[str, tuple[object, int, int]] = {}
         for key, value, start, end in _members(text):
             if key in members:
                 raise _Malformed("duplicate top-level key")
             members[key] = (value, start, end)
+        if _TASK_PARAMS_KEY in members:
+            return CallRejected(RejectReason.TASK_REQUESTED)
         if not members.keys() <= ALLOWED_PARAMS_KEYS:
             raise _Malformed("unknown top-level key")
         if "name" not in members:
             raise _Malformed("no name")
         tool = ToolName(_check_name(members["name"][0]))
+        if not tool:
+            raise _Malformed("empty tool name")
         arguments: dict[str, object] = {}
         arguments_json = b""
         if "arguments" in members:
             value, start, end = members["arguments"]
             if not isinstance(value, dict):
                 raise _Malformed("arguments is not an object")
+            _check_strings(value)
             arguments = value
             arguments_json = text[start:end].encode()
         if "_meta" in members and _declares_tasks(members["_meta"][0]):
             return CallRejected(RejectReason.TASK_REQUESTED)
-    except (ValueError, RecursionError):  # JSONDecodeError, UnicodeError and _Malformed are ValueErrors
+    except ValueError:  # JSONDecodeError, UnicodeError and _Malformed are ValueErrors
         return CallRejected(RejectReason.MALFORMED)
     return ParsedCall(CallIdentity(principal, server, tool, arguments_json), MappingProxyType(arguments))

@@ -1,4 +1,4 @@
-"""scripts/denylist.py is a verified copy of the publishing step's scanner."""
+"""scripts/denylist.py is vendored, unchanged, from the maintainers' copy of the scanner."""
 
 from __future__ import annotations
 
@@ -7,9 +7,10 @@ from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "denylist.py"
 
-# SHA-256 of the publishing step's copy, which carries the scanner's own tests. The publishing step refuses a
-# tree whose copy differs, so a change to the scanner lands in both places together, and this pin moves with it.
-PUBLISHED_SHA256 = "d06443a8ac8cf14dad0ea767b46b187b66901677c6866c546b909febb7133cdf"
+# SHA-256 of the maintained copy. The scanner's behaviour tests live upstream with the maintainers' tooling, which
+# refuses to publish a tree whose copy differs, so a change to the scanner is vendored whole and this pin moves
+# with it.
+PUBLISHED_SHA256 = "0ef1326a0031093ca2e6a05915f6110c100a8edd8f6bd1493f8fd28eebc85d55"
 
 
 def test_copy_matches_the_published_scanner() -> None:

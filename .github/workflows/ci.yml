@@ -32,11 +32,19 @@ jobs:
       - run: uv run --locked mypy
       - run: uv run --locked lint-imports
       - run: uv run --locked pytest -n auto
+      # The release rules (.releaserc.json) through the pinned commit-analyzer: what each title type releases.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: node --test tests/release_rules.test.mjs
 
   # Refuses a listed word in the commits, the tree, the branch name, or the pull request's title and body.
-  # The scanner is scripts/denylist.py, a byte-identical copy of the publishing step's (tests/test_denylist_copy.py):
-  # `denylist.py commits <range>` and `denylist.py tree <path>`, the word list on stdin, exit 0 clean, 1 hit,
-  # 2 setup failure; it names the kind of hit, never the word. The list is the DENYLIST secret (a Dependabot secret
+  # The scanner is scripts/denylist.py, vendored unchanged from the maintainers' copy (tests/test_denylist_copy.py
+  # pins it; its behaviour tests live upstream with the maintainers' tooling):
+  # `denylist.py commits <range>` and `denylist.py tree <path>`, the word list on stdin, exit 0 clean, 1 hit (a
+  # listed word, or a compressed or archive file it cannot read), 2 setup failure; it names the kind of hit, never
+  # the word. The list is the DENYLIST secret (a Dependabot secret
   # of the same value serves Dependabot's pull requests) and reaches the scanner only through `env:` and stdin, as
   # does every piece of pull request text. Pull requests from forks are not scanned: they get no secrets, and a
   # result would reveal the list.
@@ -121,6 +129,13 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      # With no v* tag semantic-release would cut 1.0.0; the 0.x line starts from a seed tag pushed once by hand.
+      - name: Require the seed tag
+        run: |
+          if [ -z "$(git tag --list 'v*')" ]; then
+            echo "::error::No v* tag exists, so a release would be 1.0.0. A maintainer must push the seed tag v0.1.0 once before the first release."
+            exit 1
+          fi
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc

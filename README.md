@@ -10,7 +10,9 @@ Policy, approval routing and the surfaces people answer on are yours to choose.
 > **Status: pre-release, under construction.** This repository currently holds the package skeleton, CI and the
 > shared call parser. Everything else on this page is the design, built in the milestones listed
 > [below](#roadmap); each section says what is planned. Releases stay on `0.x` until the project is declared
-> stable: until then a breaking change raises the minor version.
+> stable. The `0.x` line starts from a seed tag, `v0.1.0`, that a maintainer pushes once before the first
+> release; on `0.x` a breaking change raises the minor version, a rule deleted from the release configuration
+> when the project goes 1.0.
 
 ## Why
 
