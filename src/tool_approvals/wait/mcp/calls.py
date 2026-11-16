@@ -4,7 +4,7 @@ the tool results the agent reads."""
 from dataclasses import dataclass
 from typing import Any, Final
 
-from mcp.server.context import ServerRequestContext
+from mcp.server.context import CallNext, HandlerResult, ServerRequestContext
 from mcp.shared.exceptions import MCPError
 from mcp_types import INVALID_REQUEST, CallToolResult, TextContent
 from starlette.requests import Request
@@ -34,6 +34,19 @@ def require_wait_call(ctx: ServerRequestContext[Any, Any], registry: Registry) -
     caller = registry.authenticate(values[0] if len(values) == 1 else None)
     if caller is None or Method.WAIT_CALL not in caller.grants:
         raise MCPError(INVALID_REQUEST, f"a registry bearer granted {Method.WAIT_CALL.value} is required")
+
+
+class WaitCallGuard:
+    """Satisfies the MCP SDK's `ServerMiddleware`: every tools/call and every tasks/* request needs one registry
+    bearer granted WAIT_CALL (`require_wait_call`), whether or not Wait Tasks are served; discovery stays open."""
+
+    def __init__(self, registry: Registry) -> None:
+        self._registry: Final = registry
+
+    async def __call__(self, ctx: ServerRequestContext[Any, Any], call_next: CallNext) -> HandlerResult:
+        if ctx.method == "tools/call" or ctx.method.startswith("tasks/"):
+            require_wait_call(ctx, self._registry)
+        return await call_next(ctx)
 
 
 def principal_of(ctx: ServerRequestContext[Any, Any], header: str) -> Principal | None:

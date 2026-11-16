@@ -213,6 +213,7 @@ wait:
     ca: /etc/tool-approvals/ca.pem
     credential: { env: WAIT_APPROVALS_BEARER }
   max_hold: 15m # default
+  tasks: enabled # default; disabled: no MCP Tasks, every wait is a held call
   task_poll_interval: 5s # default
 ```
 
@@ -222,6 +223,7 @@ wait:
 | `tool` | The wait tool's name on the wait server. Default `approval_wait` |
 | `approvals` | As for the gate, with the wait server's bearer |
 | `max_hold` | A held call returns `still-waiting` after this long; the agent calls again. Default `15m` |
+| `tasks` | `enabled` serves [MCP Tasks](wait.md#mcp-tasks) for the wait tool; `disabled` neither advertises nor serves them, so every wait is a held call (`tasks/get` is an unknown method). Default `enabled` |
 | `task_poll_interval` | The `pollIntervalMs` a Wait Task suggests. Default `5s` |
 
 The behaviour is in [the wait tool and MCP Tasks](wait.md).

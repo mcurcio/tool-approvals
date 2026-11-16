@@ -14,7 +14,7 @@ from tool_approvals.kernel.names import Principal
 from tool_approvals.wait.core.hold import Held, WaitCore
 from tool_approvals.wait.core.wording import refusal
 from tool_approvals.wait.mcp import calls
-from tool_approvals.wait.mcp.calls import refused_result, report_result, wait_call
+from tool_approvals.wait.mcp.calls import WaitCallGuard, refused_result, report_result, wait_call
 from tool_approvals.wait.mcp.tasks import WaitTasks
 
 SERVER_NAME: Final = "tool-approvals-wait"
@@ -27,11 +27,13 @@ _DESCRIPTION: Final = (
 
 
 def build_server(core: WaitCore, view: WaitView, registry: Registry) -> MCPServer[Any]:
-    """The MCP server: tool `view.tool` (ticket, reason?, work_ref?) holding through `core`, and WaitTasks.
-    Discovery (initialize, tools/list) is open; a tools/call needs a registry bearer with WAIT_CALL."""
-    # WaitTasks intercepts every tools/call: it checks the bearer first, then takes a task-declaring call or
-    # passes the call on to the held tool below.
-    server: MCPServer[Any] = MCPServer(SERVER_NAME, extensions=[WaitTasks(core, view, registry)])
+    """The MCP server: tool `view.tool` (ticket, reason?, work_ref?) holding through `core`, and WaitTasks unless
+    `view.tasks` is off (then the Tasks extension is neither advertised nor served, and every call is held).
+    Discovery (initialize, tools/list) is open; a tools/call or a tasks/* request needs a registry bearer with
+    WAIT_CALL (WaitCallGuard)."""
+    # WaitTasks intercepts every tools/call: it takes a task-declaring call or passes it on to the held tool below.
+    extensions = [WaitTasks(core, view)] if view.tasks else []
+    server: MCPServer[Any] = MCPServer(SERVER_NAME, extensions=extensions, middleware=[WaitCallGuard(registry)])
 
     async def held(
         ticket: Annotated[str, Field(description="the ticket the refused call gave you")],

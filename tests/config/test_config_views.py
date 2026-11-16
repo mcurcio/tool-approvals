@@ -80,7 +80,14 @@ def test_the_wait_view_needs_no_secret_without_approvals(tmp_path: Path) -> None
     assert view.tool == "approval_wait"
     assert view.max_hold == timedelta(minutes=15)
     assert view.task_poll_interval == timedelta(seconds=5)
+    assert view.tasks is True  # Wait Tasks served by default
     assert view.registry[3].grants == {Method.WAIT_CALL}
+
+
+def test_an_operator_can_turn_wait_tasks_off(tmp_path: Path) -> None:
+    document = _example()
+    document["wait"]["tasks"] = "disabled"
+    assert wait_view(load(_write(tmp_path, document)), {"WAIT_APPROVALS_BEARER": "b"}).tasks is False
 
 
 def test_the_wait_view_resolves_only_its_own_credential() -> None:

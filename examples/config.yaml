@@ -105,6 +105,7 @@ wait:
     ca: /etc/tool-approvals/ca.pem
     credential: { env: WAIT_APPROVALS_BEARER }
   max_hold: 15m # default
+  tasks: enabled # default; disabled: no MCP Tasks, every wait is a held call
   task_poll_interval: 5s # default
 
 approvals: # `approvals migrate` reads only approvals.database

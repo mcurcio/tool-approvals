@@ -54,27 +54,30 @@ class Running:
 
 
 def wait_server(
-    script: Script | None, tls: TlsFiles, *, max_hold: timedelta = timedelta(seconds=20)
+    script: Script | None, tls: TlsFiles, *, max_hold: timedelta = timedelta(seconds=20), tasks: bool = True
 ) -> AbstractAsyncContextManager[Running]:
-    """`serve(view, stop)` on free local ports, its Approvals the scripted server (None: not configured)."""
-    return _wait_server(script, tls, max_hold)
+    """`serve(view, stop)` on free local ports, its Approvals the scripted server (None: not configured); Wait
+    Tasks served unless `tasks` is False."""
+    return _wait_server(script, tls, max_hold, tasks)
 
 
 @asynccontextmanager
-async def _wait_server(script: Script | None, tls: TlsFiles, max_hold: timedelta) -> AsyncIterator[Running]:
+async def _wait_server(
+    script: Script | None, tls: TlsFiles, max_hold: timedelta, tasks: bool
+) -> AsyncIterator[Running]:
     if script is None:
-        async with _running(None, tls, max_hold) as running:
+        async with _running(None, tls, max_hold, tasks) as running:
             yield running
         return
     async with (
         scripted_requests(script, tls, APPROVALS_BEARER) as approvals,
-        _running(approvals, tls, max_hold) as running,
+        _running(approvals, tls, max_hold, tasks) as running,
     ):
         yield running
 
 
 @asynccontextmanager
-async def _running(approvals: Any, tls: TlsFiles, max_hold: timedelta) -> AsyncIterator[Running]:
+async def _running(approvals: Any, tls: TlsFiles, max_hold: timedelta, tasks: bool) -> AsyncIterator[Running]:
     view = WaitView(
         mcp=ListenerView("localhost", free_port(), TlsView(tls.cert, tls.key, None)),
         health=ListenerView("localhost", free_port(), None),
@@ -82,6 +85,7 @@ async def _running(approvals: Any, tls: TlsFiles, max_hold: timedelta) -> AsyncI
         tool=TOOL,
         approvals=approvals,
         max_hold=max_hold,
+        tasks=tasks,
         task_poll_interval=timedelta(milliseconds=50),
         wait_route=WaitRouteView(ServerName("approvals-wait"), PRINCIPAL_HEADER),
         registry=(

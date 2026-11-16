@@ -235,6 +235,7 @@ class Wait(Section):
     tool: Text = "approval_wait"
     approvals: ApprovalsClient | None = None  # absent: discovery answers, every call is refused
     max_hold: Duration = timedelta(minutes=15)
+    tasks: Literal["enabled", "disabled"] = "enabled"  # MCP Tasks for the wait tool
     task_poll_interval: Duration = timedelta(seconds=5)
 
 

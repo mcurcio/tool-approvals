@@ -128,6 +128,7 @@ class WaitView:
     tool: str  # the wait tool's own name on the wait server
     approvals: RequestsClientView | None  # None: discovery answers, every call is refused ("not configured")
     max_hold: timedelta
+    tasks: bool  # serve and advertise MCP Tasks for the wait tool (wait.tasks: enabled)
     task_poll_interval: timedelta
     wait_route: WaitRouteView
     registry: tuple[RegistryEntryView, ...]
@@ -258,6 +259,7 @@ def wait_view(cfg: ConfigFile, env: Mapping[str, str]) -> WaitView:
         tool=wait.tool,
         approvals=approvals,
         max_hold=wait.max_hold,
+        tasks=wait.tasks == "enabled",
         task_poll_interval=wait.task_poll_interval,
         wait_route=_wait_route(route),
         registry=_registry(registry),

@@ -124,3 +124,9 @@ ticket "…"" as a failed tool call, calls the wait tool, and repeats the origin
 **Tasks.** agentgateway does not pass `tasks/*` follow-ups through the guardrail, so a gated call that asks to run
 as a task would escape the approved call: the gate rejects it (`task-requested`). The wait tool itself is offered as
 a task to clients that declare Tasks ([the wait tool](wait.md#mcp-tasks)).
+
+**Known limit: Wait Tasks through agentgateway v1.7.0 with the MCP Python SDK.** On protocol `2026-07-28`
+agentgateway v1.7.0 refuses a `tasks/get` that carries no `Mcp-Name` header, and the MCP Python SDK's client does
+not send that header on `tasks/get`. Such a client can open a Wait Task through agentgateway but cannot read it
+back. Until one side changes, either use a client that sends `Mcp-Name`, or turn Wait Tasks off
+(`wait.tasks: disabled`), so every wait is a held call.

@@ -338,3 +338,31 @@ async def test_the_health_listener_answers(tls: TlsFiles) -> None:
         live = await http.get(f"http://localhost:{running.view.health.port}/healthz")
         ready = await http.get(f"http://localhost:{running.view.health.port}/readyz")
     assert (live.status_code, ready.status_code) == (200, 200)
+
+
+# wait.tasks: disabled. The operator's switch: no task is opened or read, every call is held, and the bearer is
+# still required.
+
+
+async def test_with_tasks_disabled_a_declaring_client_gets_the_held_result_and_no_task_reads(tls: TlsFiles) -> None:
+    script = Script(open_wait=[WAIT], reports={WAIT: [report(WaitState.WAITING), report(WaitState.APPROVED)]})
+    async with wait_server(script, tls, tasks=False) as running, client(running, tasks=True) as mcp:
+        result = await mcp.session.call_tool(TOOL, {"ticket": TICKET}, meta=_declared(), allow_claimed=True)
+        with pytest.raises(MCPError) as read:
+            await get_task(mcp.session, WAIT)
+    assert isinstance(result, CallToolResult)
+    assert _text(result) == APPROVED_WORDS
+    assert read.value.code == METHOD_NOT_FOUND
+    assert script.calls == [("open_wait", (Principal("agent-1"), Ticket(TICKET), None)), ("await_outcome", WAIT)]
+
+
+async def test_with_tasks_disabled_calls_still_need_a_bearer(tls: TlsFiles) -> None:
+    script = Script(open_wait=[WAIT], reports={WAIT: [report(WaitState.APPROVED)]})
+    async with (
+        wait_server(script, tls, tasks=False) as running,
+        client(running, headers={PRINCIPAL_HEADER: "agent-1"}) as mcp,
+    ):
+        with pytest.raises(MCPError) as call:
+            await mcp.session.call_tool(TOOL, {"ticket": TICKET})
+    assert call.value.code == INVALID_REQUEST
+    assert script.calls == []

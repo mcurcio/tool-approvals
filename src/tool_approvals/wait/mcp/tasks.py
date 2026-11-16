@@ -16,14 +16,13 @@ from mcp_types import (
     RequestParams,
 )
 
-from tool_approvals.auth.registry import Registry
 from tool_approvals.config.views import WaitView
 from tool_approvals.kernel.calls import TASKS_EXTENSION, declares_tasks
 from tool_approvals.kernel.names import WaitId, is_wait_id
 from tool_approvals.kernel.requests import WaitReport, WaitState
 from tool_approvals.wait.core.hold import Held, TaskOpened, WaitCore, WaitUnavailable
 from tool_approvals.wait.core.wording import refusal
-from tool_approvals.wait.mcp.calls import refused_result, report_result, require_wait_call, wait_call
+from tool_approvals.wait.mcp.calls import refused_result, report_result, wait_call
 
 # The protocol revision whose per-request capabilities carry the Tasks declaration; tasks are served on it only.
 TASKS_PROTOCOL: Final = "2026-07-28"
@@ -39,10 +38,9 @@ class TaskRef(RequestParams):
 class WaitTasks(Extension):
     identifier = TASKS_EXTENSION
 
-    def __init__(self, core: WaitCore, view: WaitView, registry: Registry) -> None:
+    def __init__(self, core: WaitCore, view: WaitView) -> None:
         self._core: Final = core
         self._view: Final = view
-        self._registry: Final = registry
 
     def methods(self) -> Sequence[MethodBinding]:
         """tasks/get, on protocol 2026-07-28 only; tasks/update and tasks/cancel stay unbound."""
@@ -52,9 +50,8 @@ class WaitTasks(Extension):
         self, params: CallToolRequestParams, ctx: ServerRequestContext[Any, Any], call_next: CallNext
     ) -> HandlerResult:
         """A call to the wait tool from a client whose request declares Tasks (`kernel.calls.declares_tasks`) on
-        the modern protocol opens a task (resultType "task"); every other call passes to the held tool. Every
-        tools/call, held or not, passes the bearer check here first (build_server always installs this extension)."""
-        require_wait_call(ctx, self._registry)
+        the modern protocol opens a task (resultType "task"); every other call passes to the held tool. The bearer
+        was checked before (WaitCallGuard)."""
         arguments = _readable(params.arguments)
         if (
             params.name != self._view.tool
@@ -76,7 +73,6 @@ class WaitTasks(Extension):
                 return refused_result(refusal(opened))
 
     async def _get(self, ctx: ServerRequestContext[Any, Any], params: TaskRef) -> HandlerResult:
-        require_wait_call(ctx, self._registry)
         if not declares_tasks(ctx.meta):
             raise MCPError(
                 MISSING_REQUIRED_CLIENT_CAPABILITY,
