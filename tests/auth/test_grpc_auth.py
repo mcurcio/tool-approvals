@@ -14,11 +14,11 @@ from tests.fixtures.certs import TlsFiles, tls_files
 from tests.fixtures.ports import free_port
 from tool_approvals.auth.grpc_auth import GrpcAuth, current_caller
 from tool_approvals.auth.registry import Registry, issue_bearer
-from tool_approvals.config.methods import Method
 from tool_approvals.config.views import ListenerView, RegistryEntryView, TlsView
 from tool_approvals.contract.calls.v1 import calls_pb2
 from tool_approvals.contract.check.v1 import check_pb2, check_pb2_grpc
 from tool_approvals.contract.requests.v1 import requests_pb2, requests_pb2_grpc
+from tool_approvals.kernel.methods import Method
 from tool_approvals.kernel.names import CallerName
 from tool_approvals.serving.grpc_server import grpc_server
 

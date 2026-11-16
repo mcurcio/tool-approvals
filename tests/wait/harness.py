@@ -19,9 +19,9 @@ from pydantic import ConfigDict, TypeAdapter
 from tests.fixtures.certs import TlsFiles
 from tests.fixtures.ports import free_port
 from tests.fixtures.scripted_requests import Script, scripted_requests
-from tool_approvals.config.methods import Method
 from tool_approvals.config.views import ListenerView, RegistryEntryView, TlsView, WaitRouteView, WaitView
 from tool_approvals.kernel.calls import TASKS_EXTENSION
+from tool_approvals.kernel.methods import Method
 from tool_approvals.kernel.names import CallerName, ServerName, WaitId
 from tool_approvals.kernel.requests import WaitReport, WaitState
 from tool_approvals.wait.main import serve

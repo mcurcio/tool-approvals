@@ -37,7 +37,7 @@ from tests.fixtures.echo_tool import EchoTool
 from tests.fixtures.oidc_provider import ScriptedIdp, SignInScript
 from tests.fixtures.ports import free_port
 from tool_approvals.auth.registry import issue_bearer
-from tool_approvals.config.methods import Method
+from tool_approvals.kernel.methods import Method
 
 IMAGE_ENV: Final = "TOOL_APPROVALS_E2E_IMAGE"
 COMPOSE_FILE: Final = Path(__file__).with_name("compose.yaml")

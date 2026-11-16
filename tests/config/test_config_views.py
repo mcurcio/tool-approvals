@@ -7,7 +7,6 @@ from typing import Any
 from ruamel.yaml import YAML
 
 from tool_approvals.config.file import load
-from tool_approvals.config.methods import Method
 from tool_approvals.config.views import (
     ListenerView,
     RuleView,
@@ -18,6 +17,7 @@ from tool_approvals.config.views import (
     migrate_view,
     wait_view,
 )
+from tool_approvals.kernel.methods import Method
 from tool_approvals.kernel.names import AssuranceName, RequirementName, ServerName, SurfaceName
 from tool_approvals.kernel.requirements import Floor, GroupRef, Requirement, SurfaceRule
 

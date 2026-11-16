@@ -10,7 +10,6 @@ from typing import Final
 
 from tool_approvals.config.errors import ConfigError
 from tool_approvals.config.file import ConfigFile
-from tool_approvals.config.methods import Method
 from tool_approvals.config.sections import (
     NO_APPROVAL,
     Approvals,
@@ -27,6 +26,7 @@ from tool_approvals.config.sections import (
     Wait,
     WaitRoute,
 )
+from tool_approvals.kernel.methods import Method
 from tool_approvals.kernel.names import CallerName, RequirementName, ServerName, SurfaceName
 from tool_approvals.kernel.requirements import AssuranceScale, Floor, Requirement, SurfaceRule
 

@@ -5,6 +5,7 @@ import base64
 import hashlib
 import hmac
 
+from tool_approvals.kernel.calls import put_length_prefixed
 from tool_approvals.kernel.names import Digest, Ticket
 
 
@@ -12,8 +13,7 @@ def form_token(key: bytes, sid: str, ticket: Ticket, digest: Digest) -> str:
     """HMAC-SHA-256 over the length-prefixed sid, ticket and digest, as base64url."""
     mac = hmac.new(key, digestmod=hashlib.sha256)
     for field in (sid.encode(), ticket.encode(), digest):
-        mac.update(len(field).to_bytes(8, "big"))  # each field's length first, so no two field lists collide
-        mac.update(field)
+        put_length_prefixed(mac.update, field)
     return base64.urlsafe_b64encode(mac.digest()).decode()
 
 

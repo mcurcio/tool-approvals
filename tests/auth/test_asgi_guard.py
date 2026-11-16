@@ -17,8 +17,8 @@ from tests.fixtures.certs import tls_files
 from tests.fixtures.ports import free_port, serving_asgi
 from tool_approvals.auth.asgi import BearerGuard, caller_of
 from tool_approvals.auth.registry import Registry, issue_bearer
-from tool_approvals.config.methods import Method
 from tool_approvals.config.views import ListenerView, RegistryEntryView, TlsView
+from tool_approvals.kernel.methods import Method
 from tool_approvals.kernel.names import CallerName
 
 

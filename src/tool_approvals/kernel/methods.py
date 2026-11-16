@@ -1,4 +1,5 @@
-"""The methods a registry entry may be granted: the unit of service-to-service authorisation."""
+"""The methods a registry entry may be granted: the unit of service-to-service authorisation. Vocabulary only:
+which wire path needs which grant is each service's own table, in its `main`."""
 
 from enum import StrEnum
 

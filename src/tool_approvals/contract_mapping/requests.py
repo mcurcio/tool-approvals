@@ -1,8 +1,9 @@
 """The one translation between the ApprovalRequests wire (`contract.requests.v1`) and the kernel's vocabulary.
 
 Approvals' gRPC edge writes replies from kernel results; the requests client reads them back. Each value's wire
-form is written once, here, for both directions, with the method paths and the grant each needs. Neither the
-kernel nor a core imports this module (import contracts C1, C5-cores).
+form is written once, here, for both directions, with the method paths (the grant each needs is Approvals'
+`main`'s table). The gate's Check API writes its refusals with the same `refused_message` and `rejected_message`.
+Neither the kernel nor a core imports this module (import contracts C1, C5-cores).
 """
 
 from collections.abc import Mapping
@@ -11,7 +12,6 @@ from typing import Final
 
 from google.protobuf import duration_pb2, timestamp_pb2
 
-from tool_approvals.config.methods import Method
 from tool_approvals.contract.calls.v1 import calls_pb2
 from tool_approvals.contract.requests.v1 import requests_pb2
 from tool_approvals.kernel.calls import RejectReason
@@ -36,13 +36,11 @@ from tool_approvals.kernel.requests import (
 from tool_approvals.kernel.words import WordsError
 
 _SERVICE: Final = requests_pb2.DESCRIPTOR.services_by_name["ApprovalRequestsService"].full_name
-# Every ApprovalRequests method path and the grant a caller needs for it.
-REQUESTS_METHODS: Final[Mapping[str, Method]] = {
-    f"/{_SERVICE}/Request": Method.REQUEST,
-    f"/{_SERVICE}/Claim": Method.CLAIM,
-    f"/{_SERVICE}/OpenWait": Method.OPEN_WAIT,
-    f"/{_SERVICE}/AwaitOutcome": Method.AWAIT_OUTCOME,
-}
+# Every ApprovalRequests method path.
+REQUEST_PATH: Final = f"/{_SERVICE}/Request"
+CLAIM_PATH: Final = f"/{_SERVICE}/Claim"
+OPEN_WAIT_PATH: Final = f"/{_SERVICE}/OpenWait"
+AWAIT_OUTCOME_PATH: Final = f"/{_SERVICE}/AwaitOutcome"
 
 _REJECT_REASONS: Final[Mapping[RejectReason, calls_pb2.Rejected.Reason.ValueType]] = {
     RejectReason.MALFORMED: calls_pb2.Rejected.REASON_MALFORMED,
@@ -99,9 +97,9 @@ def request_response(result: RequestResult) -> requests_pb2.RequestResponse:
         case Ticketed(ticket):
             return requests_pb2.RequestResponse(ticket=ticket)
         case Refused() as refused:
-            return requests_pb2.RequestResponse(refused=_refused_message(refused))
+            return requests_pb2.RequestResponse(refused=refused_message(refused))
         case Rejected() as rejected:
-            return requests_pb2.RequestResponse(rejected=_rejected_message(rejected))
+            return requests_pb2.RequestResponse(rejected=rejected_message(rejected))
         case QueueFull():
             return requests_pb2.RequestResponse(queue_full=requests_pb2.QueueFull())
         case UnknownRequirement():
@@ -115,9 +113,9 @@ def claim_response(result: ClaimResult) -> requests_pb2.ClaimResponse:
         case NotApproved():
             return requests_pb2.ClaimResponse(not_approved=requests_pb2.NotApproved())
         case Refused() as refused:
-            return requests_pb2.ClaimResponse(refused=_refused_message(refused))
+            return requests_pb2.ClaimResponse(refused=refused_message(refused))
         case Rejected() as rejected:
-            return requests_pb2.ClaimResponse(rejected=_rejected_message(rejected))
+            return requests_pb2.ClaimResponse(rejected=rejected_message(rejected))
         case UnknownRequirement():
             return requests_pb2.ClaimResponse(unknown_requirement=requests_pb2.UnknownRequirement())
 
@@ -135,7 +133,7 @@ def open_wait_response(result: OpenWaitResult) -> requests_pb2.OpenWaitResponse:
 def await_outcome_response(report: WaitReport) -> requests_pb2.AwaitOutcomeResponse:
     message = requests_pb2.AwaitOutcomeResponse()
     if report.state is WaitState.REFUSED:
-        message.refused.CopyFrom(_refused_message(Refused(report.comment)))
+        message.refused.CopyFrom(refused_message(Refused(report.comment)))
     else:
         getattr(message, _WAIT_STATUSES[report.state]).SetInParent()
     if report.opened_at is not None:
@@ -147,11 +145,11 @@ def await_outcome_response(report: WaitReport) -> requests_pb2.AwaitOutcomeRespo
     return message
 
 
-def _refused_message(refused: Refused) -> calls_pb2.Refused:
+def refused_message(refused: Refused) -> calls_pb2.Refused:
     return calls_pb2.Refused() if refused.comment is None else calls_pb2.Refused(comment=refused.comment)
 
 
-def _rejected_message(rejected: Rejected) -> calls_pb2.Rejected:
+def rejected_message(rejected: Rejected) -> calls_pb2.Rejected:
     return calls_pb2.Rejected(reason=_REJECT_REASONS[rejected.reason])
 
 

@@ -10,7 +10,6 @@ from google.protobuf.descriptor import FileDescriptor
 
 from tool_approvals.auth.grpc_auth import GrpcAuth
 from tool_approvals.auth.registry import Registry
-from tool_approvals.config.methods import Method
 from tool_approvals.config.views import GateView, ListenerView
 from tool_approvals.contract.agentgateway import ext_mcp_pb2, ext_mcp_pb2_grpc
 from tool_approvals.contract.check.v1 import check_pb2, check_pb2_grpc
@@ -19,6 +18,7 @@ from tool_approvals.gate.mappings.check_api import CheckServicer, check_json_app
 from tool_approvals.gate.mappings.ext_authz import ExtAuthzServicer
 from tool_approvals.gate.mappings.ext_mcp import ExtMcpServicer
 from tool_approvals.gate.policy.rules_file import RulesFilePolicy
+from tool_approvals.kernel.methods import Method
 from tool_approvals.requests_client.client import RequestsClient
 from tool_approvals.serving.grpc_server import grpc_server, serve_grpc
 from tool_approvals.serving.http import health_app, serve_asgi

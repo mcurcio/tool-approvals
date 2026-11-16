@@ -15,12 +15,12 @@ from tests.approvals.store.world import StoreWorld, running_feed, store_world
 from tests.fixtures.certs import TlsFiles, tls_files
 from tests.fixtures.ports import free_port
 from tool_approvals.approvals.edges.requests import RequestsServicer
+from tool_approvals.approvals.main import REQUESTS_METHODS
 from tool_approvals.auth.grpc_auth import GrpcAuth
 from tool_approvals.auth.registry import Registry, issue_bearer
-from tool_approvals.config.methods import Method
 from tool_approvals.config.views import ListenerView, RegistryEntryView, RequestsClientView, TlsView
 from tool_approvals.contract.requests.v1 import requests_pb2_grpc
-from tool_approvals.contract_mapping.requests import REQUESTS_METHODS
+from tool_approvals.kernel.methods import Method
 from tool_approvals.kernel.names import CallerName
 from tool_approvals.requests_client.client import RequestsClient
 from tool_approvals.serving.grpc_server import grpc_server

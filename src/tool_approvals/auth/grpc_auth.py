@@ -13,7 +13,7 @@ import grpc.aio
 
 if TYPE_CHECKING:
     from tool_approvals.auth.registry import Caller, Registry
-    from tool_approvals.config.methods import Method
+    from tool_approvals.kernel.methods import Method
 
 # The authenticated caller of the RPC being served, set by GrpcAuth before the handler runs.
 current_caller: ContextVar[Caller] = ContextVar("current_caller")

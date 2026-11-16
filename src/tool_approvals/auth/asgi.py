@@ -7,7 +7,7 @@ from starlette.responses import PlainTextResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from tool_approvals.auth.registry import Caller, Registry
-from tool_approvals.config.methods import Method
+from tool_approvals.kernel.methods import Method
 
 _SCOPE_KEY: Final = "tool_approvals.caller"
 # A WebSocket refused before it is accepted: policy violation (RFC 6455 §7.4.1).

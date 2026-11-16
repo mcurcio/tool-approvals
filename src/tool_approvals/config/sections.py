@@ -22,7 +22,7 @@ from pydantic import (
     model_validator,
 )
 
-from tool_approvals.config.methods import Method
+from tool_approvals.kernel.methods import Method
 from tool_approvals.kernel.names import AssuranceName, RequirementName, SurfaceName
 from tool_approvals.kernel.requirements import AssuranceLevel, Floor, GroupRef, Requirement, SurfaceRule
 

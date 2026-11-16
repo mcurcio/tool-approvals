@@ -70,7 +70,7 @@ class CallIdentity:
         return Fingerprint(digest.digest())
 
 
-def _put(update: Callable[[bytes], None], field: bytes) -> None:
+def put_length_prefixed(update: Callable[[bytes], None], field: bytes) -> None:
     """One field of a digest: an 8-byte big-endian length, then its bytes, so no two field lists collide."""
     update(len(field).to_bytes(8, "big"))
     update(field)
@@ -78,8 +78,8 @@ def _put(update: Callable[[bytes], None], field: bytes) -> None:
 
 def _put_identity(update: Callable[[bytes], None], identity: CallIdentity) -> None:
     for field in (identity.principal.encode(), identity.server.encode(), identity.tool.encode()):
-        _put(update, field)
-    _put(update, identity.arguments_json)
+        put_length_prefixed(update, field)
+    put_length_prefixed(update, identity.arguments_json)
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,6 +336,6 @@ def shown_digest(identity: CallIdentity, words: AgentWords | None, requirement: 
                 digest.update(_ABSENT)
             else:
                 digest.update(_PRESENT)
-                _put(digest.update, text.encode())
-    _put(digest.update, requirement.encode())
+                put_length_prefixed(digest.update, text.encode())
+    put_length_prefixed(digest.update, requirement.encode())
     return Digest(digest.digest())

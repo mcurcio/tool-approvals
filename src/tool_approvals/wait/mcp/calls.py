@@ -10,7 +10,7 @@ from mcp_types import INVALID_REQUEST, CallToolResult, TextContent
 from starlette.requests import Request
 
 from tool_approvals.auth.registry import Registry
-from tool_approvals.config.methods import Method
+from tool_approvals.kernel.methods import Method
 from tool_approvals.kernel.names import Principal, Ticket
 from tool_approvals.kernel.requests import WaitReport
 from tool_approvals.kernel.words import AgentWords

@@ -21,7 +21,6 @@ from tool_approvals.approvals.app.deadlines import DeadlineWaker
 from tool_approvals.approvals.app.ports import StoreUnavailable
 from tool_approvals.approvals.main import EXIT_OK, _supervise, migrate, serve_until
 from tool_approvals.auth.registry import issue_bearer
-from tool_approvals.config.methods import Method
 from tool_approvals.config.views import (
     ApprovalsView,
     CapsView,
@@ -34,6 +33,7 @@ from tool_approvals.config.views import (
     RequestsClientView,
     TlsView,
 )
+from tool_approvals.kernel.methods import Method
 from tool_approvals.kernel.requests import Ticketed
 from tool_approvals.kernel.requirements import Floor
 from tool_approvals.kernel.timeouts import StopSignal

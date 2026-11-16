@@ -1,6 +1,5 @@
 """The Check API: `CheckService/Check` over gRPC, and the same messages as proto3 JSON at POST /v1/check."""
 
-from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Final, assert_never
 
@@ -10,23 +9,16 @@ from starlette.middleware import Middleware
 
 from tool_approvals.auth.asgi import BearerGuard
 from tool_approvals.auth.registry import Registry
-from tool_approvals.config.methods import Method
-from tool_approvals.contract.calls.v1 import calls_pb2
 from tool_approvals.contract.check.v1 import check_pb2, check_pb2_grpc
+from tool_approvals.contract_mapping.requests import refused_message, rejected_message
 from tool_approvals.gate.core.check import Call, CheckCore, CheckVerdict, Pass, Pending, Unavailable
 from tool_approvals.gate.core.wording import agent_text
-from tool_approvals.kernel.calls import RejectReason
+from tool_approvals.kernel.methods import Method
 from tool_approvals.kernel.names import Principal, ServerName
 from tool_approvals.kernel.requests import QueueFull, Refused, Rejected
 from tool_approvals.serving.http import proto_json_route
 
 CHECK_PATH: Final = "/v1/check"
-
-_REJECT_REASONS: Final[Mapping[RejectReason, calls_pb2.Rejected.Reason.ValueType]] = {
-    RejectReason.MALFORMED: calls_pb2.Rejected.REASON_MALFORMED,
-    RejectReason.TASK_REQUESTED: calls_pb2.Rejected.REASON_TASK_REQUESTED,
-    RejectReason.TOO_LARGE: calls_pb2.Rejected.REASON_TOO_LARGE,
-}
 
 
 class CheckServicer(check_pb2_grpc.CheckServiceServicer):
@@ -64,12 +56,10 @@ def check_response(verdict: CheckVerdict, text: str) -> check_pb2.CheckResponse:
             getattr(response, "pass").SetInParent()  # `pass` is a Python keyword
         case Pending(ticket):
             response.pending.ticket = ticket
-        case Refused(comment):
-            response.refused.SetInParent()
-            if comment is not None:
-                response.refused.comment = comment
-        case Rejected(reason):
-            response.rejected.reason = _REJECT_REASONS[reason]
+        case Refused():
+            response.refused.CopyFrom(refused_message(verdict))
+        case Rejected():
+            response.rejected.CopyFrom(rejected_message(verdict))
         case QueueFull():
             response.queue_full.SetInParent()
         case Unavailable():

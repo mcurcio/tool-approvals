@@ -14,19 +14,19 @@ import grpc.aio
 
 from tests.fixtures.certs import TlsFiles
 from tests.fixtures.ports import free_port
+from tool_approvals.approvals.main import REQUESTS_METHODS
 from tool_approvals.auth.grpc_auth import GrpcAuth
 from tool_approvals.auth.registry import Registry
-from tool_approvals.config.methods import Method
 from tool_approvals.config.views import ListenerView, RegistryEntryView, RequestsClientView, TlsView
 from tool_approvals.contract.requests.v1 import requests_pb2, requests_pb2_grpc
 from tool_approvals.contract_mapping.requests import (
-    REQUESTS_METHODS,
     await_outcome_response,
     call_ref,
     claim_response,
     open_wait_response,
     request_response,
 )
+from tool_approvals.kernel.methods import Method
 from tool_approvals.kernel.names import CallerName, Principal, RequirementName, Ticket, WaitId
 from tool_approvals.kernel.requests import ClaimResult, OpenWaitResult, RequestResult, WaitReport, WaitState
 from tool_approvals.kernel.words import AgentWords

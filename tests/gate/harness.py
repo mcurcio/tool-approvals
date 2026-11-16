@@ -21,7 +21,6 @@ from tests.fixtures.certs import TlsFiles
 from tests.fixtures.ports import free_port
 from tests.fixtures.scripted_requests import Script, scripted_requests
 from tool_approvals.auth.registry import issue_bearer
-from tool_approvals.config.methods import Method
 from tool_approvals.config.views import (
     CheckApiView,
     ExtAuthzView,
@@ -37,6 +36,7 @@ from tool_approvals.config.views import (
 from tool_approvals.contract.agentgateway import ext_mcp_pb2, ext_mcp_pb2_grpc
 from tool_approvals.contract.check.v1 import check_pb2, check_pb2_grpc
 from tool_approvals.gate.main import serve
+from tool_approvals.kernel.methods import Method
 from tool_approvals.kernel.names import CallerName, Principal, RequirementName, ServerName
 
 PRINCIPAL: Final = Principal("agent-7")

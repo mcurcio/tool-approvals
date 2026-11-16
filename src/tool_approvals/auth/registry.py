@@ -9,8 +9,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Final
 
-from tool_approvals.config.methods import Method
 from tool_approvals.config.views import RegistryEntryView
+from tool_approvals.kernel.methods import Method
 from tool_approvals.kernel.names import CallerName
 
 BEARER_BYTES: Final = 32  # random bytes in an issued bearer

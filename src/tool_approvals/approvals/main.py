@@ -22,13 +22,21 @@ from tool_approvals.auth.grpc_auth import GrpcAuth
 from tool_approvals.auth.registry import Registry
 from tool_approvals.config.views import ApprovalsView, MigrateView
 from tool_approvals.contract.requests.v1 import requests_pb2_grpc
-from tool_approvals.contract_mapping.requests import REQUESTS_METHODS
+from tool_approvals.contract_mapping.requests import AWAIT_OUTCOME_PATH, CLAIM_PATH, OPEN_WAIT_PATH, REQUEST_PATH
+from tool_approvals.kernel.methods import Method
 from tool_approvals.serving.grpc_server import grpc_server, serve_grpc
 from tool_approvals.serving.http import health_app, serve_asgi
 from tool_approvals.serving.signals import STOP_GRACE, drain_then_stop, ready_checks, stop_on_signals
 from tool_approvals.serving.timeouts import AsyncioTimeouts
 
 EXIT_OK: Final = 0
+# Every ApprovalRequests method path and the grant a caller needs for it.
+REQUESTS_METHODS: Final = {
+    REQUEST_PATH: Method.REQUEST,
+    CLAIM_PATH: Method.CLAIM,
+    OPEN_WAIT_PATH: Method.OPEN_WAIT,
+    AWAIT_OUTCOME_PATH: Method.AWAIT_OUTCOME,
+}
 READY_CHANGE_FEED: Final = "change-feed"
 
 _log: Final = logging.getLogger(__name__)

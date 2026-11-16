@@ -186,14 +186,16 @@ layers = ["main", "edges | infra", "app", "domain"]
 
 [[tool.importlinter.contracts]]
 id = "C4-layers"
-name = "shared packages: requests_client > serving | auth | contract_mapping > config > contract | kernel"
+name = "shared packages: requests_client > serving | auth > config | contract_mapping > contract | kernel"
 type = "layers"
 # tool_approvals.contract includes the generated wire packages beneath it. contract_mapping is the one translation
-# between that wire and the kernel, for the requests client and Approvals' edge and composition root.
+# between that wire and the kernel, for the requests client, the gate's Check API and Approvals' edge and
+# composition root; it reads no configuration (the grant each method needs is each service's `main`'s table), so it
+# sits beside config, independent of it.
 layers = [
     "tool_approvals.requests_client",
-    "tool_approvals.serving | tool_approvals.auth | tool_approvals.contract_mapping",
-    "tool_approvals.config",
+    "tool_approvals.serving | tool_approvals.auth",
+    "tool_approvals.config | tool_approvals.contract_mapping",
     "tool_approvals.contract | tool_approvals.kernel",
 ]
 
