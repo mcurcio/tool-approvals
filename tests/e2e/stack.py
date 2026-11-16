@@ -398,11 +398,15 @@ def desk_url(desk_port: int) -> str:
 
 
 def skip_without_image(items: Sequence[pytest.Item], under: Path) -> None:
-    """Skip every collected test under `under` unless $TOOL_APPROVALS_E2E_IMAGE names the image built from this
-    commit (the CI e2e job builds it and sets it), so the unit run needs no Docker."""
+    """Skip every collected test under `under` (tests/e2e, tests/conformance) unless $TOOL_APPROVALS_E2E_IMAGE
+    names an image built from this tree (CI's e2e job builds one and runs both directories), so the unit run needs
+    no Docker."""
     if os.environ.get(IMAGE_ENV):
         return
-    skip = pytest.mark.skip(reason=f"set {IMAGE_ENV} to the image built from this commit (the CI e2e job does)")
+    skip = pytest.mark.skip(
+        reason=f"set {IMAGE_ENV} to an image built from this tree (docker build -t tool-approvals:e2e .); "
+        "CI's e2e job runs tests/e2e and tests/conformance with one"
+    )
     for item in items:
         if item.path.is_relative_to(under):
             item.add_marker(skip)

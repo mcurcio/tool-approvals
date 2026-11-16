@@ -20,14 +20,15 @@ uv run lint-imports                               # the layering contracts in py
 uv run python scripts/check_migrations.py         # migrations only expand
 uv run python scripts/generate_contract.py --check  # the wire stubs match proto/ and vendor/
 uv run pytest -n auto
+actionlint                                        # the workflows (https://github.com/rhysd/actionlint)
 ```
 
-The store tests start Postgres through Docker (testcontainers). The end-to-end tests run against an image built
-from your tree, with both gateways, and are skipped without one:
+The store tests start Postgres through Docker (testcontainers). The end-to-end and conformance tests run against
+an image built from your tree, with both gateways, and are skipped without one:
 
 ```bash
 docker build -t tool-approvals:e2e .
-TOOL_APPROVALS_E2E_IMAGE=tool-approvals:e2e uv run pytest -n auto tests/e2e
+TOOL_APPROVALS_E2E_IMAGE=tool-approvals:e2e uv run pytest -n auto tests/e2e tests/conformance
 ```
 
 A change to behaviour that the [reference pages](docs/reference/configuration.md) describe updates them in the

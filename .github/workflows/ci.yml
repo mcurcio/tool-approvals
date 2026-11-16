@@ -15,6 +15,7 @@ permissions:
 # Exact tool versions, one place each. Actions are pinned by full commit sha (tag in the comment).
 env:
   UV_VERSION: 0.13.5
+  ACTIONLINT_VERSION: v1.7.12
 
 jobs:
   check:
@@ -29,6 +30,9 @@ jobs:
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: ${{ env.UV_VERSION }}
+      # The workflows themselves (with shellcheck on their scripts), at a pinned release built by the runner's Go,
+      # which verifies the module against the Go checksum database.
+      - run: go run "github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}"
       - run: uv sync --locked
       - run: uv run --locked ruff check .
       - run: uv run --locked ruff format --check .
@@ -127,8 +131,9 @@ jobs:
           fi
           exit "$rc"
 
-  # The image built from this commit (amd64, loaded into the runner's Docker), then tests/e2e against it: the
-  # compose stack of tests/e2e/compose.yaml with both gateways. The unit run in `check` skips these tests.
+  # The image built from this commit (amd64, loaded into the runner's Docker), then tests/e2e and
+  # tests/conformance against it: the compose stack of tests/e2e/compose.yaml with both gateways. The unit run in
+  # `check` skips these tests.
   e2e:
     name: End-to-end
     runs-on: ubuntu-latest
@@ -150,7 +155,7 @@ jobs:
           tags: tool-approvals:e2e
           cache-from: type=gha,scope=image
           cache-to: type=gha,mode=max,scope=image
-      - run: uv run --locked pytest -n auto tests/e2e
+      - run: uv run --locked pytest -n auto tests/e2e tests/conformance
         env:
           TOOL_APPROVALS_E2E_IMAGE: tool-approvals:e2e
 
