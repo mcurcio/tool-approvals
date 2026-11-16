@@ -47,10 +47,8 @@ def test_anything_but_a_known_bearer_is_refused(authorization: str | None) -> No
     assert registry.authenticate(header) is None
 
 
-def test_registry_stores_no_plain_bearer() -> None:
-    bearer, line = issue_bearer()
-    registry = Registry([_entry("gate", bearer, Method.CHECK)])
-    # Nothing the registry holds (its own objects, and the containers and values in them) is the bearer...
+def _held(registry: Registry) -> list[object]:
+    """Every string and bytes value the registry holds: its own objects, and the containers and values in them."""
     held: list[object] = []
     pending: list[object] = [registry]
     while pending:
@@ -61,13 +59,28 @@ def test_registry_stores_no_plain_bearer() -> None:
             "tool_approvals."
         ):
             pending.extend(referent for referent in gc.get_referents(item) if not isinstance(referent, type))
+    return held
+
+
+def test_registry_stores_no_plain_bearer() -> None:
+    bearer, line = issue_bearer()
+    registry = Registry([_entry("gate", bearer, Method.CHECK)])
+    held = _held(registry)
     assert hashlib.sha256(bearer.encode()).digest() in held  # the walk reached the stored values
     assert bearer not in held
     assert bearer.encode() not in held
-    # ...and what it keeps is no credential: neither the stored hash nor its line authenticates.
+    # What it keeps is no credential: neither the stored hash nor its line authenticates...
     assert registry.authenticate(f"Bearer {line}") is None
     assert registry.authenticate(f"Bearer {hashlib.sha256(bearer.encode()).digest().hex().upper()}") is None
     assert registry.authenticate(f"Bearer {bearer}") is not None
+    # ...and authenticating keeps nothing of what was presented (no cache of a bearer that worked, or one that did
+    # not).
+    stranger = issue_bearer()[0]
+    assert registry.authenticate(f"Bearer {stranger}") is None
+    after = _held(registry)
+    for presented in (bearer, stranger, f"Bearer {bearer}", f"Bearer {stranger}"):
+        assert presented not in after
+        assert presented.encode() not in after
 
 
 def test_every_entry_is_compared_in_constant_time(monkeypatch: pytest.MonkeyPatch) -> None:
