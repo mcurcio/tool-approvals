@@ -2,13 +2,13 @@
 
 import asyncio
 from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass, field
-from typing import override
+from dataclasses import dataclass
 
 import grpc
 import pytest
 from pydantic import SecretStr
 
+from tests.scripted_approvals import TOKEN, E, Script, serve
 from tool_approvals.call_gate import approvals_client
 from tool_approvals.call_gate.approvals_client import GrpcApprovalsClient
 from tool_approvals.call_gate.ports import (
@@ -22,87 +22,6 @@ from tool_approvals.call_gate.ports import (
     WaitError,
 )
 from tool_approvals.contract import approval_requests_pb2 as pb
-from tool_approvals.contract import approval_requests_pb2_grpc as pb_grpc
-
-TOKEN = "call-gate-token"
-E = pb.Empty()
-
-# A stream attempt: the events to send, then how it ends ("end", "unavailable", "hang").
-type Attempt = tuple[list[pb.OutcomeEvent], str]
-
-
-@dataclass
-class Script:
-    request: list[pb.RequestReply | grpc.StatusCode] = field(default_factory=list)
-    claim: list[pb.ClaimReply | grpc.StatusCode] = field(default_factory=list)
-    add_words: list[pb.AddWordsReply | grpc.StatusCode] = field(default_factory=list)
-    streams: list[Attempt] = field(default_factory=list)
-    delay: float = 0.0
-    seen: list[tuple[str, object, str | None]] = field(default_factory=list)
-
-
-class ScriptedApprovals(pb_grpc.ApprovalRequestsServicer):
-    """Checks the bearer token like the real service, then answers from the script."""
-
-    def __init__(self, script: Script) -> None:
-        self.script = script
-
-    async def _authorize(
-        self, name: str, request: object, context: grpc.aio.ServicerContext[object, object]
-    ) -> None:
-        auth = dict(context.invocation_metadata() or ()).get("authorization")
-        self.script.seen.append((name, request, auth if isinstance(auth, str) else None))
-        if auth != f"Bearer {TOKEN}":
-            await context.abort(grpc.StatusCode.UNAUTHENTICATED, "bad token")
-        if self.script.delay:
-            await asyncio.sleep(self.script.delay)
-
-    async def _unary[R](
-        self,
-        name: str,
-        request: object,
-        context: grpc.aio.ServicerContext[object, object],
-        replies: list[R | grpc.StatusCode],
-    ) -> R:
-        await self._authorize(name, request, context)
-        reply = replies.pop(0)
-        if isinstance(reply, grpc.StatusCode):
-            await context.abort(reply, "scripted")
-            raise AssertionError("unreachable")
-        return reply
-
-    @override
-    async def Request(
-        self, request: pb.Call, context: grpc.aio.ServicerContext[pb.Call, pb.RequestReply]
-    ) -> pb.RequestReply:
-        return await self._unary("request", request, context, self.script.request)  # type: ignore[arg-type]
-
-    @override
-    async def Claim(
-        self, request: pb.Call, context: grpc.aio.ServicerContext[pb.Call, pb.ClaimReply]
-    ) -> pb.ClaimReply:
-        return await self._unary("claim", request, context, self.script.claim)  # type: ignore[arg-type]
-
-    @override
-    async def AddWords(
-        self,
-        request: pb.AddWordsRequest,
-        context: grpc.aio.ServicerContext[pb.AddWordsRequest, pb.AddWordsReply],
-    ) -> pb.AddWordsReply:
-        return await self._unary("add_words", request, context, self.script.add_words)  # type: ignore[arg-type]
-
-    @override
-    async def AwaitOutcome(
-        self, request: pb.TicketRef, context: grpc.aio.ServicerContext[pb.TicketRef, pb.OutcomeEvent]
-    ) -> AsyncIterator[pb.OutcomeEvent]:
-        await self._authorize("await", request, context)  # type: ignore[arg-type]
-        events, end = self.script.streams.pop(0)
-        for event in events:
-            yield event
-        if end == "unavailable":
-            await context.abort(grpc.StatusCode.UNAVAILABLE, "dropped")
-        elif end == "hang":
-            await asyncio.Event().wait()
 
 
 @dataclass
@@ -116,18 +35,10 @@ class Harness:
         return GrpcApprovalsClient(grpc.aio.insecure_channel(self.address), SecretStr(token))
 
 
-async def _serve(script: Script, address: str = "127.0.0.1:0") -> tuple[grpc.aio.Server, int]:
-    server = grpc.aio.server()
-    pb_grpc.add_ApprovalRequestsServicer_to_server(ScriptedApprovals(script), server)
-    port = server.add_insecure_port(address)
-    await server.start()
-    return server, port
-
-
 @pytest.fixture
 async def harness() -> AsyncIterator[Harness]:
     script = Script()
-    server, port = await _serve(script)
+    server, port = await serve(script)
     address = f"127.0.0.1:{port}"
     channel = grpc.aio.insecure_channel(address)
     yield Harness(script, address, server, GrpcApprovalsClient(channel, SecretStr(TOKEN)))
@@ -306,14 +217,14 @@ async def test_a_dropped_stream_is_resubscribed(harness: Harness, drop: str) -> 
 
 async def test_a_stream_survives_an_approvals_restart() -> None:
     first = Script(streams=[([outcome(waiting=E)], "hang")])
-    server, port = await _serve(first)
+    server, port = await serve(first)
     client = GrpcApprovalsClient(grpc.aio.insecure_channel(f"127.0.0.1:{port}"), SecretStr(TOKEN))
     stream = client.await_outcome("c", "tk")
     async with asyncio.timeout(10):
         assert await anext(stream) == Outcome("waiting")
         await server.stop(None)
         second = Script(streams=[([outcome(waiting=E), outcome(approved=E)], "end")])
-        restarted, _ = await _serve(second, f"127.0.0.1:{port}")
+        restarted, _ = await serve(second, f"127.0.0.1:{port}")
         try:
             assert [o async for o in stream] == [Outcome("waiting"), Outcome("approved")]
         finally:

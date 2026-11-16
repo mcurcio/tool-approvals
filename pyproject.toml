@@ -8,13 +8,23 @@ license-files = ["LICENSE", "src/tool_approvals/contract/ext_mcp.LICENSE"]
 requires-python = ">=3.13,<3.14"
 dependencies = [
     "grpcio>=1.85.1,<2",
-    "protobuf>=7.35.1,<8",  # the generated stubs need the protoc major they came from
+    "grpcio-health-checking>=1.85.1,<2",
+    "jsonschema>=4.26,<5",
+    "mcp>=2.3.0,<3",
+    "protobuf>=7.35.1,<8", # the generated stubs need the protoc major they came from
     "pydantic>=2.14.3,<3",
+    "pydantic-settings>=2.16.3,<3",
+    "starlette>=1.10.0,<2",
+    "uvicorn>=0.54.0,<1",
 ]
+
+[project.scripts]
+tool-approvals = "tool_approvals.cli:main"
 
 [dependency-groups]
 dev = [
     "grpcio-tools==1.85.1",
+    "httpx>=0.28",
     "hypothesis>=6.170.15",
     "import-linter>=2.16",
     "mypy>=2.4.1",
@@ -24,6 +34,8 @@ dev = [
     "pytest-xdist>=3.8.0",
     "ruff>=0.17.5",
     "types-grpcio>=1.85.0.20261028",
+    "types-grpcio-health-checking>=1.85.0.20261029",
+    "types-jsonschema>=4.26.0.20261006",
     "types-protobuf>=7.35.1.20260906",
 ]
 
@@ -56,7 +68,8 @@ ignore_missing_imports = true
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-addopts = ["--strict-markers", "--strict-config"]
+addopts = ["--strict-markers", "--strict-config", "-m", "not e2e"]
+markers = ["e2e: the Docker tracer against real agentgateway (run with `-m e2e`)"]
 
 [tool.importlinter]
 root_package = "tool_approvals"
@@ -69,7 +82,18 @@ source_modules = ["tool_approvals.call_gate.core", "tool_approvals.call_gate.por
 forbidden_modules = ["grpc", "google", "mcp", "sqlalchemy", "psycopg", "tool_approvals.contract"]
 
 [[tool.importlinter.contracts]]
+name = "The service packages are independent"
+type = "independence"
+modules = ["tool_approvals.call_gate", "tool_approvals.stub_tool"]
+
+[[tool.importlinter.contracts]]
+name = "The shared MCP serving module knows no service"
+type = "forbidden"
+source_modules = ["tool_approvals.mcp_serving"]
+forbidden_modules = ["tool_approvals.call_gate", "tool_approvals.stub_tool", "tool_approvals.contract"]
+
+[[tool.importlinter.contracts]]
 name = "The contract imports no service"
 type = "forbidden"
 source_modules = ["tool_approvals.contract"]
-forbidden_modules = ["tool_approvals.call_gate"]
+forbidden_modules = ["tool_approvals.call_gate", "tool_approvals.stub_tool", "tool_approvals.mcp_serving"]

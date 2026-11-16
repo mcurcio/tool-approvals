@@ -1,0 +1,274 @@
+"""The e2e stack: real agentgateway v1.7.0 and the Call Gate from this repo's image, in Docker; the scripted
+Approvals server and the stub tool in the test process, where the tests can see what reaches them.
+
+Run with ``uv run pytest -m e2e`` (Docker required). ``TOOL_APPROVALS_IMAGE`` names a prebuilt image;
+otherwise the fixture builds one from the working tree.
+"""
+
+import asyncio
+import json
+import os
+import secrets
+import sys
+from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Final
+
+import grpc
+import httpx
+import pytest
+import pytest_asyncio
+from grpc_health.v1 import health_pb2, health_pb2_grpc
+from pydantic import SecretStr
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+from tests.e2e.gateway import (
+    AGENTGATEWAY_IMAGE,
+    BARE_PORT,
+    IAC_PORT,
+    MCP_PATH,
+    READINESS_PORT,
+    Grant,
+    Target,
+    render,
+)
+from tests.scripted_approvals import TOKEN as APPROVALS_TOKEN
+from tests.scripted_approvals import Script, serve
+from tests.serving import running
+from tool_approvals.stub_tool.app import build_stub_app
+from tool_approvals.stub_tool.settings import HOLD_TOOL, StubToolSettings
+
+REPO: Final = Path(__file__).resolve().parents[2]
+CLIENT: Final = "claude-cloud"
+OTHER_CLIENT: Final = "lan-probe"
+HEADER: Final = "x-approval-client"
+WAIT_SERVER: Final = "approval"
+WAIT_TOOL: Final = "wait"
+STUB_SERVER: Final = "approval-stub"
+STUB_TOOL: Final = "stub_write"
+WAIT_EXPOSED: Final = f"{WAIT_SERVER}_{WAIT_TOOL}"
+STUB_EXPOSED: Final = f"{STUB_SERVER}_{STUB_TOOL}"
+HOLD_EXPOSED: Final = f"{STUB_SERVER}_{HOLD_TOOL}"
+READINESS_SERVICE: Final = "agentgateway.dev.ext_mcp.ExtMcp"
+# Docker Desktop forwards host.docker.internal to the Mac's loopback; a Linux engine reaches the host's
+# bridge address, so there the in-process servers listen on every address.
+HOST_BIND: Final = "127.0.0.1" if sys.platform == "darwin" else "0.0.0.0"
+READY_TIMEOUT: Final = 60.0
+
+
+async def docker(*args: str, check: bool = True, with_stderr: bool = False) -> str:
+    """Run the docker CLI; returns its stdout (and stderr, if asked; always in the error when it fails)."""
+    process = await asyncio.create_subprocess_exec(
+        "docker", *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    out, err = await process.communicate()
+    if check and process.returncode != 0:
+        raise RuntimeError(
+            f"docker {' '.join(args)} exited {process.returncode}:\n{out.decode()}{err.decode()}"
+        )
+    return (out + err).decode() if with_stderr else out.decode()
+
+
+async def published(container: str, port: int) -> int:
+    return int((await docker("port", container, f"{port}/tcp")).splitlines()[0].rsplit(":", 1)[1])
+
+
+@dataclass
+class Seen:
+    """One HTTP request that reached the stub."""
+
+    headers: dict[str, str]
+    body: Any
+
+
+class Recorder:
+    """Records every request to the wrapped app (its headers and JSON body) before passing it on."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self._app = app
+        self.seen: list[Seen] = []
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or scope["method"] != "POST":
+            await self._app(scope, receive, send)
+            return
+        messages: list[Message] = []
+        body = b""
+        while True:
+            message = await receive()
+            messages.append(message)
+            body += message.get("body", b"")
+            if not message.get("more_body"):
+                break
+        headers = {k.decode().lower(): v.decode() for k, v in scope["headers"]}
+        self.seen.append(Seen(headers, json.loads(body) if body else None))
+
+        async def replay() -> Message:
+            return messages.pop(0) if messages else await receive()
+
+        await self._app(scope, replay, send)
+
+    def tool_calls(self) -> list[Seen]:
+        return [s for s in self.seen if isinstance(s.body, dict) and s.body.get("method") == "tools/call"]
+
+
+@dataclass
+class Stack:
+    script: Script
+    stub: Recorder
+    keys: dict[str, str]
+    iac_url: str
+    bare_url: str
+    callgate_guardrail: str  # host:port of the Call Gate's published guardrail port
+    restart_approvals: Callable[[], Awaitable[None]]
+    stop_approvals: Callable[[], Awaitable[None]]
+    image: str
+    network: str
+    containers: list[str] = field(default_factory=list)
+
+    def auth(self, client: str = CLIENT) -> dict[str, str]:
+        return {"authorization": f"Bearer {self.keys[client]}"}
+
+
+async def wait_serving(address: str, service: str) -> int:
+    """The service's status once it is SERVING (grpc.health.v1 Watch: an event, not a poll)."""
+    async with grpc.aio.insecure_channel(address) as channel:
+        stub: Any = health_pb2_grpc.HealthStub(channel)  # the typeshed stub omits its methods
+        async with asyncio.timeout(READY_TIMEOUT):
+            stream = stub.Watch(health_pb2.HealthCheckRequest(service=service), wait_for_ready=True)
+            async for reply in stream:
+                if reply.status == health_pb2.HealthCheckResponse.SERVING:
+                    stream.cancel()
+                    status: int = reply.status
+                    return status
+    raise AssertionError(f"{service} never became SERVING")
+
+
+async def wait_http_ready(url: str) -> None:
+    # agentgateway's readiness endpoint has no push form; the harness asks until it answers or times out.
+    async with httpx.AsyncClient() as http, asyncio.timeout(READY_TIMEOUT):
+        while True:
+            try:
+                if (await http.get(url)).status_code == 200:
+                    return
+            except httpx.TransportError:
+                pass
+            await asyncio.sleep(0.2)
+
+
+async def image() -> str:
+    if name := os.environ.get("TOOL_APPROVALS_IMAGE"):
+        return name
+    await docker("build", "--quiet", "-t", "tool-approvals:e2e", str(REPO))
+    return "tool-approvals:e2e"
+
+
+async def run_call_gate(
+    *, image_name: str, name: str, network: str, alias: str, approvals_address: str, mcp_token: str
+) -> None:
+    env = {
+        "CALL_GATE_MCP_TOKEN": mcp_token,
+        "CALL_GATE_APPROVALS_ADDRESS": approvals_address,
+        "CALL_GATE_APPROVALS_TOKEN": APPROVALS_TOKEN,
+        "CALL_GATE_WAIT_SERVER": WAIT_SERVER,
+        "CALL_GATE_WAIT_TOOL": WAIT_TOOL,
+        "CALL_GATE_WAIT_TOOL_EXPOSED_NAME": WAIT_EXPOSED,
+        "CALL_GATE_CLIENT_HEADER": HEADER,
+    }
+    env_args = [arg for k, v in env.items() for arg in ("-e", f"{k}={v}")]
+    await docker(
+        "run", "-d", "--name", name, "--network", network, "--network-alias", alias,
+        "--add-host", "host.docker.internal:host-gateway", "-p", "127.0.0.1::9000",
+        *env_args, image_name, "call-gate",
+    )  # fmt: skip
+
+
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
+async def stack(tmp_path_factory: pytest.TempPathFactory) -> AsyncIterator[Stack]:
+    run = secrets.token_hex(4)
+    image_name = await image()
+    network = f"ta-e2e-{run}"
+    callgate, agw = f"ta-callgate-{run}", f"ta-agw-{run}"
+    keys = {CLIENT: secrets.token_urlsafe(32), OTHER_CLIENT: secrets.token_urlsafe(32)}
+    stub_token, wait_token = secrets.token_urlsafe(24), secrets.token_urlsafe(24)
+
+    script = Script()
+    approvals_server, approvals_port = await serve(script, f"{HOST_BIND}:0")
+    servers = [approvals_server]
+
+    async def stop_approvals() -> None:
+        await servers[-1].stop(None)
+
+    async def restart_approvals() -> None:
+        restarted, _ = await serve(script, f"{HOST_BIND}:{approvals_port}")
+        servers.append(restarted)
+
+    stub = Recorder(
+        build_stub_app(
+            StubToolSettings(mcp_token=SecretStr(stub_token), name=STUB_TOOL, client_header=HEADER)
+        )
+    )
+    containers: list[str] = []
+    async with running(stub, host=HOST_BIND) as stub_url:
+        try:
+            await docker("network", "create", network)
+            containers.append(callgate)
+            await run_call_gate(
+                image_name=image_name, name=callgate, network=network, alias="callgate",
+                approvals_address=f"host.docker.internal:{approvals_port}", mcp_token=wait_token,
+            )  # fmt: skip
+            stub_port = stub_url.rsplit(":", 1)[1]
+            config = render(
+                keys=keys,
+                targets=(
+                    Target(WAIT_SERVER, f"http://callgate:8080{MCP_PATH}", "APPROVAL_TOKEN"),
+                    Target(STUB_SERVER, f"http://host.docker.internal:{stub_port}{MCP_PATH}", "STUB_TOKEN"),
+                ),
+                grants=(
+                    Grant(CLIENT, WAIT_SERVER, WAIT_TOOL),
+                    Grant(CLIENT, STUB_SERVER, STUB_TOOL, gated=True),
+                    Grant(CLIENT, STUB_SERVER, HOLD_TOOL),
+                    Grant(OTHER_CLIENT, STUB_SERVER, HOLD_TOOL),
+                ),
+                guardrail_host="callgate:9000",
+            )
+            config_dir = tmp_path_factory.mktemp("agw")
+            (config_dir / "config.yaml").write_text(config)
+            config_dir.chmod(0o755)
+            (config_dir / "config.yaml").chmod(0o644)
+            containers.append(agw)
+            await docker(
+                "run", "-d", "--name", agw, "--network", network,
+                "--add-host", "host.docker.internal:host-gateway",
+                "-e", f"APPROVAL_TOKEN={wait_token}", "-e", f"STUB_TOKEN={stub_token}",
+                "-e", f"SESSION_KEY={secrets.token_hex(32)}",
+                "-v", f"{config_dir}:/etc/agentgateway:ro",
+                "-p", f"127.0.0.1::{IAC_PORT}", "-p", f"127.0.0.1::{BARE_PORT}",
+                "-p", f"127.0.0.1::{READINESS_PORT}",
+                AGENTGATEWAY_IMAGE, "-f", "/etc/agentgateway/config.yaml",
+            )  # fmt: skip
+            guardrail = f"127.0.0.1:{await published(callgate, 9000)}"
+            await wait_serving(guardrail, READINESS_SERVICE)
+            await wait_http_ready(f"http://127.0.0.1:{await published(agw, READINESS_PORT)}/healthz/ready")
+            yield Stack(
+                script=script,
+                stub=stub,
+                keys=keys,
+                iac_url=f"http://127.0.0.1:{await published(agw, IAC_PORT)}{MCP_PATH}",
+                bare_url=f"http://127.0.0.1:{await published(agw, BARE_PORT)}{MCP_PATH}",
+                callgate_guardrail=guardrail,
+                restart_approvals=restart_approvals,
+                stop_approvals=stop_approvals,
+                image=image_name,
+                network=network,
+                containers=containers,
+            )
+        finally:
+            for container in containers:
+                logs = await docker("logs", container, check=False, with_stderr=True)
+                print(f"--- logs: {container}\n{logs}")
+                await docker("rm", "-f", container, check=False)
+            await docker("network", "rm", network, check=False)
+            for server in servers:
+                await server.stop(None)

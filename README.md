@@ -5,6 +5,7 @@ Human approval of MCP tool calls for agents behind [agentgateway](https://github
 - **Call Gate** (`tool_approvals.call_gate`): agentgateway's MCP guardrail (`ext_mcp`). Ungated calls
   pass; a gated call passes only once a person has approved that exact call, otherwise the agent gets
   a refusal naming a ticket and the wait tool.
+- **Stub tool** (`tool_approvals.stub_tool`): a tool that changes nothing, for the tracer and live probes.
 - **Approvals service** (`tool_approvals.approvals`): holds each request, its deadlines and the answer.
 - **Contract** (`tool_approvals.contract`): the gRPC contract between them (`approval_requests.proto`)
   and agentgateway's vendored `ext_mcp.proto`.
@@ -19,8 +20,16 @@ uv run ruff check . && uv run ruff format --check .  # lint and format
 uv run mypy                                          # strict typing
 uv run lint-imports                                  # layering: pure cores import no I/O or wire code
 uv run pytest -n auto                                # tests
+uv run pytest -m e2e                                 # Docker tracer: real agentgateway v1.7.0 + this repo's image
 uv run python scripts/generate_contract.py           # regenerate the committed gRPC stubs (--check in CI)
 ```
+
+## Run
+
+One image, `ghcr.io/mcurcio/tool-approvals` (uid 65532, no secrets), one console script:
+`tool-approvals call-gate` (env `CALL_GATE_*`) or `tool-approvals stub-tool` (env `STUB_TOOL_*`). A missing
+or invalid setting fails startup. Merging to `main` releases through semantic-release (Conventional Commits
+decide the version; notes go to `CHANGELOG.md`) and publishes the image with a provenance attestation.
 
 ## License
 
