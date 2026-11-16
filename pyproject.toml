@@ -186,12 +186,13 @@ layers = ["main", "edges | infra", "app", "domain"]
 
 [[tool.importlinter.contracts]]
 id = "C4-layers"
-name = "shared packages: requests_client > serving | auth > config > contract | kernel"
+name = "shared packages: requests_client > serving | auth | contract_mapping > config > contract | kernel"
 type = "layers"
-# tool_approvals.contract includes the generated wire packages beneath it.
+# tool_approvals.contract includes the generated wire packages beneath it. contract_mapping is the one translation
+# between that wire and the kernel, for the requests client and Approvals' edge and composition root.
 layers = [
     "tool_approvals.requests_client",
-    "tool_approvals.serving | tool_approvals.auth",
+    "tool_approvals.serving | tool_approvals.auth | tool_approvals.contract_mapping",
     "tool_approvals.config",
     "tool_approvals.contract | tool_approvals.kernel",
 ]
@@ -206,6 +207,7 @@ source_modules = [
     "tool_approvals.auth",
     "tool_approvals.config",
     "tool_approvals.contract",
+    "tool_approvals.contract_mapping",
     "tool_approvals.kernel",
 ]
 forbidden_modules = [
@@ -227,6 +229,7 @@ source_modules = [
 ]
 forbidden_modules = [
     "tool_approvals.contract",
+    "tool_approvals.contract_mapping",
     "grpc",
     "grpc_health",
     "grpc_reflection",
@@ -272,7 +275,7 @@ id = "C5-store"
 name = "the store imports no contract"
 type = "forbidden"
 source_modules = ["tool_approvals.approvals.infra.store"]
-forbidden_modules = ["tool_approvals.contract"]
+forbidden_modules = ["tool_approvals.contract", "tool_approvals.contract_mapping"]
 
 [[tool.importlinter.contracts]]
 id = "C6"
