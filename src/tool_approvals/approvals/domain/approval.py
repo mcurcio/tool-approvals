@@ -8,10 +8,10 @@ Time is always passed in (`now`: the unit of work's one database clock reading).
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
-from typing import Self
+from typing import Final, Self
 
 from tool_approvals.approvals.domain.answer import Answer, Issue, Verdict
-from tool_approvals.kernel.calls import CallIdentity
+from tool_approvals.kernel.calls import CallIdentity, shown_digest
 from tool_approvals.kernel.names import CallerName, Digest, Principal, SurfaceName, Ticket
 from tool_approvals.kernel.requests import Claimed, NotApproved, TicketError, WaitReport, WaitState
 from tool_approvals.kernel.requirements import (
@@ -20,6 +20,8 @@ from tool_approvals.kernel.requirements import (
     AssuranceScale,
     Requirement,
     SurfaceRule,
+    qualify,
+    stricter,
 )
 from tool_approvals.kernel.words import AgentWords
 
@@ -59,7 +61,8 @@ class Actor:
 
     def __str__(self) -> str:
         """Formatted as "principal:p via gateway-hook", "approver:sub via desk" or "deadline"."""
-        raise NotImplementedError
+        text = str(self.kind) if self.name is None else f"{self.kind}:{self.name}"
+        return text if self.via is None else f"{text} via {self.via}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,16 +79,32 @@ class Wait:
     id_hash: bytes
     principal: Principal  # always the Approval's principal
     outcome: WaitState | None  # None while live; terminal once set
+    # The audit columns, written only by the persistence layer (None until the wait is first stored).
+    _created_at: datetime | None
+    _updated_at: datetime | None
+
+    def __init__(self, id_hash: bytes, principal: Principal, outcome: WaitState | None) -> None:
+        self.id_hash = id_hash
+        self.principal = principal
+        self.outcome = outcome
+        self._created_at = None
+        self._updated_at = None
 
     @property
     def opened_at(self) -> datetime:
         """Its created_at audit column, written by the persistence layer."""
-        raise NotImplementedError
+        return _stored(self._created_at)
 
     @property
     def updated_at(self) -> datetime:
         """Its updated_at audit column, written by the persistence layer."""
-        raise NotImplementedError
+        return _stored(self._updated_at)
+
+
+def _stored(moment: datetime | None) -> datetime:
+    if moment is None:
+        raise RuntimeError("the wait is not stored yet: its audit columns are written at commit")
+    return moment
 
 
 class Approval:
@@ -107,23 +126,53 @@ class Approval:
     @classmethod
     def open(cls, call: CallIdentity, requirement: Requirement, ticket: Ticket, by: Actor, now: datetime) -> Self:
         """A new Waiting Approval, its answer deadline `now + requirement.answer_deadline`; event OPENED."""
-        raise NotImplementedError
+        approval = cls.__new__(cls)
+        approval.ticket = ticket
+        approval.call = call
+        approval.requirement = requirement
+        approval.state = State.WAITING
+        approval.words = None
+        approval.answer = None
+        approval.waits = []
+        approval.answer_deadline = now + requirement.answer_deadline
+        approval.use_deadline = None
+        approval.delete_after = None
+        approval.version = 1
+        approval.events = [Event(EventKind.OPENED, by)]
+        return approval
+
+    @property
+    def digest(self) -> Digest:
+        """The digest of what an approver is shown: the call, the words and the requirement's name."""
+        return shown_digest(self.call, self.words, self.requirement.name)
 
     def pass_deadlines(self, now: datetime, retention: timedelta, by: Actor) -> None:
         """End what is due at `now`: Waiting past its answer deadline or Approved past its use deadline becomes
         Expired (live waits end EXPIRED); an ended Approval past delete_after is the caller's to delete."""
-        raise NotImplementedError
+        waiting_too_long = self.state is State.WAITING and now >= self.answer_deadline
+        unused_too_long = self.state is State.APPROVED and self.use_deadline is not None and now >= self.use_deadline
+        if waiting_too_long or unused_too_long:
+            self._end(State.EXPIRED, by, now, retention)
 
     def add_words(self, words: AgentWords, by: Actor, now: datetime) -> None:
         """Keep the agent's words if none are kept yet (event WORDED); later words are ignored."""
-        raise NotImplementedError
+        if self.words is None:
+            self.words = words
+            self._changed(by, EventKind.WORDED)
 
     def claim(
         self, current: Requirement, scale: AssuranceScale, by: Actor, now: datetime, retention: timedelta
     ) -> Claimed | NotApproved:
         """Spend the yes: Approved, within its use window, and its answer meeting stricter(snapshot, current)
         becomes Used (event USED). A yes not meeting it ends Expired by REQUIREMENT: NotApproved."""
-        raise NotImplementedError
+        self.pass_deadlines(now, retention, DEADLINE_ACTOR)
+        if self.state is not State.APPROVED or self.answer is None:
+            return NotApproved()
+        if not _still_meets(self.answer, stricter(self.requirement, current, scale), scale):
+            self._end(State.EXPIRED, REQUIREMENT_ACTOR, now, retention)
+            return NotApproved()
+        self._end(State.USED, by, now, retention)
+        return Claimed()
 
     def record_answer(  # noqa: PLR0913, PLR0917 (the frozen page's signature)
         self,
@@ -142,19 +191,98 @@ class Approval:
         """Record a person's answer: Waiting, before the answer deadline, `shown` equal to this Approval's digest
         when the surface binds one, and `qualify` passing under stricter(snapshot, current). Approve sets the use
         deadline; refuse ends Refused. Live waits end with the outcome in the same change."""
-        raise NotImplementedError
+        self.pass_deadlines(now, retention, DEADLINE_ACTOR)
+        if self.state is State.EXPIRED and self.answer is None:
+            return AnswerError.PAST_DEADLINE
+        if self.state is not State.WAITING:
+            return AnswerError.ALREADY_ANSWERED
+        digest = self.digest
+        if surface.binds_digest and shown != digest:
+            return AnswerError.DIGEST_MISMATCH
+        effective = stricter(self.requirement, current, scale)
+        group = qualify(facts, effective, surface, scale, now)
+        if isinstance(group, AnswerError):
+            return group
+        answer = issue(self.ticket, digest, facts, group, verdict, comment)
+        self.answer = answer
+        if verdict is Verdict.APPROVE:
+            self.state = State.APPROVED
+            self.use_deadline = now + effective.use_window
+            self._end_waits(WaitState.APPROVED)
+            self._changed(by, EventKind.APPROVED)
+        else:
+            self._end(State.REFUSED, by, now, retention)
+        return answer
 
     def open_wait(self, id_hash: bytes, principal: Principal, by: Actor, now: datetime) -> Wait | TicketError:
         """A new live wait for the Approval's own principal (NOT_YOUR_TICKET otherwise); the principal's earlier
         live wait on this ticket ends STILL_WAITING. On an ended Approval the new wait ends at once with its
         outcome."""
-        raise NotImplementedError
+        if principal != self.call.principal:
+            return TicketError.NOT_YOUR_TICKET
+        self._end_waits(WaitState.STILL_WAITING)  # every wait here is the principal's own
+        wait = Wait(id_hash, principal, None if self.state is State.WAITING else _WAIT_OUTCOME[self.state])
+        self.waits.append(wait)
+        self._changed(by, None)
+        return wait
 
     def report(self, wait: Wait, now: datetime) -> WaitReport:
         """The wait's report; ttl = answer deadline + use window - the wait's opened_at."""
-        raise NotImplementedError
+        state = WaitState.WAITING if wait.outcome is None else wait.outcome
+        return WaitReport(
+            state=state,
+            comment=self.answer.comment if state is WaitState.REFUSED and self.answer is not None else None,
+            opened_at=wait.opened_at,
+            updated_at=wait.updated_at,
+            ttl=self.answer_deadline + self.requirement.use_window - wait.opened_at,
+        )
 
     def blocks_request(self, now: datetime) -> bool:
         """Whether a new request for the same call must return this Approval's outcome instead of a new ticket
         (live: Waiting or Approved; or a standing no)."""
-        raise NotImplementedError
+        if self.state in {State.WAITING, State.APPROVED}:
+            return True
+        return self.state is State.REFUSED and now < self.answer_deadline  # a no stands until its answer deadline
+
+    def _end(self, state: State, by: Actor, now: datetime, retention: timedelta) -> None:
+        """Leave Waiting or Approved for good: kept until `now + retention`, live waits ending with the outcome."""
+        self.state = state
+        self.delete_after = now + retention
+        self._end_waits(_WAIT_OUTCOME[state])
+        self._changed(by, _ENDED_EVENT[state])
+
+    def _end_waits(self, outcome: WaitState) -> None:
+        for wait in self.waits:
+            if wait.outcome is None:
+                wait.outcome = outcome
+
+    def _changed(self, by: Actor, kind: EventKind | None) -> None:
+        """Every change bumps the version (the optimistic lock); a change with a kind is also an event."""
+        self.version += 1
+        if kind is not None:
+            self.events.append(Event(kind, by))
+
+
+DEADLINE_ACTOR: Final = Actor(ActorKind.DEADLINE, None, None)
+REQUIREMENT_ACTOR: Final = Actor(ActorKind.REQUIREMENT, None, None)
+
+_WAIT_OUTCOME: Final = {
+    State.APPROVED: WaitState.APPROVED,
+    State.REFUSED: WaitState.REFUSED,
+    State.USED: WaitState.USED,
+    State.EXPIRED: WaitState.EXPIRED,
+}
+_ENDED_EVENT: Final = {State.REFUSED: EventKind.REFUSED, State.USED: EventKind.USED, State.EXPIRED: EventKind.EXPIRED}
+
+
+def _still_meets(answer: Answer, requirement: Requirement, scale: AssuranceScale) -> bool:
+    """Whether a recorded yes still meets `requirement`: its surface allowed, its qualifying group an approver
+    group, and its vouched level at least the minimum (a level the scale does not hold meets nothing)."""
+    vouched, minimum = scale.rank(answer.vouched_assurance), scale.rank(requirement.min_assurance)
+    return (
+        answer.surface in requirement.allowed_surfaces
+        and answer.qualifying_group in requirement.approver_groups
+        and vouched is not None
+        and minimum is not None
+        and vouched >= minimum
+    )

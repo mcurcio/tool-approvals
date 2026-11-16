@@ -4,6 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
+from typing import ClassVar
 
 from tool_approvals.kernel.names import ApproverId, AssuranceName, Digest, SurfaceName, Ticket
 from tool_approvals.kernel.requirements import AnswerFacts, GroupRef
@@ -18,8 +19,13 @@ class IssuerKey:
     """The key `Answer` demands. One instance ever, made by `domain.issuer` at import; a second construction
     raises RuntimeError. A guard against developer mistakes, not against hostile code in the process."""
 
+    __slots__ = ()
+    _made: ClassVar[bool] = False
+
     def __init__(self) -> None:
-        raise NotImplementedError
+        if IssuerKey._made:
+            raise RuntimeError("the answer issuer's key exists already; only domain.issuer makes one")
+        IssuerKey._made = True
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -52,7 +58,21 @@ class Answer:
         comment: str | None,
     ) -> None:
         """Raises RuntimeError unless `key` is the issuer's."""
-        raise NotImplementedError
+        if not isinstance(key, IssuerKey):  # one instance ever exists, so its type names it
+            raise RuntimeError("an Answer is made only by domain.issuer")
+        fields = {
+            "ticket": ticket,
+            "digest": digest,
+            "approver": approver,
+            "qualifying_group": qualifying_group,
+            "surface": surface,
+            "vouched_assurance": vouched_assurance,
+            "sign_in_moment": sign_in_moment,
+            "verdict": verdict,
+            "comment": comment,
+        }
+        for name, value in fields.items():
+            object.__setattr__(self, name, value)  # frozen: the dataclass's own way past its __setattr__
 
 
 # How Approval.record_answer makes an Answer without importing the issuer: AnswerService passes `issuer.issue`.
