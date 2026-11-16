@@ -33,6 +33,7 @@ def problems(cfg: "ConfigFile") -> list[str]:
         *_listeners(cfg),
         *_gate(cfg),
         *_approvals(cfg),
+        *_answerable(cfg),
         *_lock_waits(cfg),
     ]
 
@@ -82,6 +83,10 @@ def _requirements(cfg: "ConfigFile") -> Iterator[str]:
         known_levels = floor is not None and None not in (minimum, scale.rank(floor.min_assurance))
         if floor is not None and known_levels and not meets_floor(requirement, floor, scale):
             yield f"{where}: below the floor (its minimum level or sign-in age is looser than `floor`'s)"
+        if not section.approver_groups:
+            yield f"{where}.approver_groups: empty, so no one can answer it"
+        if not section.allowed_surfaces:
+            yield f"{where}.allowed_surfaces: empty, so it can be answered nowhere"
         for surface_name in section.allowed_surfaces:
             surface = surfaces.get(surface_name)
             if surface is None:
@@ -165,3 +170,23 @@ def _lock_waits(cfg: "ConfigFile") -> Iterator[str]:
             f"approvals.database.lock_timeout: more than 1/{LOCK_WAITS_PER_CHECK} of gate.check_budget "
             f"({LOCK_WAITS_PER_CHECK} lock waits in a row must fit in one check)"
         )
+
+
+def _answerable(cfg: "ConfigFile") -> Iterator[str]:
+    """Every requirement answerable at this Approvals: its groups read from the claim the desk's IdP sends, and
+    the desk's surface among those it allows (the desk is the one surface that answers until milestone 3)."""
+    approvals = cfg.approvals
+    if approvals is None:
+        return
+    claim, desk = approvals.idp.groups_claim, approvals.desk.surface
+    for name, section in (cfg.requirements or {}).items():
+        where = f"requirements.{name}"
+        for index, group in enumerate(section.approver_groups):
+            if group.claim != claim:
+                yield (
+                    f"{where}.approver_groups[{index}].claim: {group.claim!r}, but approvals.idp.groups_claim is "
+                    f"{claim!r}, so no sign-in can carry it"
+                )
+        known_desk = desk in {surface.name for surface in cfg.surfaces or ()}  # an unknown one is reported once
+        if known_desk and section.allowed_surfaces and desk not in section.allowed_surfaces:
+            yield f"{where}.allowed_surfaces: does not allow approvals.desk.surface {desk!r}, so no one can answer it"

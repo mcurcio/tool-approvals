@@ -134,6 +134,24 @@
   set: { requirements.reviewed.use_window: 0s }
   expect: ["requirements.reviewed.use_window: a duration is a positive whole number and a unit"]
 
+- name: a requirement with no approver group
+  set: { requirements.reviewed.approver_groups: [] }
+  expect: ["requirements.reviewed.approver_groups: empty, so no one can answer it"]
+
+- name: a requirement with no allowed surface
+  set: { requirements.reviewed.allowed_surfaces: [] }
+  expect: ["requirements.reviewed.allowed_surfaces: empty, so it can be answered nowhere"]
+
+- name: an approver group under a claim the IdP does not send as groups
+  set: { requirements.reviewed.approver_groups: [{ claim: roles, value: approvers }] }
+  expect: ["requirements.reviewed.approver_groups[0].claim: 'roles', but approvals.idp.groups_claim is 'groups'"]
+
+- name: a requirement the desk cannot answer
+  set:
+    surfaces.1: { name: chat, kind: native, cap: passkey }
+    requirements.reviewed.allowed_surfaces: [chat]
+  expect: ["requirements.reviewed.allowed_surfaces: does not allow approvals.desk.surface 'desk'"]
+
 - name: an unknown key
   set: { gate.listeners.metrics: { host: 0.0.0.0, port: 9090 } }
   expect: ["gate.listeners.metrics: Extra inputs are not permitted"]
@@ -145,7 +163,10 @@
 - name: a requirement named like no approval
   set:
     requirements.none: { approver_groups: [], allowed_surfaces: [], min_assurance: passkey, max_sign_in_age: 1m, answer_deadline: 1h, use_window: 1m }
-  expect: ["requirements.none: 'none' is reserved"]
+  expect:
+    - "requirements.none: 'none' is reserved"
+    - "requirements.none.approver_groups: empty"
+    - "requirements.none.allowed_surfaces: empty"
 
 - name: problems in several sections, all listed
   set:

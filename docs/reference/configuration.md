@@ -280,7 +280,10 @@ Besides each value's grammar and the unknown-key and duplicate-key refusals:
 - `surfaces`: no name twice; each `cap` a known level; a native surface binds the digest. `floor.min_assurance` a
   known level.
 - `requirements`: not named `none`; `min_assurance` a known level; at or above the floor (level and sign-in age);
-  every allowed surface known, with a cap at least the requirement's minimum.
+  at least one approver group and one allowed surface; every allowed surface known, with a cap at least the
+  requirement's minimum. With an `approvals` section, also: every approver group's `claim` is
+  `approvals.idp.groups_claim` (the only claim the desk reads groups from), and `approvals.desk.surface` is among
+  the allowed surfaces (the desk is the one surface that answers until milestone 3).
 - `registry`: no bearer hash on two entries; grants from the grant table.
 - Every listener that accepts registry bearers (`gate.check_api.*`, `gate.ext_mcp.listener`,
   `gate.ext_authz.listener`, `wait.listeners.mcp`, `approvals.listeners.requests`) has `tls`.
