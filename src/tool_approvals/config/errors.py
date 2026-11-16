@@ -9,4 +9,5 @@ class ConfigError(Exception):
     problems: tuple[str, ...]
 
     def __init__(self, problems: Sequence[str]) -> None:
-        raise NotImplementedError
+        self.problems = tuple(problems)
+        super().__init__("\n".join(self.problems))

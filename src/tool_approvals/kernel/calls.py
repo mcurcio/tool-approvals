@@ -13,7 +13,7 @@ MAX_JSON_DEPTH and a number too large for a float are refused too.
 import hashlib
 import json
 import math
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
@@ -27,14 +27,19 @@ ALLOWED_PARAMS_KEYS: Final = frozenset({"name", "arguments", "_meta"})
 CLIENT_CAPABILITIES_META_KEY: Final = "io.modelcontextprotocol/clientCapabilities"
 TASKS_EXTENSION: Final = "io.modelcontextprotocol/tasks"  # refused in _meta[clientCapabilities]["extensions"]
 # Objects and arrays open at once, the params object itself the first. A google.protobuf.Struct survives a binary
-# round trip through upb, whose recursion limit is 100, only up to 33 levels of objects (each costs a Struct, a
-# map entry and a Value); 32 keeps every accepted call within that, so a policy or store that carries arguments as
-# a Struct never meets a call it cannot read. It also bounds the decoder's recursion far below Python's limit.
+# round trip through upb, whose recursion limit is 100, only up to 34 levels of objects (measured on protobuf
+# 7.36.2; each level costs a Struct, a map entry and a Value); 32 keeps every accepted call within that with room to
+# spare, so a policy or store that carries arguments as a Struct never meets a call it cannot read. It also bounds
+# the decoder's recursion far below Python's limit.
 MAX_JSON_DEPTH: Final = 32
 
 _WHITESPACE: Final = frozenset(" \t\n\r")  # JSON's insignificant whitespace (RFC 8259 §2)
 _NUL: Final = "\x00"
 _TASK_PARAMS_KEY: Final = "task"  # the 2025-11-25 protocol's task-augmented tools/call
+_RPC_KEYS: Final = frozenset({"jsonrpc", "id", "method", "params"})  # a JSON-RPC 2.0 request object's members
+_RPC_VERSION: Final = "2.0"
+_ABSENT: Final = b"\x00"  # the presence byte of an optional digest field
+_PRESENT: Final = b"\x01"
 
 
 class RejectReason(StrEnum):
@@ -61,10 +66,20 @@ class CallIdentity:
     def fingerprint(self) -> Fingerprint:
         """SHA-256 over each field as an 8-byte big-endian length followed by its bytes."""
         digest = hashlib.sha256()
-        for field in (self.principal.encode(), self.server.encode(), self.tool.encode(), self.arguments_json):
-            digest.update(len(field).to_bytes(8, "big"))
-            digest.update(field)
+        _put_identity(digest.update, self)
         return Fingerprint(digest.digest())
+
+
+def _put(update: Callable[[bytes], None], field: bytes) -> None:
+    """One field of a digest: an 8-byte big-endian length, then its bytes, so no two field lists collide."""
+    update(len(field).to_bytes(8, "big"))
+    update(field)
+
+
+def _put_identity(update: Callable[[bytes], None], identity: CallIdentity) -> None:
+    for field in (identity.principal.encode(), identity.server.encode(), identity.tool.encode()):
+        _put(update, field)
+    _put(update, identity.arguments_json)
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,8 +136,8 @@ _DECODER: Final = json.JSONDecoder(
 )
 
 
-def _check_depth(text: str) -> None:
-    """Refuse nesting deeper than MAX_JSON_DEPTH before the decoder recurses into it."""
+def _check_depth(text: str, limit: int = MAX_JSON_DEPTH) -> None:
+    """Refuse nesting deeper than `limit` before the decoder recurses into it."""
     depth = 0
     in_string = escaped = False
     for char in text:
@@ -137,7 +152,7 @@ def _check_depth(text: str) -> None:
             in_string = True
         elif char in "[{":
             depth += 1
-            if depth > MAX_JSON_DEPTH:
+            if depth > limit:
                 raise _Malformed("nested too deep")
         elif char in "]}":
             depth -= 1
@@ -179,15 +194,24 @@ def _members(text: str) -> Iterator[tuple[str, object, int, int]]:
         raise _Malformed("trailing data")
 
 
-def _declares_tasks(meta: object) -> bool:
+def declares_tasks(meta: object) -> bool:
+    """Whether a request's `_meta` declares the MCP Tasks extension: the one reader of that declaration, used by
+    `parse_call` (to refuse a task) and by the wait server (to offer one). Anything but an object declares
+    nothing; `parse_call` refuses a non-object `_meta` itself."""
     if not isinstance(meta, dict):
-        raise _Malformed("_meta is not an object")
+        return False
     capabilities = meta.get(CLIENT_CAPABILITIES_META_KEY)
     if not isinstance(capabilities, dict):
         return False
     extensions = capabilities.get("extensions")
     # The extensions map is keyed by extension id; a list of ids is read the same way, so neither escapes.
     return isinstance(extensions, dict | list) and TASKS_EXTENSION in extensions
+
+
+def _meta_object(meta: object) -> dict[str, object]:
+    if not isinstance(meta, dict):
+        raise _Malformed("_meta is not an object")
+    return meta
 
 
 def _check_name(name: object) -> str:
@@ -251,7 +275,7 @@ def parse_call(principal: Principal, server: ServerName, params: bytes) -> Parse
             _check_strings(value)
             arguments = value
             arguments_json = text[start:end].encode()
-        if "_meta" in members and _declares_tasks(members["_meta"][0]):
+        if "_meta" in members and declares_tasks(_meta_object(members["_meta"][0])):
             return CallRejected(RejectReason.TASK_REQUESTED)
     except ValueError:  # JSONDecodeError, UnicodeError and _Malformed are ValueErrors
         return CallRejected(RejectReason.MALFORMED)
@@ -264,18 +288,54 @@ def read_rpc_request(body: bytes) -> RpcRequest | CallRejected:
     Refuses a batch (an array), duplicate or escaped-duplicate keys at any depth, a duplicate `method` or `params`,
     extra top-level keys and trailing data. The span lets a mapping hand `parse_call` the exact
     params bytes the gateway forwards; the params themselves are judged there, not here.
+    `jsonrpc` must be "2.0" and `method` a string; `id`, when present, a string or a number. Nesting is bounded
+    as in `parse_call`, one level more for the envelope, so a call meets the same bound whichever mapping carried it.
     """
-    raise NotImplementedError
-
-
-def declares_tasks(meta: object) -> bool:
-    """Whether a request's `_meta` declares the MCP Tasks extension: the one reader of that declaration, used by
-    `parse_call` (to refuse a task) and by the wait server (to offer one). S1.1 makes `_declares_tasks` this."""
-    raise NotImplementedError
+    try:
+        text = body.decode("utf-8")  # strict: the text re-encodes to exactly the body, so spans map back to bytes
+        _check_depth(text, MAX_JSON_DEPTH + 1)
+        members: dict[str, tuple[object, int, int]] = {}
+        for key, value, start, end in _members(text):
+            if key in members:
+                raise _Malformed("duplicate top-level key")
+            members[key] = (value, start, end)
+        if not members.keys() <= _RPC_KEYS:
+            raise _Malformed("unknown top-level key")
+        if "jsonrpc" not in members or members["jsonrpc"][0] != _RPC_VERSION:
+            raise _Malformed("not JSON-RPC 2.0")
+        if "method" not in members or not isinstance(method := members["method"][0], str):
+            raise _Malformed("no method")
+        id_json = b""
+        if "id" in members:
+            value, start, end = members["id"]
+            if isinstance(value, bool) or not isinstance(value, str | int | float):
+                raise _Malformed("id is not a string or a number")
+            id_json = text[start:end].encode()
+        params = None
+        if "params" in members:
+            _, start, end = members["params"]
+            byte_start = len(text[:start].encode())
+            params = Span(byte_start, byte_start + len(text[start:end].encode()))
+    except ValueError:  # JSONDecodeError, UnicodeError and _Malformed are ValueErrors
+        return CallRejected(RejectReason.MALFORMED)
+    return RpcRequest(method, id_json, params)
 
 
 def shown_digest(identity: CallIdentity, words: AgentWords | None, requirement: RequirementName) -> Digest:
     """SHA-256 of what an approver is shown: the identity's four fields, the words (a presence byte, then each
     optional field as a presence byte and its length-prefixed UTF-8) and the requirement name, every field as an
     8-byte big-endian length and its bytes. The one home of the digest an answer binds to."""
-    raise NotImplementedError
+    digest = hashlib.sha256()
+    _put_identity(digest.update, identity)
+    if words is None:
+        digest.update(_ABSENT)
+    else:
+        digest.update(_PRESENT)
+        for text in (words.reason, words.work_ref):
+            if text is None:
+                digest.update(_ABSENT)
+            else:
+                digest.update(_PRESENT)
+                _put(digest.update, text.encode())
+    _put(digest.update, requirement.encode())
+    return Digest(digest.digest())

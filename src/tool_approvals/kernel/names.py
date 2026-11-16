@@ -1,6 +1,7 @@
 """The names the services share: who calls, which server and tool, the ticket a refusal carries, and the names a
 requirement, a surface, an approver and a wait go by."""
 
+import hashlib
 import re
 from typing import Final, NewType
 
@@ -29,9 +30,9 @@ def is_ticket(text: str) -> bool:
 
 def is_wait_id(text: str) -> bool:
     """Whether `text` could be a wait id at all: the ticket shape (URL-safe base64, 1 to 64 characters)."""
-    raise NotImplementedError
+    return _TICKET_SHAPE.fullmatch(text) is not None
 
 
 def wait_id_hash(wait: WaitId) -> bytes:
     """SHA-256 of the wait id's text: the only form a store keeps (32 bytes)."""
-    raise NotImplementedError
+    return hashlib.sha256(wait.encode()).digest()

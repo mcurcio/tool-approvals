@@ -23,4 +23,22 @@ class AgentWords:
     def of(cls, reason: str | None, work_ref: str | None) -> Self | WordsError:
         """The words, or why they are refused: reason at most MAX_REASON_CHARS and work_ref at most
         MAX_WORK_REF_CHARS characters, neither holding a NUL or a lone surrogate. The one constructor callers use."""
-        raise NotImplementedError
+        for text, limit in ((reason, MAX_REASON_CHARS), (work_ref, MAX_WORK_REF_CHARS)):
+            if text is None:
+                continue
+            if len(text) > limit:
+                return WordsError.TOO_LONG
+            if not _storable(text):
+                return WordsError.MALFORMED
+        return cls(reason, work_ref)
+
+
+def _storable(text: str) -> bool:
+    """No NUL (Postgres text cannot hold one) and no lone surrogate (it has no UTF-8 bytes to show or digest)."""
+    if "\x00" in text:
+        return False
+    try:
+        text.encode()
+    except UnicodeEncodeError:
+        return False
+    return True
