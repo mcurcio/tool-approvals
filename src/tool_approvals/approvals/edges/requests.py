@@ -1,12 +1,29 @@
 """ApprovalRequests over gRPC: the agents' side of Approvals, behind registry authentication (GrpcAuth)."""
 
 from collections.abc import AsyncIterator
+from typing import Any, Final, NoReturn
 
+import grpc
 import grpc.aio
 
+from tool_approvals.approvals.app.ports import StoreUnavailable
 from tool_approvals.approvals.app.requests import RequestService
 from tool_approvals.approvals.app.waits import WaitService
+from tool_approvals.auth.grpc_auth import current_caller
 from tool_approvals.contract.requests.v1 import requests_pb2, requests_pb2_grpc
+from tool_approvals.contract_mapping.requests import (
+    await_outcome_response,
+    call_ref,
+    claim_response,
+    open_wait_response,
+    request_response,
+)
+from tool_approvals.kernel.names import CallerName, Principal, RequirementName, Ticket, WaitId, is_ticket, is_wait_id
+from tool_approvals.kernel.requests import TicketError, WaitReport, WaitState
+from tool_approvals.kernel.words import AgentWords, WordsError
+
+_UNKNOWN_WAIT: Final = WaitReport(WaitState.UNKNOWN_WAIT, comment=None, opened_at=None, updated_at=None, ttl=None)
+_NUL: Final = "\x00"
 
 
 class RequestsServicer(requests_pb2_grpc.ApprovalRequestsServiceServicer):
@@ -14,32 +31,75 @@ class RequestsServicer(requests_pb2_grpc.ApprovalRequestsServiceServicer):
     StoreUnavailable is the status UNAVAILABLE."""
 
     def __init__(self, requests: RequestService, waits: WaitService) -> None:
-        raise NotImplementedError
+        self._requests = requests
+        self._waits = waits
 
     async def Request(
         self,
         request: requests_pb2.RequestRequest,
         context: grpc.aio.ServicerContext[requests_pb2.RequestRequest, requests_pb2.RequestResponse],
     ) -> requests_pb2.RequestResponse:
-        raise NotImplementedError
+        try:
+            result = await self._requests.request(call_ref(request.call), RequirementName(request.requirement), _via())
+        except StoreUnavailable as failed:
+            await _unavailable(context, failed)
+        return request_response(result)
 
     async def Claim(
         self,
         request: requests_pb2.ClaimRequest,
         context: grpc.aio.ServicerContext[requests_pb2.ClaimRequest, requests_pb2.ClaimResponse],
     ) -> requests_pb2.ClaimResponse:
-        raise NotImplementedError
+        try:
+            result = await self._requests.claim(call_ref(request.call), RequirementName(request.requirement), _via())
+        except StoreUnavailable as failed:
+            await _unavailable(context, failed)
+        return claim_response(result)
 
     async def OpenWait(
         self,
         request: requests_pb2.OpenWaitRequest,
         context: grpc.aio.ServicerContext[requests_pb2.OpenWaitRequest, requests_pb2.OpenWaitResponse],
     ) -> requests_pb2.OpenWaitResponse:
-        raise NotImplementedError
+        words = AgentWords.of(
+            request.reason if request.HasField("reason") else None,
+            request.work_ref if request.HasField("work_ref") else None,
+        )
+        if isinstance(words, WordsError):
+            return open_wait_response(words)
+        if not is_ticket(request.ticket):
+            return open_wait_response(TicketError.UNKNOWN_TICKET)  # names no ticket: never reaches the store
+        if _NUL in request.principal:
+            # No ticket is held for such a principal (parse_call refuses it), and Postgres text cannot hold it.
+            return open_wait_response(TicketError.NOT_YOUR_TICKET)
+        no_words = words.reason is None and words.work_ref is None
+        try:
+            result = await self._waits.open_wait(
+                Principal(request.principal), Ticket(request.ticket), None if no_words else words, _via()
+            )
+        except StoreUnavailable as failed:
+            await _unavailable(context, failed)
+        return open_wait_response(result)
 
-    def AwaitOutcome(
+    async def AwaitOutcome(
         self,
         request: requests_pb2.AwaitOutcomeRequest,
         context: grpc.aio.ServicerContext[requests_pb2.AwaitOutcomeRequest, requests_pb2.AwaitOutcomeResponse],
     ) -> AsyncIterator[requests_pb2.AwaitOutcomeResponse]:
-        raise NotImplementedError
+        if not is_wait_id(request.wait_id):
+            yield await_outcome_response(_UNKNOWN_WAIT)  # names no wait: never reaches the store
+            return
+        try:
+            async for report in self._waits.await_outcome(WaitId(request.wait_id)):
+                yield await_outcome_response(report)
+        except StoreUnavailable as failed:
+            await _unavailable(context, failed)
+
+
+def _via() -> CallerName:
+    """The registry caller GrpcAuth authenticated for this RPC."""
+    return current_caller.get().name
+
+
+async def _unavailable(context: grpc.aio.ServicerContext[Any, Any], failed: StoreUnavailable) -> NoReturn:
+    await context.abort(grpc.StatusCode.UNAVAILABLE, f"the Approvals store is unavailable: {failed}")

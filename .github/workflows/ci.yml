@@ -33,6 +33,8 @@ jobs:
       - run: uv run --locked ruff format --check .
       - run: uv run --locked mypy
       - run: uv run --locked lint-imports
+      # Expand migrations only add what the release still serving can live with (expand-then-contract).
+      - run: uv run --locked python scripts/check_migrations.py
       # The committed wire stubs match proto/ and vendor/ under the locked grpcio-tools and mypy-protobuf.
       - run: uv run --locked python scripts/generate_contract.py --check
       - run: uv run --locked pytest -n auto
