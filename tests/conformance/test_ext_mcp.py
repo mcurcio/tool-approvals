@@ -135,10 +135,15 @@ async def case_6_a_tasks_declaring_call_is_rejected(st: Stack, gateway: GatewayU
     assert len(st.echo.received()) == before
 
 
-def case_7_the_guardrail_hop_runs_over_tls_with_the_bearer(st: Stack) -> None:
+async def case_7_the_guardrail_hop_runs_over_tls_with_the_bearer(st: Stack, gateway: GatewayUnderTest) -> None:
     """The recorder serves TLS only, so every recorded call came over TLS. Each carried one bearer, which the gate
     accepted (it answered case 2 with a ticket, and it refuses a call without a registry bearer granted check);
-    none carried the agent's own credential."""
+    none carried the agent's own credentials. The agent sends a cookie, which only the processor's header filter
+    keeps from the gate (jwtAuth already strips `authorization`), so a filter that stopped working turns this red."""
+    sent = await gateway.call(
+        f"{gateway.name}-7", GATED_SERVER, GATED_TOOL, b"{}", headers={"cookie": "agent-session=not-the-gates"}
+    )
+    ticket_of(sent)  # it reached the gate, which asked for a person's yes
     calls = [call for call in st.ext_mcp_hook.received() if call.request is not None]
     assert calls
     for call in calls:
@@ -185,7 +190,7 @@ async def test_agentgateway(tmp_path: Path) -> None:
         await case_4_the_approvals_server_is_the_routes(st, gateway)
         await case_5_principal_header_reaches_no_tool_and_wait_sees_the_attested(st, gateway, used)
         await case_6_a_tasks_declaring_call_is_rejected(st, gateway)
-        case_7_the_guardrail_hop_runs_over_tls_with_the_bearer(st)
+        await case_7_the_guardrail_hop_runs_over_tls_with_the_bearer(st, gateway)
 
 
 async def test_envoy(tmp_path: Path) -> None:

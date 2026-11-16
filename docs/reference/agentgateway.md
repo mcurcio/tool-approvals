@@ -62,6 +62,7 @@ binds:
             requestHeaders:
               disallowed:
               - authorization
+              - cookie
 ```
 
 **The guardrail processor** (`mcpGuardrails.processors`):
@@ -74,7 +75,7 @@ binds:
 | `backendTLS` with `root` and `hostname` | The hook carries a bearer, so it runs over verified TLS to `gate.ext_mcp.listener` |
 | `backendAuth.key` | A registry bearer granted `check` (the example's `gateway-hook` entry) |
 | `metadata: {principal: jwt.sub}` | The attested principal, under the key `gate.ext_mcp.principal_key` names. Any CEL expression over what the gateway authenticated works; it must give a non-empty string, or the call is refused as `misconfigured` |
-| `requestHeaders: {disallowed: [authorization]}` | By default agentgateway sends the processor the agent's request headers, its `Authorization` credential included. The gate reads no header, and the agent's credential is not the gate's to see |
+| `requestHeaders: {disallowed: [authorization, cookie]}` | By default agentgateway sends the processor the agent's request headers, its credentials included. The gate reads no header, and the agent's credentials are not the gate's to see. jwtAuth in strict mode already strips `Authorization`; the filter is what keeps `Cookie` (and `Authorization` under any other authentication) out, and the conformance suite checks it with a cookie |
 
 **The wait target** (`targets`):
 
