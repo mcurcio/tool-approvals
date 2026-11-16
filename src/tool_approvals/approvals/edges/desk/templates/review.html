@@ -9,8 +9,10 @@
 <dt>Answer by</dt><dd>{{ detail.answer_deadline.isoformat(timespec="seconds") }}</dd>
 <dt>State</dt><dd>{{ detail.state }}</dd>
 </dl>
-<h2>Arguments</h2>
+<h2>Arguments, as sent (what the approval covers)</h2>
 <pre>{{ arguments | visible }}</pre>
+<h2>Arguments, re-rendered (indented, keys sorted)</h2>
+<pre>{{ rerendered | visible }}</pre>
 {% if detail.words %}
 <h2>The agent's own words (not verified)</h2>
 <dl>

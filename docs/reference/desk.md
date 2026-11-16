@@ -25,8 +25,11 @@ POST /approvals/T  (approve | refuse, optional comment, the shown digest, the fo
    `max_sign_in_age` in seconds). A sign-in that asked for the requirement and still falls short is refused, never
    asked for again in a loop.
 3. **Review.** The page shows the principal, server, tool and arguments, the agent's words (marked as not
-   verified), the requirement, the answer deadline and the state. Everything the agent supplied is escaped text,
-   and control and direction-changing characters are shown as visible escapes.
+   verified), the requirement, the answer deadline and the state. The arguments appear twice: the exact bytes the
+   approval covers (what counts), and the same value re-rendered as indented JSON with sorted keys, so escapes or
+   layout in the bytes cannot hide what the value is. Everything the agent supplied is escaped text; control and
+   direction-changing characters, and a combining mark at the start of a line or after whitespace, are shown as
+   visible escapes. The review and the answer are sent with `Cache-Control: no-store`.
 4. **Answer.** Approve or refuse, with an optional comment; on a refusal the agent reads it as a quotation. The form carries
    the digest of what the page showed and a form token; the answer counts only if both still match.
 
@@ -80,7 +83,7 @@ Map each `acr` value your provider issues to a level in `assurance`, weakest fir
 
 | | |
 |---|---|
-| Session | A signed cookie, `desk_session` (`Secure`, `HttpOnly`, `SameSite=Lax`), holding the sign-in: subject, groups, level and moment. Signed with `desk.session_key`; whoever holds that key can mint a qualifying session, so treat it as answer authority |
+| Session | A signed cookie, `desk_session` (`Secure`, `HttpOnly`, `SameSite=Lax`), holding the sign-in: subject, groups, level and moment. Signed with HMAC-SHA-256 under `desk.session_key`; whoever holds that key can mint a qualifying session, so treat it as answer authority. Its `Max-Age` is the floor's `max_sign_in_age`: no older sign-in can answer anything |
 | Form token | An HMAC with `desk.form_key` over the session, the ticket and the shown digest: the CSRF defence, and the binding of an answer to the page that showed it |
 | Both keys | At least 32 bytes each, separate, and the same on every replica |
 | HTTPS | The cookie is `Secure`, so serve `public_url` over HTTPS: a TLS-terminating proxy in front of the plain-HTTP approvers listener |

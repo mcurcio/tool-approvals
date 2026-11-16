@@ -7,23 +7,27 @@ state store) until the callback. Only an approver may read a requirement (Answer
 without a sign-in first signs in plainly, to learn who it is; a sign-in that then falls short of the requirement
 is sent back once, asking for it.
 GET /callback: iss; aud and azp (if present) = client_id; nonce; acr on the scale; auth_time present and not in the
-future; sign-in moment = min(auth_time, receipt). Session (signed, Secure, HttpOnly, SameSite=Lax): sid, sub,
-groups, level, moment. A sign-in that asked for the requirement and still falls short of it is refused here.
+future; sign-in moment = min(auth_time, receipt). Session (HMAC-SHA-256 signed, Secure, HttpOnly, SameSite=Lax,
+Max-Age the longest sign-in age a requirement may allow): sid, sub, groups, level, moment. A sign-in that asked
+for the requirement and still falls short of it is refused here.
 GET /approvals/{ticket}: the review when the session qualifies, else /login; words and arguments as escaped text.
 POST /approvals/{ticket}: verdict, comment, digest, form_token → AnswerService.answer.
+Both answer with Cache-Control: no-store, so no cache keeps a review or an answer.
 Every response: Content-Security-Policy "default-src 'none'; style-src 'self'; form-action 'self';
 frame-ancestors 'none'; base-uri 'none'".
 """
 
 import base64
 import binascii
+import hashlib
 import secrets
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Final, cast
 from urllib.parse import urlencode
 
 import httpx
+import itsdangerous
 from authlib.integrations.starlette_client import OAuth, OAuthError  # type: ignore[import-untyped]
 from joserfc.errors import JoseError
 from starlette.applications import Starlette
@@ -55,6 +59,7 @@ _IDP: Final = "idp"  # the one Authlib client's name (its state keys in the sess
 _LOGIN: Final = "login"  # the session key of the sign-in under way: its ticket, and whether it asked the requirement
 _SIGN_IN: Final = "sign_in"  # the session key of the sign-in
 _DIGEST_BYTES: Final = 32
+_NO_STORE: Final = {"cache-control": "no-store"}
 # A sign-in that falls short of these may be sent to sign in again, asking for the requirement.
 _STEP_UP: Final = frozenset({AnswerError.ASSURANCE_TOO_LOW, AnswerError.SIGN_IN_TOO_OLD})
 _STATUS: Final[Mapping[AnswerError, int]] = {
@@ -86,16 +91,27 @@ def desk_app(answers: AnswerService, desk: DeskView, idp: IdpView, scale: Assura
         ],
         middleware=[
             Middleware(_ContentSecurityPolicy),
-            Middleware(
-                SessionMiddleware,
-                secret_key=desk.session_key.hex(),
-                session_cookie=SESSION_COOKIE,
-                same_site="lax",
-                https_only=True,  # the Secure attribute; HttpOnly is always set
-            ),
+            # No sign-in older than session_max_age can answer anything, so no cookie needs to live longer.
+            Middleware(_Sessions, secret_key=desk.session_key.hex(), max_age=desk.session_max_age),
         ],
         exception_handlers={HTTPException: routes.stopped, 500: routes.failed},
     )
+
+
+class _Sessions(SessionMiddleware):
+    """Starlette's signed-cookie sessions in SESSION_COOKIE (Secure, HttpOnly, SameSite=Lax), signed with
+    HMAC-SHA-256 instead of itsdangerous's SHA-1 default."""
+
+    def __init__(self, app: ASGIApp, *, secret_key: str, max_age: timedelta) -> None:
+        super().__init__(
+            app,
+            secret_key,
+            session_cookie=SESSION_COOKIE,
+            max_age=int(max_age.total_seconds()),
+            same_site="lax",
+            https_only=True,  # the Secure attribute; HttpOnly is always set
+        )
+        self.signer = itsdangerous.TimestampSigner(secret_key, digest_method=hashlib.sha256)
 
 
 class _ContentSecurityPolicy:
@@ -219,7 +235,8 @@ class _Desk:
                 action=f"{self._base}/approvals/{ticket}",
                 digest=base64.urlsafe_b64encode(detail.digest).decode(),
                 form_token=token if detail.state is State.WAITING else None,
-            )
+            ),
+            headers=_NO_STORE,
         )
 
     # POST /approvals/{ticket}
@@ -248,7 +265,9 @@ class _Desk:
             raise HTTPException(503, "The answer could not be recorded just now.") from failed
         if refused is not None:
             raise _refusal(refused)
-        return self._see(f"/approvals/{ticket}")
+        seen = self._see(f"/approvals/{ticket}")
+        seen.headers.update(_NO_STORE)
+        return seen
 
     def _signed_in(self, request: Request) -> SignIn | None:
         return from_session(request.session.get(_SIGN_IN), self._client)

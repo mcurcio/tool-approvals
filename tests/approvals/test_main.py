@@ -50,7 +50,7 @@ def _view(dsn: str, tmp_path: Path, bearer: str) -> ApprovalsView:
         retention=RULES.retention,
         caps=CapsView(RULES.max_waiting, RULES.max_live_waits),
         idp=IdpView("https://idp.invalid", "client", "secret", "groups"),
-        desk=DeskView(DESK_RULE, "https://desk.invalid", b"s" * 32, b"f" * 32),
+        desk=DeskView(DESK_RULE, "https://desk.invalid", b"s" * 32, b"f" * 32, timedelta(minutes=5)),
         scale=SCALE,
         floor=Floor(PASSKEY, timedelta(minutes=5)),
         requirements={HUMAN.name: HUMAN},

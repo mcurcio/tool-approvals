@@ -167,6 +167,20 @@
     FORM_KEY: "0123456789abcdef0123456789abcdef"
   expect: ["approvals.desk.session_key: under 32 bytes once resolved"]
 
+- name: one desk key as both the session key and the form key
+  command: approvals
+  set:
+    approvals.database.dsn: { env: DSN }
+    approvals.idp.client_secret: { env: IDP_SECRET }
+    approvals.desk.session_key: { env: SESSION_KEY }
+    approvals.desk.form_key: { env: FORM_KEY }
+  env:
+    DSN: postgresql://approvals@db.example.com/approvals
+    IDP_SECRET: idp-secret
+    SESSION_KEY: "0123456789abcdef0123456789abcdef"
+    FORM_KEY: "0123456789abcdef0123456789abcdef"
+  expect: ["approvals.desk.form_key: the same as approvals.desk.session_key"]
+
 - name: unresolvable secrets, all listed
   command: approvals
   set:

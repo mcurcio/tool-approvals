@@ -159,6 +159,7 @@ class DeskView:
     public_url: str
     session_key: bytes  # at least 32 bytes; whoever holds it can mint a qualifying session
     form_key: bytes  # at least 32 bytes; separate from the session key
+    session_max_age: timedelta  # the floor's max_sign_in_age: no older sign-in can answer, so no cookie lives longer
 
 
 @dataclass(frozen=True, slots=True)
@@ -281,6 +282,8 @@ def approvals_view(cfg: ConfigFile, env: Mapping[str, str]) -> ApprovalsView:
     client_secret = secrets.text(approvals.idp.client_secret, "approvals.idp.client_secret")
     session_key = secrets.key(approvals.desk.session_key, "approvals.desk.session_key")
     form_key = secrets.key(approvals.desk.form_key, "approvals.desk.form_key")
+    if session_key and session_key == form_key:
+        secrets.problem("approvals.desk.form_key: the same as approvals.desk.session_key; they must be separate")
     secrets.raise_problems()
     rules = _surface_rules(surfaces)
     return ApprovalsView(
@@ -298,6 +301,7 @@ def approvals_view(cfg: ConfigFile, env: Mapping[str, str]) -> ApprovalsView:
             public_url=approvals.desk.public_url,
             session_key=session_key,
             form_key=form_key,
+            session_max_age=floor.max_sign_in_age,
         ),
         scale=_scale(levels),
         floor=floor.kernel(),
@@ -345,6 +349,9 @@ class _Secrets:
         except UnicodeDecodeError:
             self._problems.append(f"{where}: not UTF-8 text")
             return ""
+
+    def problem(self, text: str) -> None:
+        self._problems.append(text)
 
     def raise_problems(self) -> None:
         if self._problems:

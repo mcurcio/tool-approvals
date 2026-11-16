@@ -14,6 +14,7 @@ from tests.approvals.domain.examples import AGENT, SERVER, WAITER, call_ref
 from tests.fixtures.oidc_provider import hidden_fields
 from tool_approvals.approvals.app.answers import AnswerService, ApprovalDetail
 from tool_approvals.approvals.edges.desk.app import CONTENT_SECURITY_POLICY, desk_app
+from tool_approvals.approvals.edges.desk.pages import visible
 from tool_approvals.config.views import IdpView
 from tool_approvals.kernel.names import Ticket
 from tool_approvals.kernel.requests import CallRef
@@ -124,6 +125,30 @@ async def test_what_an_agent_wrote_renders_as_visible_escaped_text(desk: Desk) -
         assert hidden not in text
     for shown in ("abc\\u202edef\\u200b\\u001b[31m", "\\u2066x\\u2069"):
         assert shown in text
+
+
+async def test_the_review_and_the_answer_are_never_stored_by_a_cache(desk: Desk) -> None:
+    ticket = await desk.world.ticket()
+    person = desk.person()
+    assert await person.answer(ticket, "approve") == 303
+    pages = [response for response in person.browser.visited if response.url.path == f"/approvals/{ticket}"]
+    responses = [page for page in pages if page.request.method == "POST" or page.status_code == 200]
+    assert {response.request.method for response in responses} == {"GET", "POST"}
+    for response in responses:
+        assert response.headers.get("cache-control") == "no-store", (response.request.method, response.status_code)
+
+
+async def test_the_arguments_show_as_sent_and_re_rendered(desk: Desk) -> None:
+    params = b'{"name":"delete","arguments":{"path":"/srv/\\u0061","depth":2}}'
+    ticket = await desk.world.ticket(CallRef(AGENT, SERVER, params))
+    text = (await _review(desk, ticket))[0].text
+    assert "<pre>{&#34;path&#34;:&#34;/srv/\\u0061&#34;,&#34;depth&#34;:2}</pre>" in text  # the exact bytes
+    assert "<pre>{\n  &#34;depth&#34;: 2,\n  &#34;path&#34;: &#34;/srv/a&#34;\n}</pre>" in text
+
+
+def test_a_combining_mark_with_nothing_visible_to_carry_it_is_escaped() -> None:
+    assert visible("e\u0301 and \u0301x\n\u0301y") == "e\u0301 and \\u0301x\n\\u0301y"
+    assert visible("\u0301") == "\\u0301"
 
 
 async def test_every_response_carries_the_content_security_policy(desk: Desk) -> None:

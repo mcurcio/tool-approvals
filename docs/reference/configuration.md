@@ -266,7 +266,7 @@ approvals: # `approvals migrate` reads only approvals.database
 | `idp` | The OpenID Provider the desk signs approvers in with: discovery at `<issuer>/.well-known/openid-configuration`, a confidential client, the groups claim. See [the desk](desk.md#identity-provider-requirements) |
 | `desk.surface` | The native surface the desk answers as |
 | `desk.public_url` | The desk's external HTTPS address; the sign-in callback is `<public_url>/callback` |
-| `desk.session_key`, `desk.form_key` | Two separate secrets of at least 32 bytes, the same on every replica. The session key signs the sign-in cookie, so whoever holds it can mint a qualifying session: guard it as answer authority |
+| `desk.session_key`, `desk.form_key` | Two separate secrets of at least 32 bytes (refused if they are equal), the same on every replica. The session key signs the sign-in cookie, so whoever holds it can mint a qualifying session: guard it as answer authority |
 
 ## Every rule `config check` enforces
 
@@ -286,4 +286,4 @@ Besides each value's grammar and the unknown-key and duplicate-key refusals:
 - `approvals.database.lock_timeout` at most a quarter of `gate.check_budget`, when the file has both sections.
 
 When a command starts it also checks that its sections are present and its secrets resolve (and that each desk key
-is at least 32 bytes). A change takes a restart; there is no reload.
+is at least 32 bytes, and that the two desk keys differ). A change takes a restart; there is no reload.

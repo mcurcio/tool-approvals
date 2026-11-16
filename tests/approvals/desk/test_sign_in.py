@@ -2,12 +2,14 @@
 provider, which sign-ins may answer, and every ID token the desk must refuse."""
 
 import base64
+import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 
+import itsdangerous
 import pytest
 
-from tests.approvals.desk.conftest import CLIENT_ID, DESK_URL, Desk
+from tests.approvals.desk.conftest import CLIENT_ID, DESK_URL, SESSION_MAX_AGE, Desk
 from tests.approvals.domain.examples import HUMAN, call_ref
 from tests.fixtures.oidc_provider import SignInScript
 from tool_approvals.approvals.edges.desk.app import SESSION_COOKIE
@@ -140,7 +142,13 @@ async def test_the_session_cookie_is_signed_secure_http_only_and_lax(desk: Desk)
     assert (await person.open(ticket)).status_code == 200
     *_, last = (header for header in person.browser.set_cookies if header.startswith(f"{SESSION_COOKIE}="))
     attributes = {part.strip().lower() for part in last.split(";")[1:]}
-    assert {"secure", "httponly", "samesite=lax"} <= attributes
+    assert {"secure", "httponly", "samesite=lax", f"max-age={int(SESSION_MAX_AGE.total_seconds())}"} <= attributes
+    # HMAC-SHA-256 over the session key, not itsdangerous's SHA-1 default.
+    signed = person.browser.cookies[SESSION_COOKIE].encode()
+    key = desk.view.session_key.hex()
+    itsdangerous.TimestampSigner(key, digest_method=hashlib.sha256).unsign(signed)
+    with pytest.raises(itsdangerous.BadSignature):
+        itsdangerous.TimestampSigner(key).unsign(signed)
     session = _session(last)
     assert session["sign_in"] == {
         "sid": session["sign_in"]["sid"],  # type: ignore[index]
