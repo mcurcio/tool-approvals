@@ -119,7 +119,7 @@ approvals: # `approvals migrate` reads only approvals.database
     pool_size: 5 # default; connections kept open per replica
     max_overflow: 10 # default; more under load
     pool_timeout: 1s # default; how long a request waits for a connection
-  retention: 90d # default; at least the longest answer deadline
+  retention: 90d # default; at least the longest answer_deadline + use_window
   caps:
     waiting_per_principal: 10 # default
     live_waits_per_principal: 10 # default

@@ -169,7 +169,8 @@ allowance: the **sign-in moment** is the earlier of the identity provider's `aut
 of the token, because an allowance added to the age would let a sign-in older than `maxSignInAge` count.
 
 **Retention:** an ended Approval, with its events, waits and answer, is deleted at its end + `retention`. Startup
-refuses a retention shorter than the longest answer deadline, and from milestone 3 also one shorter than the
+refuses a retention shorter than the longest answer deadline plus use window of a requirement (the longest a Wait
+Task may be followed), and from milestone 3 also one shorter than the
 delivery give-up horizon, so retention never deletes what a lagging channel is still owed. Longer audit lives in
 the integrator's audit sink.
 
@@ -218,7 +219,7 @@ Each is one config value; the defaults are placeholders until measured.
 | identity provider, desk (client, session and form keys) | approvals | Issuer form; keys present and at least 32 bytes |
 | `assurance`, `floor`, `requirements`, `surfaces` | gate (names only), approvals | Requirement ≥ floor; known surfaces; cap ≥ minimum wherever a surface is allowed |
 | policy | gate | Rules name known requirements; gateway-context policy only with a mapping that supplies gateway attributes |
-| retention | approvals | Retention ≥ the longest answer deadline |
+| retention | approvals | Retention ≥ the longest answer deadline + use window |
 | channels (including Web Push keys and allowed push origins), telemetry (milestone 3) | approvals | Retention ≥ delivery give-up horizon |
 
 Each command resolves only its own secrets, from files or the environment, never inline. No identity-provider

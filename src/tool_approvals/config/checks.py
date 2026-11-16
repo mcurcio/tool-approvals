@@ -149,9 +149,11 @@ def _approvals(cfg: "ConfigFile") -> Iterator[str]:
     # Every surface is native until unit 3 adds integrated ones, so a known name is a native surface.
     if approvals.desk.surface not in {surface.name for surface in cfg.surfaces or ()}:
         yield f"approvals.desk.surface: unknown surface {approvals.desk.surface!r}"
-    deadlines = [section.answer_deadline for section in (cfg.requirements or {}).values()]
-    if deadlines and approvals.retention < max(deadlines):
-        yield "approvals.retention: below the longest answer deadline"
+    # A Wait Task lives (its ttl) until the answer deadline plus the use window: retention keeps the Approval that
+    # long at least, so a task is never told its wait is unknown while it may still be followed.
+    lifetimes = [section.answer_deadline + section.use_window for section in (cfg.requirements or {}).values()]
+    if lifetimes and approvals.retention < max(lifetimes):
+        yield "approvals.retention: below the longest answer_deadline + use_window of a requirement"
 
 
 def _lock_waits(cfg: "ConfigFile") -> Iterator[str]:

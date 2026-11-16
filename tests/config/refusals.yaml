@@ -112,7 +112,11 @@
 
 - name: retention below the longest answer deadline
   set: { approvals.retention: 30m }
-  expect: ["approvals.retention: below the longest answer deadline"]
+  expect: ["approvals.retention: below the longest answer_deadline + use_window"]
+
+- name: retention at the answer deadline but below it plus the use window
+  set: { approvals.retention: 1h, requirements.reviewed.answer_deadline: 1h, requirements.reviewed.use_window: 15m }
+  expect: ["approvals.retention: below the longest answer_deadline + use_window"]
 
 - name: an inline secret
   set: { gate.approvals.credential: not-a-reference }
