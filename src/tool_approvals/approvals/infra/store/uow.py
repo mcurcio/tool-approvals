@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 from typing import Any, Final
 
 import psycopg.errors
+import sqlalchemy.exc
 from sqlalchemy import func, insert, select, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.exc import TimeoutError as PoolTimeout
@@ -45,6 +46,22 @@ from tool_approvals.serving.deadlines import remaining
 _LIVE: Final = (State.WAITING, State.APPROVED)
 _CLOCK: Final = select(func.clock_timestamp())
 _NOTIFY: Final = text("SELECT pg_notify(:channel, ticket) FROM unnest(CAST(:tickets AS text[])) AS ticket")
+
+
+# The store's failures that starting its user again may outlive: the database, the connection to it, or the pool,
+# never the code (a ProgrammingError, an IntegrityError, a DataError or any other exception means a bug and stops
+# the process). StoreUnavailable is the store's own translation of the same causes.
+TRANSIENT_FAILURES: Final[tuple[type[Exception], ...]] = (
+    StoreUnavailable,
+    sqlalchemy.exc.OperationalError,
+    sqlalchemy.exc.InterfaceError,
+    sqlalchemy.exc.InternalError,
+    sqlalchemy.exc.DisconnectionError,
+    sqlalchemy.exc.TimeoutError,
+    psycopg.OperationalError,
+    psycopg.InterfaceError,
+    psycopg.InternalError,
+)
 
 
 def sql_unit_of_work(engine: AsyncEngine, lock_timeout: timedelta) -> UnitOfWorkFactory:

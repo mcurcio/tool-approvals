@@ -3,11 +3,11 @@
 import asyncio
 import contextlib
 import logging
+from datetime import timedelta
 from typing import Final
 
 from tool_approvals.approvals.app.answers import AnswerService
 from tool_approvals.approvals.app.deadlines import DeadlineWaker
-from tool_approvals.approvals.app.ports import StoreUnavailable
 from tool_approvals.approvals.app.requests import RequestService
 from tool_approvals.approvals.app.rules import Rules
 from tool_approvals.approvals.app.waits import WaitService
@@ -17,7 +17,7 @@ from tool_approvals.approvals.infra.feed import RECONNECT_CAP, RECONNECT_FIRST, 
 from tool_approvals.approvals.infra.sources import new_ticket, new_wait_id
 from tool_approvals.approvals.infra.store import migrate as store_migrate
 from tool_approvals.approvals.infra.store.engine import make_engine
-from tool_approvals.approvals.infra.store.uow import sql_unit_of_work
+from tool_approvals.approvals.infra.store.uow import TRANSIENT_FAILURES, sql_unit_of_work
 from tool_approvals.auth.grpc_auth import GrpcAuth
 from tool_approvals.auth.registry import Registry
 from tool_approvals.config.views import ApprovalsView, MigrateView
@@ -82,18 +82,25 @@ async def serve_until(view: ApprovalsView, stopping: asyncio.Event) -> int:
     return EXIT_OK
 
 
-async def _supervise(waker: DeadlineWaker, stop: asyncio.Event) -> None:
-    """Run the waker until `stop`, starting it again (after a backoff, doubling to a cap) whenever the store
-    fails under it. While the database is down the waker then waits on the change feed's reconnection."""
-    delay = RECONNECT_FIRST
+async def _supervise(
+    waker: DeadlineWaker, stop: asyncio.Event, first: timedelta = RECONNECT_FIRST, cap: timedelta = RECONNECT_CAP
+) -> None:
+    """Run the waker until `stop`, starting it again after a backoff whenever the store fails under it (any of
+    TRANSIENT_FAILURES; anything else is a bug and propagates). The backoff starts at `first` and doubles to `cap`;
+    a run that completed a pass was healthy, so the next failure starts from `first` again. While the database is
+    down the waker then waits on the change feed's reconnection."""
+    delay = first
     while not stop.is_set():
+        passes = waker.passes
         try:
             await waker.run(stop)
-        except StoreUnavailable as failed:
-            _log.warning("deadline waker: the store failed (%s); starting it again", failed)
+        except TRANSIENT_FAILURES as failed:
+            if waker.passes > passes:
+                delay = first
+            _log.warning("deadline waker: the store failed (%r); starting it again in %s", failed, delay)
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), delay.total_seconds())
-            delay = min(delay * 2, RECONNECT_CAP)
+            delay = min(delay * 2, cap)
 
 
 async def migrate(view: MigrateView) -> int:

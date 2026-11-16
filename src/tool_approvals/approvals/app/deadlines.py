@@ -25,6 +25,7 @@ class DeadlineWaker:
         self._rules = rules
         self._timeouts = timeouts
         self._locked_retry = locked_retry
+        self.passes = 0  # passes over what is due that completed: a run that adds one was healthy
 
     async def run(self, stop: StopSignal) -> None:
         """Until `stop`: pass every due Approval's deadlines, then sleep until the next due moment (database time,
@@ -33,6 +34,7 @@ class DeadlineWaker:
             async with self._feed.watch_all() as changes:  # subscribed before the first read: no change is missed
                 while True:
                     passed = await self._pass_due()
+                    self.passes += 1
                     if passed == DUE_BATCH:
                         continue
                     sleep = await self._until_next_due()

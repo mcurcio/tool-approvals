@@ -4,17 +4,22 @@ revision."""
 
 import asyncio
 import hashlib
+import logging
 from datetime import timedelta
 from pathlib import Path
 
 import httpx
 import psycopg
+import pytest
+import sqlalchemy.exc
 
 from tests.approvals.domain.examples import CALL_REF, DESK, DESK_RULE, HOOK, HUMAN, PASSKEY, RULES, SCALE
 from tests.approvals.store.postgres import empty_database
 from tests.fixtures.certs import tls_files
 from tests.fixtures.ports import free_port
-from tool_approvals.approvals.main import EXIT_OK, migrate, serve_until
+from tool_approvals.approvals.app.deadlines import DeadlineWaker
+from tool_approvals.approvals.app.ports import StoreUnavailable
+from tool_approvals.approvals.main import EXIT_OK, _supervise, migrate, serve_until
 from tool_approvals.auth.registry import issue_bearer
 from tool_approvals.config.methods import Method
 from tool_approvals.config.views import (
@@ -31,6 +36,7 @@ from tool_approvals.config.views import (
 )
 from tool_approvals.kernel.requests import Ticketed
 from tool_approvals.kernel.requirements import Floor
+from tool_approvals.kernel.timeouts import StopSignal
 from tool_approvals.requests_client.client import RequestsClient
 
 _AGE = "UPDATE approvals SET answer_deadline = clock_timestamp() - interval '1 second' WHERE ticket = %(ticket)s"
@@ -95,3 +101,59 @@ async def test_serve_answers_requests_and_stops_cleanly(tmp_path: Path) -> None:
 
 async def test_migrate_exits_0_at_the_latest_revision() -> None:
     assert await migrate(MigrateView(DatabaseView(empty_database(), timedelta(seconds=5)))) == EXIT_OK
+
+
+class _ScriptedWaker(DeadlineWaker):
+    """Each run completes `passes` passes, then raises its failure; after the script, it waits for the stop."""
+
+    def __init__(self, script: list[tuple[int, Exception]]) -> None:  # no store: nothing of the base is used
+        self.passes = 0
+        self.runs = 0
+        self._script = script
+
+    async def run(self, stop: StopSignal) -> None:
+        self.runs += 1
+        if not self._script:
+            await stop.wait()
+            return
+        passes, failure = self._script.pop(0)
+        self.passes += passes
+        raise failure
+
+
+def _db_error(kind: type[sqlalchemy.exc.DBAPIError]) -> sqlalchemy.exc.DBAPIError:
+    return kind("SELECT 1", None, psycopg.OperationalError("the server closed the connection"))
+
+
+async def test_the_waker_is_restarted_on_any_transient_store_failure_with_a_backoff_reset_by_health(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    first = timedelta(milliseconds=10)
+    waker = _ScriptedWaker(
+        [
+            (0, _db_error(sqlalchemy.exc.OperationalError)),  # not translated to StoreUnavailable: still restarted
+            (0, _db_error(sqlalchemy.exc.InterfaceError)),
+            (0, psycopg.OperationalError("lost")),
+            (1, StoreUnavailable("a lock wait passed lock_timeout")),  # this run was healthy before it failed
+        ]
+    )
+    stop = asyncio.Event()
+    with caplog.at_level(logging.WARNING, logger="tool_approvals.approvals.main"):
+        supervising = asyncio.create_task(_supervise(waker, stop, first, timedelta(seconds=1)))
+        async with asyncio.timeout(5):
+            while waker.runs < 5:
+                await asyncio.sleep(0.01)
+        stop.set()
+        await supervising
+    delays = [record.getMessage().rsplit(" in ", 1)[1] for record in caplog.records]
+    assert delays == ["0:00:00.010000", "0:00:00.020000", "0:00:00.040000", "0:00:00.010000"]
+
+
+@pytest.mark.parametrize(
+    "bug", [TypeError("a bug"), _db_error(sqlalchemy.exc.ProgrammingError), _db_error(sqlalchemy.exc.IntegrityError)]
+)
+async def test_a_programming_error_under_the_waker_is_never_swallowed(bug: Exception) -> None:
+    waker = _ScriptedWaker([(1, bug)])
+    with pytest.raises(type(bug)):
+        await _supervise(waker, asyncio.Event(), timedelta(milliseconds=10), timedelta(seconds=1))
+    assert waker.runs == 1
