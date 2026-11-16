@@ -3,8 +3,10 @@
 import asyncio
 import contextlib
 import json
+import socket
 import ssl
 from collections.abc import Awaitable, Callable, Generator, Mapping
+from datetime import timedelta
 
 import uvicorn
 from google.protobuf import json_format
@@ -16,19 +18,28 @@ from starlette.routing import Route
 from starlette.types import ASGIApp
 
 from tool_approvals.config.views import ListenerView
+from tool_approvals.serving.signals import STOP_GRACE
 
 
 class _Server(uvicorn.Server):
-    """uvicorn without its own signal handling: the process's stop event (stop_on_signals) is the one stop."""
+    """uvicorn without its own signal handling: the process's stop event (stop_on_signals) is the one stop. Its
+    shutdown is bounded: after `timeout_graceful_shutdown` every connection still open is aborted, one that never
+    finished its TLS handshake (which uvicorn does not count as a connection) included."""
 
     @contextlib.contextmanager
     def capture_signals(self) -> Generator[None]:
         yield
 
+    async def shutdown(self, sockets: list[socket.socket] | None = None) -> None:
+        await super().shutdown(sockets)
+        for server in self.servers:
+            server.abort_clients()
 
-async def serve_asgi(app: ASGIApp, listener: ListenerView, stop: asyncio.Event) -> None:
-    """Serve `app` with uvicorn on `listener` (TLS from its view) until `stop` is set; installs no signal
-    handlers of its own (stop_on_signals owns them)."""
+
+async def serve_asgi(app: ASGIApp, listener: ListenerView, stop: asyncio.Event, grace: timedelta = STOP_GRACE) -> None:
+    """Serve `app` with uvicorn on `listener` (TLS from its view) until `stop` is set, then give in-flight
+    requests `grace` to finish and cut whatever is still connected; installs no signal handlers of its own
+    (stop_on_signals owns them)."""
     tls = listener.tls
     config = uvicorn.Config(
         app,
@@ -40,6 +51,7 @@ async def serve_asgi(app: ASGIApp, listener: ListenerView, stop: asyncio.Event) 
         ssl_keyfile=None if tls is None else tls.key,
         ssl_ca_certs=None if tls is None or tls.client_ca is None else str(tls.client_ca),
         ssl_cert_reqs=ssl.CERT_NONE if tls is None or tls.client_ca is None else ssl.CERT_REQUIRED,
+        timeout_graceful_shutdown=max(1, round(grace.total_seconds())),  # whole seconds only  # whole seconds only
     )
     server = _Server(config)
 

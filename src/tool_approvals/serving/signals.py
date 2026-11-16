@@ -2,9 +2,12 @@
 
 import asyncio
 import signal
+from datetime import timedelta
 from typing import Final
 
 STOP_SIGNALS: Final = (signal.SIGTERM, signal.SIGINT)
+# How long in-flight requests get to finish once a listener stops, where a service names no grace of its own.
+STOP_GRACE: Final = timedelta(seconds=5)
 
 
 def stop_on_signals() -> asyncio.Event:

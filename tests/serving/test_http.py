@@ -2,6 +2,7 @@
 
 import asyncio
 import ssl
+from datetime import timedelta
 from pathlib import Path
 
 import httpx
@@ -133,3 +134,18 @@ async def test_a_port_in_use_is_an_error_not_an_exit(tls: TlsFiles) -> None:
     async with serving_asgi(health_app({}), listener):
         with pytest.raises(OSError, match="could not serve"):
             await serve_asgi(health_app({}), listener, asyncio.Event())
+
+
+async def test_an_idle_client_that_never_starts_tls_does_not_hold_the_stop(tls: TlsFiles) -> None:
+    listener = _listener(tls)
+    grace = timedelta(seconds=1)
+    async with serving_asgi(health_app({}), listener, grace) as stop:
+        reader, idle = await asyncio.open_connection(listener.host, listener.port)  # TCP only: no ClientHello
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        stop.set()
+    took = loop.time() - started
+    assert took < grace.total_seconds() + 2  # asyncio's own TLS handshake timeout is 60 s
+    async with asyncio.timeout(2):
+        assert await reader.read() == b""  # the server cut it rather than leaving it to the handshake timeout
+    idle.close()

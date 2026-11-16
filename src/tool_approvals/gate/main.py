@@ -68,7 +68,8 @@ async def serve(view: GateView, stop: asyncio.Event) -> int:
                 server = grpc_listener(view.check_api.grpc, CHECK_METHODS)
                 check_pb2_grpc.add_CheckServiceServicer_to_server(CheckServicer(core, exposed), server)
             if view.check_api.json is not None:
-                servings.append(serve_asgi(check_json_app(core, exposed, registry), view.check_api.json, stop))
+                json_app = check_json_app(core, exposed, registry)
+                servings.append(serve_asgi(json_app, view.check_api.json, stop, view.check_budget))
         if view.ext_mcp is not None:
             server = grpc_listener(view.ext_mcp.listener, EXT_MCP_METHODS)
             ext_mcp_pb2_grpc.add_ExtMcpServicer_to_server(ExtMcpServicer(core, view.ext_mcp, view.wait_route), server)

@@ -111,10 +111,13 @@ hook is refused, and ungated calls too where the gateway sends every `tools/call
 | Service | On stop |
 |---|---|
 | Gate | Stops accepting; checks in flight get up to `gate.check_budget` to finish |
-| Wait server | Held calls end at once with `still-waiting`, so the agent waits again (on another replica); Wait Tasks are unaffected |
+| Wait server | Held calls end at once with `still-waiting`, so the agent waits again (on another replica); Wait Tasks are unaffected; other requests get 5 s |
 | Approvals | Requests in flight get 5 s; held outcome streams are then cut and the wait servers follow them again on another replica |
 
-Give the orchestrator's stop timeout a few seconds more than the longest of these.
+Every listener's stop is bounded: once its time is up, every connection still open is closed, one that never
+finished its TLS handshake included, so an idle client cannot hold the stop. A service therefore stops within the
+longest of these (5 s, or `gate.check_budget` for the gate if that is longer) plus about a second. Give the
+orchestrator's stop timeout a few seconds more than that.
 
 ## Security checklist
 

@@ -3,7 +3,6 @@
 import asyncio
 import contextlib
 import logging
-from datetime import timedelta
 from typing import Final
 
 from tool_approvals.approvals.app.answers import AnswerService
@@ -26,13 +25,10 @@ from tool_approvals.contract.requests.v1 import requests_pb2_grpc
 from tool_approvals.contract_mapping.requests import REQUESTS_METHODS
 from tool_approvals.serving.grpc_server import grpc_server, serve_grpc
 from tool_approvals.serving.http import health_app, serve_asgi
-from tool_approvals.serving.signals import stop_on_signals
+from tool_approvals.serving.signals import STOP_GRACE, stop_on_signals
 from tool_approvals.serving.timeouts import AsyncioTimeouts
 
 EXIT_OK: Final = 0
-# In-flight RPCs get this long to finish on stop; a held AwaitOutcome stream is then cut and its caller follows
-# the wait again on another replica.
-STOP_GRACE: Final = timedelta(seconds=5)
 READY_CHANGE_FEED: Final = "change-feed"
 
 _log: Final = logging.getLogger(__name__)
@@ -69,6 +65,8 @@ async def serve_until(view: ApprovalsView, stop: asyncio.Event) -> int:
             async with asyncio.TaskGroup() as group:
                 group.create_task(feed.run(stop))
                 group.create_task(_supervise(waker, stop))
+                # In-flight RPCs get STOP_GRACE; a held AwaitOutcome stream is then cut and its caller follows the
+                # wait again on another replica.
                 group.create_task(serve_grpc(server, stop, STOP_GRACE))
                 group.create_task(serve_asgi(desk, view.approvers, stop))
                 group.create_task(serve_asgi(health_app({READY_CHANGE_FEED: feed.connected}), view.health, stop))

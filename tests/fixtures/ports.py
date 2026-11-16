@@ -4,11 +4,13 @@ import asyncio
 import socket
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import timedelta
 
 from starlette.types import ASGIApp
 
 from tool_approvals.config.views import ListenerView
 from tool_approvals.serving.http import serve_asgi
+from tool_approvals.serving.signals import STOP_GRACE
 
 
 def free_port() -> int:
@@ -20,11 +22,13 @@ def free_port() -> int:
 
 
 @asynccontextmanager
-async def serving_asgi(app: ASGIApp, listener: ListenerView) -> AsyncIterator[asyncio.Event]:
-    """`serve_asgi(app, listener)` running until the block ends; yields its stop event. Entered once the port
-    accepts connections (uvicorn reports no start, so the test connects until it does, or the server fails)."""
+async def serving_asgi(
+    app: ASGIApp, listener: ListenerView, grace: timedelta = STOP_GRACE
+) -> AsyncIterator[asyncio.Event]:
+    """`serve_asgi(app, listener, stop, grace)` running until the block ends; yields its stop event. Entered once the
+    port accepts connections (uvicorn reports no start, so the test connects until it does, or the server fails)."""
     stop = asyncio.Event()
-    serving = asyncio.create_task(serve_asgi(app, listener, stop))
+    serving = asyncio.create_task(serve_asgi(app, listener, stop, grace))
     try:
         await _accepting(listener, serving)
         yield stop
