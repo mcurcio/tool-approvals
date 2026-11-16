@@ -22,7 +22,10 @@ class AgentKeys:
     def write_jwks(self, path: Path) -> None:
         path.write_text(json.dumps({"keys": [self._key.as_dict(private=False)]}))
 
-    def token(self, principal: str) -> str:
+    def token(self, principal: str | None) -> str:
+        """A valid token for `principal`; None leaves `sub` out (a token that attests no principal)."""
         now = int(time.time())
-        claims = {"iss": ISSUER, "aud": AUDIENCE, "sub": principal, "iat": now, "exp": now + _LIFETIME_S}
+        claims: dict[str, object] = {"iss": ISSUER, "aud": AUDIENCE, "iat": now, "exp": now + _LIFETIME_S}
+        if principal is not None:
+            claims["sub"] = principal
         return jwt.encode({"alg": "ES256", "kid": _KID}, claims, self._key)

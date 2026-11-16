@@ -3,11 +3,14 @@
 One HTTP listener, one route at MCP_PATH multiplexing every tool server as a target (tool names are always
 prefixed `<server>_`), agents authenticated by JWT. With a guardrail, the gate's `ext_mcp` hook is the last
 processor: fail closed, `tools/call` in the request phase, over TLS with the bearer, handed the JWT's `sub` as the
-principal. The wait target gets a 60 s request timeout: agentgateway gives a held call 10 s to send response
-headers, and the MCP SDK sends them only at 15 s.
+principal, and never the agent's own `authorization` header (the gate reads no header; the agent's credential is
+not the gate's to see). The wait target gets a request timeout above the wait server's max_hold: agentgateway
+otherwise gives a held call 10 s to send response headers, and on the 2026-07-28 protocol the wait server sends
+nothing until the hold ends.
 """
 
 from collections.abc import Mapping
+from datetime import timedelta
 from typing import Final
 
 from tests.e2e.wiring import AgentJwt, Hook, WaitTarget
@@ -17,12 +20,16 @@ PORT: Final = 3000
 READINESS_PORT: Final = 15021
 READINESS_PATH: Final = "/healthz/ready"
 MCP_PATH: Final = "/mcp"
-WAIT_REQUEST_TIMEOUT: Final = "60s"
+HIDDEN_FROM_GUARDRAIL: Final = ("authorization",)  # request headers the gate's processor is never sent
 
 
 def tool_name(server: str, tool: str) -> str:
     """A tool's name as agents see it through the multiplexed route."""
     return f"{server}_{tool}"
+
+
+def _seconds(duration: timedelta) -> str:
+    return f"{duration.total_seconds():g}s"
 
 
 def guardrail_processor(hook: Hook, principal_key: str) -> dict[str, object]:
@@ -33,6 +40,7 @@ def guardrail_processor(hook: Hook, principal_key: str) -> dict[str, object]:
         "policies": {"backendTLS": {"root": hook.ca_file, "hostname": hook.host}, "backendAuth": {"key": hook.bearer}},
         "failureMode": "failClosed",
         "metadata": {principal_key: "jwt.sub"},
+        "requestHeaders": {"disallowed": list(HIDDEN_FROM_GUARDRAIL)},
     }
 
 
@@ -54,7 +62,7 @@ def config(
                 "policies": {
                     "backendTLS": {"root": wait.ca_file},
                     "backendAuth": {"key": wait.bearer},
-                    "http": {"requestTimeout": WAIT_REQUEST_TIMEOUT},
+                    "http": {"requestTimeout": _seconds(wait.request_timeout)},
                 },
             }
         )

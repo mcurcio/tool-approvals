@@ -32,7 +32,7 @@ class HttpMcpGateway:
         echo: EchoTool,
     ) -> None:
         self.name = name
-        self._url_of = url_of
+        self.url_of = url_of
         self._tool_of = tool_of
         self._raw_server = raw_server
         self._agents = agents
@@ -49,7 +49,7 @@ class HttpMcpGateway:
         meta: Mapping[str, object] | None = None,
     ) -> CallOutcome:
         before = len(self._echo.received())
-        url = self._url_of(server)
+        url = self.url_of(server)
         params = b'{"name":' + json.dumps(self._tool_of(server, tool)).encode() + b',"arguments":' + arguments_json
         if meta is not None:
             params += b',"_meta":' + json.dumps(meta).encode()
@@ -60,7 +60,9 @@ class HttpMcpGateway:
             sent = {**self._headers(principal, session), "content-type": "application/json", **(headers or {})}
             reply = await http.post(url, headers=sent, content=body)
         ran = len(self._echo.received()) > before
-        message = _message(reply)
+        if reply.status_code >= 300:  # refused outside JSON-RPC (Envoy's ext_authz failing closed answers 403)
+            return CallOutcome(ran=ran, code=None, text=f"HTTP {reply.status_code}", structured=None)
+        message = jsonrpc_message(reply)
         if "error" in message:
             error = message["error"]
             return CallOutcome(
@@ -73,7 +75,7 @@ class HttpMcpGateway:
     async def raw(self, principal: str, method: Literal["GET", "POST", "DELETE"], body: bytes | None) -> RawOutcome:
         headers = {**self._headers(principal, None), "content-type": "application/json"}
         async with httpx.AsyncClient(timeout=_TIMEOUT_S) as http:
-            response = await http.request(method, self._url_of(self._raw_server), headers=headers, content=body)
+            response = await http.request(method, self.url_of(self._raw_server), headers=headers, content=body)
         return RawOutcome(status=response.status_code, body=response.content)
 
     def _headers(self, principal: str, session: str | None) -> dict[str, str]:
@@ -98,7 +100,7 @@ class HttpMcpGateway:
             },
         }
         response = await http.post(url, headers=self._headers(principal, None), json=hello)
-        _message(response)
+        jsonrpc_message(response)
         session: str | None = response.headers.get("mcp-session-id")
         initialized = {"jsonrpc": "2.0", "method": "notifications/initialized"}
         notified = await http.post(url, headers=self._headers(principal, session), json=initialized)
@@ -116,7 +118,7 @@ class GatewayError(Exception):
         self.body = body
 
 
-def _message(response: httpx.Response) -> dict[str, Any]:
+def jsonrpc_message(response: httpx.Response) -> dict[str, Any]:
     """The JSON-RPC response in a JSON or an SSE body (the last `data:` event)."""
     if response.status_code >= 300:
         raise GatewayError(response.status_code, response.content)

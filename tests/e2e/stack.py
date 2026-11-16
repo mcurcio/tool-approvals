@@ -4,7 +4,8 @@ Envoy and the echo tool; the scripted IdP on the host. What S1.7's tracer and co
 `stack(tmp)` renders every file the containers read into `tmp` (one service configuration, a test CA and its
 certificate, the registry's bearers, the agents' key set, both gateway configurations), runs compose.yaml as its
 own project and tears it down. The gateways reach the gate's hooks through host relays (`SlowRelay`), so
-`GateControl.slow` can hold the gate's answers back. The image is $TOOL_APPROVALS_E2E_IMAGE, never pulled.
+`GateControl.slow` can hold the gate's answers back; agentgateway's ext_mcp hop passes a recorder first
+(`HookRecorder`), so a case can read what the gate is sent. The image is $TOOL_APPROVALS_E2E_IMAGE, never pulled.
 """
 
 import asyncio
@@ -21,12 +22,14 @@ from typing import Final, Literal, Protocol
 
 import httpx
 import psycopg
+import pytest
 
 from tests.approvals.desk.driver import DeskPerson
 from tests.conformance.gateways import GatewayUnderTest
 from tests.e2e import agentgateway, envoy
 from tests.e2e.agents import AUDIENCE, ISSUER, AgentKeys
 from tests.e2e.clients import HttpMcpGateway
+from tests.e2e.hook_recorder import HookCall, HookRecorder
 from tests.e2e.relay import SlowRelay
 from tests.e2e.wiring import AgentJwt, Hook, WaitTarget
 from tests.fixtures.certs import tls_files
@@ -43,7 +46,13 @@ WAIT_SERVER: Final = "approvals-wait"  # wait_route.server
 PRINCIPAL_HEADER: Final = "x-approvals-principal"
 PRINCIPAL_KEY: Final = "principal"  # gate.ext_mcp.principal_key
 SERVER_KEY: Final = "server"  # gate.ext_authz.server_key
-EXT_AUTHZ_TIMEOUT: Final = timedelta(seconds=70)  # gate.ext_authz.hook_timeout, and Envoy's raised timeout
+# gate.ext_authz.hook_timeout, and Envoy's raised timeout: agentgateway's own fixed 10 s for its processors, so a
+# gate slower than both hooks needs one delay. Above the gate's check budget (5 s), as `config check` demands.
+EXT_AUTHZ_TIMEOUT: Final = timedelta(seconds=10)
+# wait.max_hold, and the wait target's request timeout in agentgateway, which must be above it (a held call on the
+# 2026-07-28 protocol sends nothing until it ends). A deployment keeps the same order at its own values.
+MAX_HOLD: Final = timedelta(seconds=50)
+WAIT_REQUEST_TIMEOUT: Final = timedelta(seconds=60)
 REQUIREMENT: Final = "reviewed"
 GATED_TOOL: Final = "delete_file"  # on `files`, the one call the policy sends for approval
 DESK_SURFACE: Final = "desk"
@@ -60,7 +69,8 @@ APPROVALS_DESK_PORT: Final = 8080
 HEALTH_PORT: Final = 8081
 ECHO_PORT: Final = 8080
 POSTGRES_PORT: Final = 5432
-_HOSTS: Final = ("gate", "wait", "approvals", "host.docker.internal", "localhost", "127.0.0.1")
+_HOST: Final = "host.docker.internal"  # the host, as the containers reach it: the relays and the recorder
+_HOSTS: Final = ("gate", "wait", "approvals", _HOST, "localhost", "127.0.0.1")
 _READY_TIMEOUT_S: Final = 60.0
 
 
@@ -87,6 +97,16 @@ class StoredApproval:
 class StoreProbe(Protocol):
     async def approval(self, ticket: str) -> StoredApproval | None: ...
 
+    async def tickets(self, principal: str) -> list[str]:
+        """Every Approval's ticket opened for `principal`, oldest first."""
+        ...
+
+
+class HookProbe(Protocol):
+    def received(self) -> list[HookCall]:
+        """Every call agentgateway made to the gate's ext_mcp hook, in order."""
+        ...
+
 
 class GateControl(Protocol):
     async def stop(self) -> None: ...
@@ -107,6 +127,9 @@ class Stack:
     desk: DeskDriver
     store: StoreProbe
     gate: GateControl
+    ca: Path  # the test CA every TLS listener of the stack chains to (a plain HTTPS Check API caller trusts it)
+    ext_mcp_hook: HookProbe
+    agents: AgentKeys  # the agents' identity provider: a token for any principal, or one attesting none
 
 
 class ComposeError(RuntimeError):
@@ -161,24 +184,30 @@ class Rendered:
     desk_port: int  # where the desk is published on the host (its public URL)
     idp_port: int  # where the scripted IdP must listen on the host (the issuer names it)
     idp_client_secret: str
+    ca: Path  # the test CA, on the host
+    cert: Path  # the stack's server certificate and key, on the host (they name host.docker.internal too)
+    key: Path
 
 
-def render(
+def render(  # noqa: PLR0913 (every setting a case varies)
     tmp: Path,
     *,
     guardrails: bool,
     ext_mcp: tuple[str, int] = ("gate", GATE_EXT_MCP_PORT),
     ext_authz: tuple[str, int] = ("gate", GATE_EXT_AUTHZ_PORT),
     idp_port: int | None = None,
+    max_hold: timedelta = MAX_HOLD,
+    wait_request_timeout: timedelta = WAIT_REQUEST_TIMEOUT,
 ) -> Rendered:
     """Write E2E_DIR under `tmp`. `guardrails` False renders gateways that route straight to the tool servers;
-    `ext_mcp` and `ext_authz` are where the gateways dial the gate's hooks (a relay, or the gate itself)."""
+    `ext_mcp` and `ext_authz` are where the gateways dial the gate's hooks (a relay, or the gate itself);
+    `max_hold` is the wait server's, `wait_request_timeout` agentgateway's on the wait target."""
     directory = tmp / "e2e"
     mounted, records = directory / "mounted", directory / "records"
     tls_dir, secret_dir = mounted / "tls", mounted / "secrets"
     for made in (mounted, tls_dir, secret_dir, records):
         made.mkdir(parents=True)
-    tls_files(tls_dir, _HOSTS)
+    tls = tls_files(tls_dir, _HOSTS)
     agents = AgentKeys()
     agents.write_jwks(mounted / "jwks.json")
 
@@ -213,7 +242,7 @@ def render(
     for name, value in secret_values.items():
         (secret_dir / name).write_text(value)
 
-    service_config = _service_config(registry, idp_port, desk_port)
+    service_config = _service_config(registry, idp_port, desk_port, max_hold)
     (mounted / "config.yaml").write_text(json.dumps(service_config, indent=2))
     agents_jwt = AgentJwt(issuer=ISSUER, audience=AUDIENCE, jwks_file="/e2e/jwks.json")
     ca = "/e2e/tls/ca.pem"
@@ -223,7 +252,13 @@ def render(
         agents=agents_jwt,
         guardrail=(Hook(*ext_mcp, ca_file=ca, bearer=hook_bearer), PRINCIPAL_KEY) if guardrails else None,
         wait=(
-            WaitTarget(WAIT_SERVER, f"https://wait:{WAIT_MCP_PORT}/mcp", ca, bearers["gateway-wait-route"])
+            WaitTarget(
+                WAIT_SERVER,
+                f"https://wait:{WAIT_MCP_PORT}/mcp",
+                ca,
+                bearers["gateway-wait-route"],
+                wait_request_timeout,
+            )
             if guardrails
             else None
         ),
@@ -254,10 +289,15 @@ def render(
         desk_port=desk_port,
         idp_port=idp_port,
         idp_client_secret=idp_client_secret,
+        ca=tls.ca,
+        cert=tls.cert,
+        key=tls.key,
     )
 
 
-def _service_config(registry: Sequence[Mapping[str, object]], idp_port: int, desk_port: int) -> dict[str, object]:
+def _service_config(
+    registry: Sequence[Mapping[str, object]], idp_port: int, desk_port: int, max_hold: timedelta
+) -> dict[str, object]:
     """The one configuration file every tool-approvals container reads (paths as the containers see them)."""
     tls = {"cert": "/e2e/tls/cert.pem", "key": "/e2e/tls/key.pem"}
     health = {"host": "0.0.0.0", "port": HEALTH_PORT}  # noqa: S104 (inside its container)
@@ -314,6 +354,7 @@ def _service_config(registry: Sequence[Mapping[str, object]], idp_port: int, des
         },
         "wait": {
             "listeners": {"mcp": listener(WAIT_MCP_PORT), "health": health},
+            "max_hold": f"{int(max_hold.total_seconds())}s",
             "approvals": {
                 "address": f"dns:///approvals:{APPROVALS_REQUESTS_PORT}",
                 "ca": "/e2e/tls/ca.pem",
@@ -350,6 +391,17 @@ def idp_issuer(idp_port: int) -> str:
 def desk_url(desk_port: int) -> str:
     """The desk's public URL: where a browser on the host reaches it."""
     return f"http://127.0.0.1:{desk_port}"
+
+
+def skip_without_image(items: Sequence[pytest.Item], under: Path) -> None:
+    """Skip every collected test under `under` unless $TOOL_APPROVALS_E2E_IMAGE names the image built from this
+    commit (the CI e2e job builds it and sets it), so the unit run needs no Docker."""
+    if os.environ.get(IMAGE_ENV):
+        return
+    skip = pytest.mark.skip(reason=f"set {IMAGE_ENV} to the image built from this commit (the CI e2e job does)")
+    for item in items:
+        if item.path.is_relative_to(under):
+            item.add_marker(skip)
 
 
 def image() -> str:
@@ -427,6 +479,13 @@ class _PostgresStore:
             return None
         return StoredApproval(row[0], row[1], row[2], row[3], bytes(row[4]), row[5])
 
+    async def tickets(self, principal: str) -> list[str]:
+        async with await psycopg.AsyncConnection.connect(self._dsn) as connection:
+            cursor = await connection.execute(
+                "SELECT ticket FROM approvals WHERE principal = %s ORDER BY created_at, ticket", (principal,)
+            )
+            return [row[0] for row in await cursor.fetchall()]
+
 
 class _GateControl:
     def __init__(self, compose: Compose, relays: Sequence[SlowRelay], ports: dict[int, int]) -> None:
@@ -470,16 +529,21 @@ def _published_gate(published: Mapping[int, int], container_port: int) -> Callab
 
 
 @asynccontextmanager
-async def _stack(tmp: Path) -> AsyncIterator[Stack]:
+async def _stack(tmp: Path, max_hold: timedelta, wait_request_timeout: timedelta) -> AsyncIterator[Stack]:
     published = {GATE_EXT_MCP_PORT: 0, GATE_EXT_AUTHZ_PORT: 0}  # filled in once the gate runs
     relays = {port: SlowRelay(_published_gate(published, port)) for port in published}
     relay_ports = {port: free_port() for port in published}
+    recorder_port = free_port()
     rendered = render(
         tmp,
         guardrails=True,
-        ext_mcp=("host.docker.internal", relay_ports[GATE_EXT_MCP_PORT]),
-        ext_authz=("host.docker.internal", relay_ports[GATE_EXT_AUTHZ_PORT]),
+        ext_mcp=(_HOST, recorder_port),
+        ext_authz=(_HOST, relay_ports[GATE_EXT_AUTHZ_PORT]),
+        max_hold=max_hold,
+        wait_request_timeout=wait_request_timeout,
     )
+    ext_mcp_relay = relay_ports[GATE_EXT_MCP_PORT]
+    recorder = HookRecorder(lambda: ("127.0.0.1", ext_mcp_relay), rendered.cert, rendered.key, rendered.ca, _HOST)
     echo = EchoTool(rendered.records)
     idp = ScriptedIdp(
         idp_issuer(rendered.idp_port),
@@ -489,6 +553,7 @@ async def _stack(tmp: Path) -> AsyncIterator[Stack]:
     )
     for port, relay in relays.items():
         await relay.start(relay_ports[port])
+    await recorder.start(recorder_port)
     try:
         # Every interface: the Approvals container reaches the host through the bridge's gateway address.
         async with idp.serving("0.0.0.0", rendered.idp_port), project(rendered) as compose:  # noqa: S104
@@ -504,12 +569,19 @@ async def _stack(tmp: Path) -> AsyncIterator[Stack]:
                 desk=_Desk(idp, desk_url(rendered.desk_port)),
                 store=_PostgresStore(await compose.port("postgres", POSTGRES_PORT), rendered.postgres_password),
                 gate=control,
+                ca=rendered.ca,
+                ext_mcp_hook=recorder,
+                agents=rendered.agents,
             )
     finally:
+        await recorder.close()
         for relay in relays.values():
             await relay.close()
 
 
-def stack(tmp: Path) -> AbstractAsyncContextManager[Stack]:
-    """Start the stack (images built from this commit), yield it, tear it down."""
-    return _stack(tmp)
+def stack(
+    tmp: Path, *, max_hold: timedelta = MAX_HOLD, wait_request_timeout: timedelta = WAIT_REQUEST_TIMEOUT
+) -> AbstractAsyncContextManager[Stack]:
+    """Start the stack (images built from this commit), yield it, tear it down. `max_hold` is the wait server's,
+    `wait_request_timeout` agentgateway's on the wait target (keep it above `max_hold`)."""
+    return _stack(tmp, max_hold, wait_request_timeout)

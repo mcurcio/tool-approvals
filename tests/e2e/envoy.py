@@ -38,6 +38,9 @@ def _cluster(name: str, host: str, port: int, *, http2: bool, tls: Mapping[str, 
     cluster: dict[str, object] = {
         "name": name,
         "type": "STRICT_DNS",
+        # Docker Desktop names host.docker.internal with an IPv6 address too, which Envoy would prefer and which
+        # reaches nothing listening on the host's IPv4 relays.
+        "dns_lookup_family": "V4_ONLY",
         "connect_timeout": "2s",
         "load_assignment": {
             "cluster_name": name,

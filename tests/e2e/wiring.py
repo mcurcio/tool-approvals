@@ -2,6 +2,7 @@
 lives, and the credential each hook dial carries. Plain values, paths as the gateway container sees them."""
 
 from dataclasses import dataclass
+from datetime import timedelta
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,3 +32,4 @@ class WaitTarget:
     url: str  # its MCP endpoint, https
     ca_file: str
     bearer: str  # a registry caller granted wait.call
+    request_timeout: timedelta  # how long the gateway lets one held call run; above the wait's max_hold
