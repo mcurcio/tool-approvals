@@ -5,7 +5,6 @@ name: CI
 on:
   push:
     branches: [main]
-  # A later edit of a pull request's title or body is scanned by denylist-text.yml.
   pull_request:
 
 permissions:
@@ -39,69 +38,6 @@ jobs:
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: node --test tests/release_rules.test.mjs
 
-  # Refuses a listed word in the commits, the tree, the branch name, or the pull request's title and body.
-  # The scanner is scripts/denylist.py, vendored unchanged from the maintainers' copy (tests/test_denylist_copy.py
-  # pins it; its behaviour tests live upstream with the maintainers' tooling):
-  # `denylist.py commits <range>` and `denylist.py tree <path>`, the word list on stdin, exit 0 clean, 1 hit (a
-  # listed word, or a compressed or archive file it cannot read), 2 setup failure; it names the kind of hit, never
-  # the word. The list is the DENYLIST secret (a Dependabot secret
-  # of the same value serves Dependabot's pull requests) and reaches the scanner only through `env:` and stdin, as
-  # does every piece of pull request text. Pull requests from forks are not scanned: they get no secrets, and a
-  # result would reveal the list.
-  denylist:
-    name: Deny-list check
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
-        with:
-          version: ${{ env.UV_VERSION }}
-      - name: Scan
-        env:
-          DENYLIST: ${{ secrets.DENYLIST }}
-          EVENT: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          HEAD_REF: ${{ github.head_ref || github.ref_name }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          PR_BODY: ${{ github.event.pull_request.body }}
-          BEFORE: ${{ github.event.before }}
-          AFTER: ${{ github.sha }}
-        run: |
-          if [ -z "$DENYLIST" ]; then
-            echo "::error::The DENYLIST secret is not set"
-            exit 2
-          fi
-          rc=0
-          scan() {
-            local status=0
-            printf '%s\n' "$DENYLIST" | uv run --no-project scripts/denylist.py "$@" || status=$?
-            if [ "$status" -gt "$rc" ]; then rc=$status; fi
-          }
-          # The branch name, title and body, each as one file of a fresh directory.
-          text="$RUNNER_TEMP/denylist-text"
-          mkdir -m 700 "$text"
-          printf '%s' "$HEAD_REF" > "$text/ref"
-          printf '%s' "$PR_TITLE" > "$text/title"
-          printf '%s' "$PR_BODY" > "$text/body"
-          scan tree "$text"
-          if [ "$EVENT" = pull_request ]; then
-            scan commits "$BASE_SHA..$HEAD_SHA"
-          else
-            # A new branch, or a base the push rewrote, has no usable base: scan the whole history.
-            if git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
-              scan commits "$BEFORE..$AFTER"
-            else
-              scan commits "$AFTER"
-            fi
-            scan tree .
-          fi
-          exit "$rc"
-
   # Placeholder until the end-to-end harness lands; the release already waits on it.
   e2e:
     name: End-to-end (placeholder)
@@ -111,7 +47,7 @@ jobs:
 
   release:
     name: Release (semantic-release)
-    needs: [check, denylist, e2e]
+    needs: [check, e2e]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     concurrency:

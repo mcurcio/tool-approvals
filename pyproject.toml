@@ -31,8 +31,6 @@ required-version = ">=0.13.5"
 [tool.ruff]
 line-length = 120
 target-version = "py313"
-# The scanner is vendored from a maintained copy (tests/test_denylist_copy.py pins it): its style is set there.
-extend-exclude = ["scripts/denylist.py"]
 
 [tool.ruff.lint]
 select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "S", "PT", "PL", "C4", "PIE", "RET", "TID", "TC"]
@@ -49,7 +47,7 @@ ban-relative-imports = "all"
 [tool.mypy]
 strict = true
 python_version = "3.13"
-files = ["src", "tests", "scripts"]
+files = ["src", "tests"]
 mypy_path = "src"
 warn_unreachable = true
 

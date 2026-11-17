@@ -189,11 +189,6 @@ requested level. An identity provider that reuses an earlier ceremony for a high
 | Image, chart | One multi-arch image (non-root, read-only root, provenance and SBOM); a compose file and a Helm chart, the chart pushed as an OCI artifact by the release job and versioned from the tag |
 | Release | semantic-release on every merge to `main`, `CHANGELOG.md` only, the version held by the tag. `0.x` until the project is declared stable: a breaking change (marked `!`, which `buf breaking` against the last tag demands for contract changes) releases a minor version until then |
 
-**Deny-list check.** CI scans commits, paths, the tree, branch names and pull request and issue text for a word
-list kept as a repository secret, as whole words, case-insensitive, printing no match. The list holds only words
-that must never be published, never project vocabulary. Residual: fork pull requests are not scanned (a result
-would reveal the list).
-
 ## Tests through the real artifact
 
 | Module | Proof |
@@ -230,8 +225,8 @@ would reveal the list).
 
 - **Costs:** event-writing commits are serialised (bounded by gated-call volume); a dedicated connection per
   channel per replica; ordering only by id at the receiver; a Connect client cannot call the JSON binding
-  directly; fork pull requests unscanned by the deny-list check; order holds per sender only, so a delivery
-  takeover can interleave; one Web Push cursor pauses every device when one push service fails.
+  directly; order holds per sender only, so a delivery takeover can interleave; one Web Push cursor pauses every
+  device when one push service fails.
 - **Deferred:** a published conformance kit for third-party mappings; `connectrpc` once it reaches 1.0; per-role
   database users.
 - **Not planned:** Python plugin loading; hot reload; a policy cache.

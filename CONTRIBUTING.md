@@ -53,11 +53,3 @@ works out the version from the commits, tags it, writes `CHANGELOG.md` and publi
 tag or edit a version by hand, except the one-time seed tag: the `0.x` line starts from `v0.1.0`, which a
 maintainer pushes once before the first release (with no `v*` tag semantic-release would cut 1.0.0, so the release
 job refuses to run until it exists).
-
-## Deny-list check
-
-CI runs a deny-list check (`scripts/denylist.py`) on pull requests from branches of this repository and on pushes
-to `main`. It refuses words the maintainers keep in a private list, in commits, paths, the tree, the branch name
-and pull request text, and prints only the kind of hit, never the word. Pull requests from forks are not scanned:
-forks receive no secrets, and a result would reveal the list.
-
