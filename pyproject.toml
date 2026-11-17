@@ -59,9 +59,8 @@ required-version = ">=0.13.5"
 [tool.ruff]
 line-length = 120
 target-version = "py313"
-# The scanner is vendored from a maintained copy (tests/test_denylist_copy.py pins it): its style is set there.
 # The wire stubs are generated (scripts/generate_contract.py --check keeps them current).
-extend-exclude = ["scripts/denylist.py", "src/tool_approvals/contract/**/*_pb2*"]
+extend-exclude = ["src/tool_approvals/contract/**/*_pb2*"]
 
 [tool.ruff.lint]
 select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "S", "PT", "PL", "C4", "PIE", "RET", "TID", "TC"]
