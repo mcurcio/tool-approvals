@@ -82,6 +82,12 @@ later release), and CI checks every migration for that, so the order is: migrate
 changes ride in a later release, after nothing older serves. The Check API and ApprovalRequests change the same way
 (`buf breaking` in CI).
 
+**Upgrading across `0002_answered_at`.** A yes now keeps the moment it was answered, and a claim re-checks the
+approver's sign-in against it. A yes without that moment (recorded before the migration, or by a replica of the
+previous release while the roll is under way) is never spent: its claim ends it expired, and the approver answers
+again. Nothing is let through; the cost is those answers. To keep it small, roll Approvals while few approvals are
+waiting or approved, and finish the roll before approvers go back to the desk.
+
 ## Replicas
 
 | Service | Replicas | Notes |

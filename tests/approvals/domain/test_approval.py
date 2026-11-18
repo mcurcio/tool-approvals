@@ -347,7 +347,8 @@ def test_an_unchanged_use_window_spends_the_yes_inside_it() -> None:
 
 
 def test_a_yes_without_answered_at_is_not_spent() -> None:
-    """A yes stored before migration 0002 has no answered_at: it fails closed."""
+    """A yes stored before migration 0002, or recorded after it by a replica of the previous release still serving
+    during the roll, has no answered_at: it fails closed, and the approver answers again."""
     approval = opened()
     answer(approval)
     without_answered_at(approval)
