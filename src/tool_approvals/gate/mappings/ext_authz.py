@@ -10,8 +10,9 @@ from typing import Any, Final
 import grpc
 import grpc.aio
 from envoy.service.auth.v3 import external_auth_pb2, external_auth_pb2_grpc
+from google.protobuf import wrappers_pb2
 
-from tool_approvals.config.views import ExtAuthzAttributeView, ExtAuthzView, WaitRouteView
+from tool_approvals.config.views import ExtAuthzAttributeView, ExtAuthzView
 from tool_approvals.gate.core.check import Checker, Pass, Pending, Unavailable
 from tool_approvals.gate.core.ports import GatewayContext
 from tool_approvals.gate.core.wording import agent_text
@@ -24,7 +25,8 @@ from tool_approvals.kernel.calls import (
     CallRejected,
     RejectReason,
     RpcRequest,
-    read_rpc_request,
+    RpcResponse,
+    read_rpc_message,
 )
 from tool_approvals.kernel.names import Principal, ServerName
 from tool_approvals.kernel.requests import Rejected
@@ -70,41 +72,62 @@ class Deny:
 
 type Classification = ToCheck | PassOn | Deny
 
-# The answer to question 6 decides this set; until then, the discovery methods an MCP session needs.
+# Every MCP method but tools/call passes, as it does behind agentgateway, whose guardrail is sent tools/call alone.
+# A name ending "/*" passes every method under that prefix. tasks/* and any method not listed stay refused.
 EXT_AUTHZ_PASS_METHODS: Final[frozenset[str]] = frozenset(
-    {"initialize", "notifications/initialized", "tools/list", "ping"}
+    {
+        "initialize",
+        "notifications/*",
+        "tools/list",
+        "prompts/*",
+        "resources/*",
+        "completion/complete",
+        "logging/setLevel",
+        "ping",
+    }
 )
+_ANY_UNDER: Final = "*"
 
 
-def classify(facts: HttpFacts, pass_methods: frozenset[str]) -> Classification:
+def passes(method: str) -> bool:
+    """Whether EXT_AUTHZ_PASS_METHODS names `method`, exactly or by a "/*" prefix."""
+    return method in EXT_AUTHZ_PASS_METHODS or any(
+        listed.endswith(_ANY_UNDER) and method.startswith(listed.removesuffix(_ANY_UNDER))
+        for listed in EXT_AUTHZ_PASS_METHODS
+    )
+
+
+def classify(facts: HttpFacts) -> Classification:
     """What the gate does with one HTTP request on an MCP route. A route naming no server is Unavailable; anything
-    but a POST, MALFORMED; a body Envoy cut, TOO_LARGE; a body that is not one JSON-RPC request (a batch, duplicate
-    keys, trailing data, no method, a client's JSON-RPC response), MALFORMED. Then by method: tools/call is
-    checked on its params span's exact bytes; `pass_methods` pass on; tasks/* is TASK_REQUESTED; any other method
-    MALFORMED, answering the request's id. The wait server's route is checked as any server's: whether it should
-    pass unchecked behind Envoy, as it does behind agentgateway, waits on question 7."""
-    read = _read_request(facts)
+    but a POST, MALFORMED; a body Envoy cut, TOO_LARGE; a body that is neither one JSON-RPC request nor one JSON-RPC
+    response (a batch, duplicate keys, trailing data, no method and no result or error), MALFORMED. A client's
+    JSON-RPC response passes on. Then by method: tools/call is checked on its params span's exact bytes (the wait
+    server's route too: the checker passes it, `CheckCore.check`); the methods `passes` names pass on; tasks/* is
+    TASK_REQUESTED; any other method MALFORMED, answering the request's id (none for a notification)."""
+    read = _read_message(facts)
     if isinstance(read, Deny):
         return read
+    if isinstance(read, RpcResponse):
+        return PassOn()
     if read.method == TOOLS_CALL:
         params = b"" if read.params is None else facts.body[read.params.start : read.params.end]
         return ToCheck(params, read.id_json)
-    if read.method in pass_methods:
+    if passes(read.method):
         return PassOn()
     if read.method.startswith(TASKS_PREFIX):
         return Deny(Rejected(RejectReason.TASK_REQUESTED), read.id_json)
     return Deny(Rejected(RejectReason.MALFORMED), read.id_json)
 
 
-def _read_request(facts: HttpFacts) -> RpcRequest | Deny:
-    """The one JSON-RPC request the HTTP request carries, or why there is none to read."""
+def _read_message(facts: HttpFacts) -> RpcRequest | RpcResponse | Deny:
+    """The one JSON-RPC message the HTTP request carries, or why there is none to read."""
     if not facts.server:
         return Deny(Unavailable(), b"")  # the gateway did not say where: fail closed
     if facts.method != POST:  # GET (a server stream), DELETE (ending a session) and the rest
         return Deny(Rejected(RejectReason.MALFORMED), b"")
     if facts.partial_body:
         return Deny(Rejected(RejectReason.TOO_LARGE), b"")
-    rpc = read_rpc_request(facts.body)
+    rpc = read_rpc_message(facts.body)
     if isinstance(rpc, CallRejected):
         return Deny(Rejected(rpc.reason), b"")
     return rpc
@@ -115,15 +138,16 @@ class ExtAuthzServicer(external_auth_pb2_grpc.AuthorizationServicer):  # type: i
     """Behind GrpcAuth. Translates Envoy's AttributeContext into HttpFacts and `classify`'s answer into a
     CheckResponse. The principal at `principal_path` in the dynamic metadata must be a non-empty string, else
     denied (unavailable). A ToCheck goes to the checker with only the attributes `view.attributes` maps (each from
-    the dynamic metadata or a context_extensions key) and the RPC's deadline. An OK removes
-    `route.principal_header` (headers_to_remove), so no tool sees a principal header a client sent. A denial is
+    the dynamic metadata or a context_extensions key) and the RPC's deadline. An OK on the wait route
+    (`Pass.attested`) sets `principal_header` to the attested principal, overwriting any copy the client sent; any
+    other OK removes `principal_header` (headers_to_remove), so no tool sees one a client sent. A denial is
     HTTP 200 application/json {"jsonrpc": "2.0", "id": <id bytes>, "error": {"code", "message": agent_text,
     "data": {"verdict", "ticket"?}}}, code from mappings.errors."""
 
-    def __init__(self, checker: Checker, view: ExtAuthzView, route: WaitRouteView) -> None:
+    def __init__(self, checker: Checker, view: ExtAuthzView, principal_header: str) -> None:
         self._checker: Final = checker
         self._view: Final = view
-        self._route: Final = route
+        self._principal_header: Final = principal_header
 
     async def Check(
         self,
@@ -137,9 +161,9 @@ class ExtAuthzServicer(external_auth_pb2_grpc.AuthorizationServicer):  # type: i
         http = attributes.request.http
         server: str = attributes.context_extensions.get(self._view.server_key, "")
         facts = HttpFacts(method=http.method, partial_body=_partial(http), body=http.raw_body, server=server)
-        match classify(facts, EXT_AUTHZ_PASS_METHODS):
+        match classify(facts):
             case PassOn():
-                return _allow(self._route.principal_header)
+                return _allow(self._principal_header, None)
             case Deny(verdict, id_json):
                 return self._deny(verdict, id_json)
             case ToCheck(params, id_json):
@@ -151,7 +175,7 @@ class ExtAuthzServicer(external_auth_pb2_grpc.AuthorizationServicer):  # type: i
                 )
                 checked = await self._checker.check(gateway, params)
                 if isinstance(checked, Pass):
-                    return _allow(self._route.principal_header)
+                    return _allow(self._principal_header, checked.attested)
                 return self._deny(checked, id_json)
 
     def _deny(self, verdict: Refusal, id_json: bytes) -> Any:
@@ -197,11 +221,19 @@ def deny_response(refusal: Refusal, text: str, id_json: bytes) -> Any:
     return response
 
 
-def _allow(principal_header: str) -> Any:
-    """OK, with the principal header removed from the request Envoy forwards."""
+def _allow(principal_header: str, attested: Principal | None) -> Any:
+    """OK. With `attested` (the wait route), the principal header set to it, overwriting every copy the client sent
+    (`append` false: Envoy's set, before its removals, so the header is not also listed for removal); without, the
+    header removed from the request Envoy forwards."""
     response = external_auth_pb2.CheckResponse()
     response.status.code = _OK
-    response.ok_response.headers_to_remove.append(principal_header)
+    if attested is None:
+        response.ok_response.headers_to_remove.append(principal_header)
+        return response
+    header = response.ok_response.headers.add()
+    header.header.key = principal_header
+    header.header.value = attested
+    header.append.CopyFrom(wrappers_pb2.BoolValue(value=False))
     return response
 
 

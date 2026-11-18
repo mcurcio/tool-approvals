@@ -27,7 +27,7 @@ later ones are ignored, so a review is never changed under the person reading it
 **Who may call it.** `initialize` and `tools/list` are open, so a gateway can list the tool. A `tools/call` or
 `tasks/get` needs a registry credential granted `wait.call` (JSON-RPC error `-32600` without one): the
 gateway's bearer, or its client certificate on a `wait.listeners.mcp` with `tls.client_ca`; never the agent's. The principal is read only from `wait_route.principal_header`, which the gate sets on the wait
-route ([agentgateway](agentgateway.md)); without it no wait opens. A principal can wait only on its own tickets.
+route ([agentgateway](agentgateway.md), [Envoy](envoy.md#the-wait-route)); without it no wait opens. A principal can wait only on its own tickets.
 
 ## A held call
 
@@ -86,7 +86,7 @@ the agent makes the call again without asking for a task.
 | Gateway | The wait route |
 |---|---|
 | agentgateway | A target named `wait_route.server`; see [wiring agentgateway](agentgateway.md) |
-| Envoy | Planned (milestone 4) |
+| Envoy | A route whose `context_extensions` server is `wait_route.server`; see [wiring Envoy](envoy.md#the-wait-route). Held waits only: the gate refuses `tasks/get` through Envoy, so turn Wait Tasks off (`wait.tasks: disabled`) until milestone 4 |
 | Check API gateways | Route the wait server yourself and set the principal header; see [the Check API](check-api.md#the-wait-through-your-gateway) |
 
 agentgateway does not forward task notifications, so clients poll `tasks/get`.

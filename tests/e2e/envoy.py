@@ -6,7 +6,10 @@ One HTTP listener; each tool server is a route at `/<server>/mcp` to the echo cl
 bearer: fail closed, the whole body packed as bytes (a body over the buffer limit is refused, never sent in
 part), the `jwt_authn` metadata forwarded, the agent's own credentials (its `authorization` header and its
 cookies) kept from the gate by `disallowed_headers`, the gate's hook timeout raised to
-`gate.ext_authz.hook_timeout`, and each route naming its server in `context_extensions`. `jwt_authn` already
+`gate.ext_authz.hook_timeout`, and each route naming its server in `context_extensions`. The wait server is one
+more route, under `wait_route.server`: over TLS, its path rewritten to the wait server's, the route's own registry
+bearer (granted wait.call) set in place of the agent's `authorization`, and the route timeout raised above the
+wait server's max_hold. The gate's ext_authz sets the attested principal header on it. `jwt_authn` already
 removes `authorization` once it has verified it (`forward` is false by default); the filter holds whatever the
 route's authentication is, and it alone keeps `cookie` out, which is what lets conformance case 13 see it work.
 """
@@ -14,8 +17,9 @@ route's authentication is, and it alone keeps `cookie` out, which is what lets c
 from collections.abc import Mapping
 from datetime import timedelta
 from typing import Final
+from urllib.parse import urlsplit
 
-from tests.e2e.wiring import AgentJwt, Hook
+from tests.e2e.wiring import AgentJwt, Hook, WaitTarget
 from tool_approvals.kernel.calls import MAX_PARAMS_BYTES
 
 IMAGE: Final = (  # pinned by digest, as compose.yaml runs it
@@ -98,19 +102,56 @@ def _ext_authz(hook: Hook, timeout: timedelta) -> dict[str, object]:
     }
 
 
+def _wait_route(wait: WaitTarget) -> tuple[dict[str, object], dict[str, object]]:
+    """The wait server's route and cluster: `/<wait.server>/mcp` rewritten to the wait server's own path, over TLS
+    verified against `wait.ca_file`, with `wait.bearer` as the request's `authorization` (the agent's is already
+    gone: jwt_authn does not forward it) and a route timeout of `wait.request_timeout`."""
+    url = urlsplit(wait.url)
+    assert url.hostname is not None
+    assert url.port is not None
+    route: dict[str, object] = {
+        "match": {"path": mcp_path(wait.server)},
+        "route": {
+            "cluster": "wait_route",
+            "prefix_rewrite": url.path,
+            "timeout": _seconds(wait.request_timeout),
+        },
+        "request_headers_to_add": [
+            {
+                "header": {"key": "authorization", "value": f"Bearer {wait.bearer}"},
+                "append_action": "OVERWRITE_IF_EXISTS_OR_ADD",
+            }
+        ],
+    }
+    tls = {
+        "sni": url.hostname,
+        "common_tls_context": {"validation_context": {"trusted_ca": {"filename": wait.ca_file}}},
+    }
+    return route, _cluster("wait_route", url.hostname, url.port, http2=False, tls=tls)
+
+
 def config(
     *,
     servers: Mapping[str, tuple[str, int]],
     agents: AgentJwt,
     guardrail: tuple[Hook, timedelta, str] | None,
+    wait: WaitTarget | None = None,
 ) -> dict[str, object]:
     """The whole bootstrap. `servers`: route name to the tool server's (host, port), serving `/<server>/mcp`.
     `guardrail`: the gate's ext_authz hook, its timeout (`gate.ext_authz.hook_timeout`) and the
-    context_extensions key naming the server (`gate.ext_authz.server_key`); None runs no guardrail."""
+    context_extensions key naming the server (`gate.ext_authz.server_key`); None runs no guardrail. `wait`: the
+    wait server, routed at `/<wait.server>/mcp`; None routes none."""
     routes: list[dict[str, object]] = []
     clusters: list[dict[str, object]] = []
+    named: list[tuple[str, dict[str, object]]] = []
     for name, (host, port) in servers.items():
-        route: dict[str, object] = {"match": {"path": mcp_path(name)}, "route": {"cluster": f"tool_{name}"}}
+        named.append((name, {"match": {"path": mcp_path(name)}, "route": {"cluster": f"tool_{name}"}}))
+        clusters.append(_cluster(f"tool_{name}", host, port, http2=False, tls=None))
+    if wait is not None:
+        wait_route, wait_cluster = _wait_route(wait)
+        named.append((wait.server, wait_route))
+        clusters.append(wait_cluster)
+    for name, route in named:
         if guardrail is not None:
             route["typed_per_filter_config"] = {
                 EXT_AUTHZ_FILTER: {
@@ -119,7 +160,6 @@ def config(
                 }
             }
         routes.append(route)
-        clusters.append(_cluster(f"tool_{name}", host, port, http2=False, tls=None))
     jwt_authn: dict[str, object] = {
         "name": JWT_FILTER,
         "typed_config": {

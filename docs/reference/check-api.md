@@ -73,7 +73,7 @@ message CheckResponse {
 
 | Verdict | Meaning | The gateway |
 |---|---|---|
-| `pass` | No approval needed, or this exact call's yes was just spent | Forwards the call unchanged |
+| `pass` | No approval needed, or this exact call's yes was just spent, or the call is on the wait route (`server` is `wait_route.server`) | Forwards the call unchanged |
 | `pending` | Approval requested; `ticket` names it | Refuses the call with `agent_text` |
 | `refused` | A person said no, with an optional `comment`; the no stands until the answer deadline | Refuses with `agent_text` |
 | `rejected` | The gate will not consider the call (`REASON_MALFORMED`, `REASON_TASK_REQUESTED`, `REASON_TOO_LARGE`) | Refuses with `agent_text` |
@@ -118,10 +118,14 @@ The gate rejects, before any Approval exists:
 ## The wait, through your gateway
 
 A `pending` refusal tells the agent to call the wait tool, which your gateway must route to the wait server like
-any MCP server ([the wait tool](wait.md)). The first-party agentgateway mapping recognises the wait route and sets
-the attested principal on it; a gateway using the Check API must do the same itself: on the route named
-`wait_route.server`, set the header `wait_route.principal_header` to the principal it attested, replacing any copy
-the client sent, and authenticate to the wait server with a registry credential granted `wait.call` (a bearer,
-or a client certificate on a listener with `tls.client_ca`). On every other route,
-remove that header. Do not send the wait route's calls to the Check API: policy would judge them like any other
-call.
+any MCP server ([the wait tool](wait.md)). The gate has one rule for the wait route, the same through every
+adapter: a call whose `server` is `wait_route.server` is `pass` (with an empty `agent_text`), without parsing its
+params and without asking policy or Approvals; the wait server reads its own calls. A non-empty `principal` is
+still required. So a gateway using the Check API may ask about the wait route's calls like any other, and gets
+`pass`, or skip asking.
+
+What the first-party agentgateway and Envoy mappings do on a pass, a gateway using the Check API does itself: on
+the route named `wait_route.server`, set the header `wait_route.principal_header` to the principal it attested,
+replacing any copy the client sent, and authenticate to the wait server with a registry credential granted
+`wait.call` (a bearer, or a client certificate on a listener with `tls.client_ca`). On every other route, remove
+that header. The Check API's `pass` carries no header to set: the principal is the one the caller sent.

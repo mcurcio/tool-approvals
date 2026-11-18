@@ -39,6 +39,7 @@ _WHITESPACE: Final = frozenset(" \t\n\r")  # JSON's insignificant whitespace (RF
 _NUL: Final = "\x00"
 _TASK_PARAMS_KEY: Final = "task"  # the 2025-11-25 protocol's task-augmented tools/call
 _RPC_KEYS: Final = frozenset({"jsonrpc", "id", "method", "params"})  # a JSON-RPC 2.0 request object's members
+_RESPONSE_KEYS: Final = frozenset({"jsonrpc", "id", "result", "error"})  # a JSON-RPC 2.0 response object's members
 _RPC_VERSION: Final = "2.0"
 _ABSENT: Final = b"\x00"  # the presence byte of an optional digest field
 _PRESENT: Final = b"\x01"
@@ -105,6 +106,13 @@ class RpcRequest:
     method: str
     id_json: bytes  # the exact bytes of `id` (a string or a number); b"" for a notification
     params: Span | None  # where `params` sits in the body; None when absent
+
+
+@dataclass(frozen=True, slots=True)
+class RpcResponse:
+    """One JSON-RPC response object: a client's answer to a server's request (sampling, elicitation, roots)."""
+
+    id_json: bytes  # the exact bytes of `id` (a string or a number); b"" for an error answering no readable id
 
 
 class _Malformed(ValueError):
@@ -284,14 +292,16 @@ def parse_call(principal: Principal, server: ServerName, params: bytes) -> Parse
     return ParsedCall(CallIdentity(principal, server, tool, arguments_json), MappingProxyType(arguments))
 
 
-def read_rpc_request(body: bytes) -> RpcRequest | CallRejected:
-    """The one JSON-RPC request object in `body`, or CallRejected(MALFORMED).
+def read_rpc_message(body: bytes) -> RpcRequest | RpcResponse | CallRejected:
+    """The one JSON-RPC request or response object in `body`, or CallRejected(MALFORMED).
 
-    Refuses a batch (an array), duplicate or escaped-duplicate keys at any depth, a duplicate `method` or `params`,
-    extra top-level keys and trailing data. The span lets a mapping hand `parse_call` the exact
-    params bytes the gateway forwards; the params themselves are judged there, not here.
-    `jsonrpc` must be "2.0" and `method` a string; `id`, when present, a string or a number. Nesting is bounded
-    as in `parse_call`, one level more for the envelope, so a call meets the same bound whichever mapping carried it.
+    Refuses a batch (an array), duplicate or escaped-duplicate keys at any depth, a duplicate member, extra top-level
+    keys and trailing data. The span lets a mapping hand `parse_call` the exact params bytes the gateway forwards;
+    the params themselves are judged there, not here. `jsonrpc` must be "2.0". An object with a `method` is a
+    request: `method` a string, `id`, when present, a string or a number. An object without one is a response:
+    exactly one of `result` and `error`, and `id` a string or a number, except that an error may answer a request
+    whose id could not be read with an `id` of null or none (JSON-RPC 2.0 §5). Nesting is bounded as in
+    `parse_call`, one level more for the envelope, so a call meets the same bound whichever mapping carried it.
     """
     try:
         text = body.decode("utf-8")  # strict: the text re-encodes to exactly the body, so spans map back to bytes
@@ -301,18 +311,15 @@ def read_rpc_request(body: bytes) -> RpcRequest | CallRejected:
             if key in members:
                 raise _Malformed("duplicate top-level key")
             members[key] = (value, start, end)
-        if not members.keys() <= _RPC_KEYS:
-            raise _Malformed("unknown top-level key")
         if "jsonrpc" not in members or members["jsonrpc"][0] != _RPC_VERSION:
             raise _Malformed("not JSON-RPC 2.0")
-        if "method" not in members or not isinstance(method := members["method"][0], str):
-            raise _Malformed("no method")
-        id_json = b""
-        if "id" in members:
-            value, start, end = members["id"]
-            if isinstance(value, bool) or not isinstance(value, str | int | float):
-                raise _Malformed("id is not a string or a number")
-            id_json = text[start:end].encode()
+        if "method" not in members:
+            return _response(text, members)
+        if not members.keys() <= _RPC_KEYS:
+            raise _Malformed("unknown top-level key")
+        if not isinstance(method := members["method"][0], str):
+            raise _Malformed("method is not a string")
+        id_json = _id_json(text, members)
         params = None
         if "params" in members:
             _, start, end = members["params"]
@@ -321,6 +328,27 @@ def read_rpc_request(body: bytes) -> RpcRequest | CallRejected:
     except ValueError:  # JSONDecodeError, UnicodeError and _Malformed are ValueErrors
         return CallRejected(RejectReason.MALFORMED)
     return RpcRequest(method, id_json, params)
+
+
+def _response(text: str, members: Mapping[str, tuple[object, int, int]]) -> RpcResponse:
+    """A JSON-RPC response object, from its members (no `method` among them); raises _Malformed."""
+    if not members.keys() <= _RESPONSE_KEYS or ("result" in members) == ("error" in members):
+        raise _Malformed("no method, and not one response")
+    if "error" in members and members.get("id", (None,))[0] is None:
+        return RpcResponse(b"")  # an error answering a request whose id could not be read
+    if "id" not in members:
+        raise _Malformed("a result without an id")
+    return RpcResponse(_id_json(text, members))
+
+
+def _id_json(text: str, members: Mapping[str, tuple[object, int, int]]) -> bytes:
+    """The exact bytes of `id` (a string or a number); b"" when absent; raises _Malformed for any other value."""
+    if "id" not in members:
+        return b""
+    value, start, end = members["id"]
+    if isinstance(value, bool) or not isinstance(value, str | int | float):
+        raise _Malformed("id is not a string or a number")
+    return text[start:end].encode()
 
 
 def shown_digest(identity: CallIdentity, words: AgentWords | None, requirement: RequirementName) -> Digest:

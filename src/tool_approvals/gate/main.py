@@ -28,7 +28,7 @@ EXIT_OK: Final = 0
 async def run(view: GateView) -> int:
     """Serve every enabled mapping (Check API gRPC and JSON, ext_mcp, ext_authz) and health over one CheckCore,
     the Checker each mapping is given (rules-file policy, the requests client, `view.requirements`,
-    `view.check_budget`) until a stop signal. Exit 0 on a clean stop."""
+    `view.check_budget`, `view.wait_route.server`) until a stop signal. Exit 0 on a clean stop."""
     return await serve(view, stop_on_signals())
 
 
@@ -40,7 +40,9 @@ async def serve(view: GateView, stopping: asyncio.Event) -> int:
     requests = RequestsClient.connect(view.approvals)
     try:
         policy = RulesFilePolicy(view.policy)
-        core = CheckCore(policy, requests, view.requirements, view.check_budget, AsyncioTimeouts())
+        core = CheckCore(
+            policy, requests, view.requirements, view.check_budget, AsyncioTimeouts(), view.wait_route.server
+        )
         servings: list[Coroutine[Any, Any, None]] = [
             drain_then_stop(stopping, view.drain, stop),
             serve_asgi(health_app(ready_checks(stopping)), view.health, stop),
@@ -62,13 +64,17 @@ async def serve(view: GateView, stopping: asyncio.Event) -> int:
                 servings.append(serve_asgi(json_app, view.check_api.json, stop, view.check_budget))
         if view.ext_mcp is not None:
             server = grpc_listener(view.ext_mcp.listener, EXT_MCP_METHODS)
-            ext_mcp_pb2_grpc.add_ExtMcpServicer_to_server(ExtMcpServicer(core, view.ext_mcp, view.wait_route), server)
+            ext_mcp_pb2_grpc.add_ExtMcpServicer_to_server(
+                ExtMcpServicer(core, view.ext_mcp, view.wait_route.principal_header), server
+            )
         if view.ext_authz is not None:
             # Envoy's types are the `envoy` extra: imported only when its mapping is enabled.
             from tool_approvals.gate.mappings import ext_authz  # noqa: PLC0415
 
             server = grpc_listener(view.ext_authz.listener, ext_authz.EXT_AUTHZ_METHODS)
-            ext_authz.add_servicer(ext_authz.ExtAuthzServicer(core, view.ext_authz, view.wait_route), server)
+            ext_authz.add_servicer(
+                ext_authz.ExtAuthzServicer(core, view.ext_authz, view.wait_route.principal_header), server
+            )
         try:
             async with asyncio.TaskGroup() as group:
                 for serving in servings:

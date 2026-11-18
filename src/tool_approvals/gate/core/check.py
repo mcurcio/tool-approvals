@@ -7,7 +7,7 @@ from typing import Final, Protocol, assert_never
 
 from tool_approvals.gate.core.ports import GateRequests, GatewayContext, NoApproval, Policy, PolicyInput, Require
 from tool_approvals.kernel.calls import CallRejected, ParsedCall, parse_call
-from tool_approvals.kernel.names import RequirementName, Ticket
+from tool_approvals.kernel.names import Principal, RequirementName, ServerName, Ticket
 from tool_approvals.kernel.requests import (
     CallRef,
     Claimed,
@@ -28,7 +28,11 @@ REPLY_RESERVE: Final = timedelta(milliseconds=250)
 
 @dataclass(frozen=True, slots=True)
 class Pass:
-    """Run the call."""
+    """Run the call. `attested`: on the wait server's route, the gateway's attested principal, which the adapter
+    forwards to the wait server in its principal header, replacing any copy the client sent; None on every other
+    route, where the adapter removes that header so no tool sees one a client sent."""
+
+    attested: Principal | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,26 +58,33 @@ class Checker(Protocol):
 
 
 class CheckCore:
-    def __init__(
+    def __init__(  # noqa: PLR0913, PLR0917 (the core's every port and setting)
         self,
         policy: Policy,
         requests: GateRequests,
         known: frozenset[RequirementName],
         budget: timedelta,
         timeouts: Timeouts,
+        wait_server: ServerName,
     ) -> None:
         self._policy: Final = policy
         self._requests: Final = requests
         self._known: Final = known
         self._budget: Final = budget
         self._timeouts: Final = timeouts
+        self._wait_server: Final = wait_server
 
     async def check(self, context: GatewayContext, params: bytes) -> CheckVerdict:
-        """parse_call refusing → Rejected; policy NoApproval → Pass; policy naming a requirement outside `known`,
-        or raising → Unavailable; else claim (Claimed → Pass), then request (Ticketed → Pending). Approvals
-        answering UnknownRequirement (configuration drift), RequestsUnavailable, or the limit passing →
-        Unavailable. The whole check runs within `budget`, or within the gateway's deadline less REPLY_RESERVE
-        when that is sooner; no time left at all → Unavailable without asking policy or Approvals."""
+        """The wait route first, the one rule every adapter applies: a call the gateway routed to `wait_server`,
+        with a principal, is Pass(attested=principal) at once: no parse, no policy, no Approvals (the wait server
+        reads its own calls). Any other call: parse_call refusing → Rejected; policy NoApproval → Pass; policy
+        naming a requirement outside `known`, or raising → Unavailable; else claim (Claimed → Pass), then request
+        (Ticketed → Pending). Approvals answering UnknownRequirement (configuration drift), RequestsUnavailable, or
+        the limit passing → Unavailable. The whole check runs within `budget`, or within the gateway's deadline
+        less REPLY_RESERVE when that is sooner; no time left at all → Unavailable without asking policy or
+        Approvals."""
+        if context.server == self._wait_server and context.principal:
+            return Pass(attested=context.principal)
         parsed = parse_call(context.principal, context.server, params)
         if isinstance(parsed, CallRejected):
             return Rejected(parsed.reason)

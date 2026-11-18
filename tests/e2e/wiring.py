@@ -26,7 +26,7 @@ class Hook:
 
 @dataclass(frozen=True, slots=True)
 class WaitTarget:
-    """The wait server, exposed to agents as one more MCP server behind the gateway (agentgateway only, unit 1)."""
+    """The wait server, exposed to agents as one more MCP server behind each gateway."""
 
     server: str  # the route's server name (`wait_route.server`)
     url: str  # its MCP endpoint, https

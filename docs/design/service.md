@@ -73,8 +73,10 @@ commit, and a split would add an internal contract over the same table. Each ser
 (waits on a replica without it do not wake until it reconnects). `:answers` and `:admin` arrive in milestone 3.
 
 **The wait route.** The config's `wait_route` names the gateway server that is the wait server and the header that
-carries the attested principal to it. The gate recognises that route (it is passed without policy, and the
-mapping sets the principal header); the wait server reads the header. Each gateway mapping configures the name
+carries the attested principal to it. The gate's core recognises that route, one rule for every adapter: its
+calls pass without policy, and the pass carries the attested principal, which each gateway mapping sets as the
+principal header in place of any client copy (a Check API caller sets it itself); the wait server reads the
+header. Each gateway mapping configures the name
 under which it exposes the wait tool, since gateways may prefix tool names. No real tool server may carry the
 wait route's server name.
 
@@ -274,7 +276,7 @@ skipped by name with its reason.
 | Gateway | Wiring that the conformance suite proves through it |
 |---|---|
 | agentgateway | Guardrail processor last, fail closed, `tools/call` request phase, reached over TLS with a bearer; parameter bytes as forwarded; server from the route; the principal header replaces any client copy; the agent's `Authorization` and `Cookie` kept from the gate |
-| Envoy family | `ext_authz` last body filter, `with_request_body` with `pack_as_bytes` and room for the params size cap; raised timeout; principal from `jwt_authn` metadata; `disallowed_headers` keeps the agent's credentials from the gate; the adapter classifies each request itself: one `tools/call` is checked, discovery passes, `tasks/*` and any other method are refused, as is any HTTP method but POST and any body that is not one JSON-RPC request. The wait route behind Envoy arrives in milestone 4 |
+| Envoy family | `ext_authz` last body filter, `with_request_body` with `pack_as_bytes` and room for the params size cap; raised timeout; principal from `jwt_authn` metadata; `disallowed_headers` keeps the agent's credentials from the gate; the adapter classifies each request itself: one `tools/call` is checked, every other MCP method and a client's JSON-RPC response pass (a fixed list, as agentgateway passes them), `tasks/*` and any unknown method are refused, as is any HTTP method but POST and any body that is not one JSON-RPC request or response; the wait route passes with the attested principal header. Wait Tasks and long holds behind Envoy arrive in milestone 4 |
 | Check API caller | A caller that asks the gate (gRPC or JSON) and forwards the same params bytes only on `pass` |
 
 ## The executor seam (reserved, not built)
@@ -309,7 +311,7 @@ of the snapshot and the current requirement.
 
 - **Costs:** one Approvals process serves both sides, separated by listener; a hook credential is trusted for
   every principal it names; the policy service sees arguments; a yes is spent before the call runs, so `used`
-  does not mean "ran"; a leaked wait id reveals one outcome; Envoy users must raise two defaults, and cannot wait
-  through Envoy until milestone 4; longer audit is the integrator's sink.
+  does not mean "ran"; a leaked wait id reveals one outcome; Envoy users must raise two defaults, and cannot read a Wait
+  Task through Envoy until milestone 4; longer audit is the integrator's sink.
 - **Deferred:** automated review as a member of a requirement; OIDC CIBA; the executor; per-role database users.
 - **Not planned:** hot reload; a policy cache; holding the gated call open.

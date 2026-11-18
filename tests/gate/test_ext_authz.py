@@ -14,7 +14,17 @@ from tests.fixtures.certs import TlsFiles, tls_files
 from tests.fixtures.scripted_requests import Script
 from tests.gate.cases import FREE, GATED, TICKET
 from tests.gate.expect import assert_allowed, assert_denied, json_rpc_code, verdict_field
-from tests.gate.harness import ROUTE, SERVER, WAIT_TOOL, Gate, authz_request, ext_authz, running_gate, tools_call
+from tests.gate.harness import (
+    PRINCIPAL,
+    ROUTE,
+    SERVER,
+    WAIT_TOOL,
+    Gate,
+    authz_request,
+    ext_authz,
+    running_gate,
+    tools_call,
+)
 from tests.kernel.test_rpc_and_digest import spelled_params
 from tool_approvals.gate.core.check import Pending, Unavailable
 from tool_approvals.gate.core.wording import agent_text
@@ -33,7 +43,25 @@ from tool_approvals.kernel.requests import NotApproved, Rejected, Ticketed
 MALFORMED = Rejected(RejectReason.MALFORMED)
 TASK_REQUESTED = Rejected(RejectReason.TASK_REQUESTED)
 TOO_LARGE = Rejected(RejectReason.TOO_LARGE)
-DISCOVERY: Final = frozenset({"initialize", "notifications/initialized", "tools/list", "ping"})  # until question 6
+# Every MCP method but tools/call, as agentgateway passes them: the owner's list, written out independently.
+PASSED: Final = (
+    "initialize",
+    "notifications/initialized",
+    "notifications/cancelled",
+    "notifications/progress",
+    "notifications/roots/list_changed",
+    "tools/list",
+    "prompts/list",
+    "prompts/get",
+    "resources/list",
+    "resources/read",
+    "resources/templates/list",
+    "resources/subscribe",
+    "resources/unsubscribe",
+    "completion/complete",
+    "logging/setLevel",
+    "ping",
+)
 
 
 @pytest.fixture
@@ -76,37 +104,67 @@ ROWS: Final = (
     Row("empty", b"", Deny(MALFORMED, b"")),
     Row("not-json", b"not json", Deny(MALFORMED, b"")),
     Row("wrong-version", b'{"jsonrpc":"1.0","id":1,"method":"tools/call","params":{}}', Deny(MALFORMED, b"")),
-    # A client's answer to a server request (sampling, elicitation): MALFORMED until question 6.
-    Row("client-response", b'{"jsonrpc":"2.0","id":4,"result":{}}', Deny(MALFORMED, b"")),
-    Row("client-error-response", b'{"jsonrpc":"2.0","id":4,"error":{"code":1,"message":"no"}}', Deny(MALFORMED, b"")),
+    # A client's answer to a server request (sampling, elicitation, roots) passes on.
+    Row("client-response", b'{"jsonrpc":"2.0","id":4,"result":{}}', PassOn()),
+    Row("client-error-response", b'{"jsonrpc":"2.0","id":4,"error":{"code":1,"message":"no"}}', PassOn()),
+    Row("client-result-and-error", b'{"jsonrpc":"2.0","id":4,"result":{},"error":{}}', Deny(MALFORMED, b"")),
     Row("tools-call", tools_call(FREE, b'"c-1"'), ToCheck(FREE, b'"c-1"')),
     Row(
         "tools-call-notification", b'{"jsonrpc":"2.0","method":"tools/call","params":' + FREE + b"}", ToCheck(FREE, b"")
     ),
-    *(Row(f"pass-{m}", _rpc(m), PassOn()) for m in sorted(DISCOVERY)),
-    Row("pass-notification", b'{"jsonrpc":"2.0","method":"notifications/initialized"}', PassOn()),
+    *(Row(f"pass-{m}", _rpc(m), PassOn()) for m in PASSED),
+    *(
+        Row(f"pass-notification-{m}", b'{"jsonrpc":"2.0","method":"' + m.encode() + b'","params":{}}', PassOn())
+        for m in ("notifications/initialized", "notifications/cancelled")
+    ),
     *(
         Row(f"task-{m}", _rpc(m, b'"req-1"'), Deny(TASK_REQUESTED, b'"req-1"'))
         for m in ("tasks/get", "tasks/cancel", "tasks/list", "tasks/result")
     ),
     *(
         Row(f"other-{m}", _rpc(m, b'"req-1"'), Deny(MALFORMED, b'"req-1"'))
-        for m in ("resources/read", "prompts/get", "tools/list_changed", "completion/complete", "tasksget")
+        for m in (
+            "tasksget",
+            "tools/list_changed",
+            "sampling/createMessage",
+            "elicitation/create",
+            "roots/list",
+            "completion/list",
+            "logging/set",
+            "promptsget",
+            "notifications",
+            "Ping",
+        )
     ),
-    # Question 7: the wait server's route is checked as any server's today.
+    # A refused notification has no id to answer: its JSON-RPC error answers null.
+    Row("unknown-notification", b'{"jsonrpc":"2.0","method":"unknown/thing"}', Deny(MALFORMED, b"")),
+    Row("tasks-notification", b'{"jsonrpc":"2.0","method":"tasks/cancel"}', Deny(TASK_REQUESTED, b"")),
+    # The wait server's route is classified as any route's: the checker passes its tools/call (CheckCore.check).
     Row("wait-server", tools_call(FREE), ToCheck(FREE, b"7"), server=ROUTE.server),
+    Row("wait-server-pass-method", _rpc("tools/list"), PassOn(), server=ROUTE.server),
+    Row("wait-server-tasks", _rpc("tasks/get", b'"t-1"'), Deny(TASK_REQUESTED, b'"t-1"'), server=ROUTE.server),
     Row("no-server", tools_call(FREE), Deny(Unavailable(), b""), server=""),
 )
 
 
-def test_the_pass_methods_wait_on_question_6() -> None:
-    assert EXT_AUTHZ_PASS_METHODS == DISCOVERY
+def test_the_pass_methods_are_every_mcp_method_but_tools_call() -> None:
+    expected = {
+        "initialize",
+        "notifications/*",
+        "tools/list",
+        "prompts/*",
+        "resources/*",
+        "completion/complete",
+        "logging/setLevel",
+        "ping",
+    }
+    assert expected == EXT_AUTHZ_PASS_METHODS
 
 
 @pytest.mark.parametrize("row", ROWS, ids=[row.name for row in ROWS])
 def test_classify_follows_the_table(row: Row) -> None:
     facts = HttpFacts(method=row.method, partial_body=row.partial, body=row.body, server=row.server)
-    assert classify(facts, EXT_AUTHZ_PASS_METHODS) == row.expected
+    assert classify(facts) == row.expected
 
 
 @pytest.mark.parametrize("row", ROWS, ids=[row.name for row in ROWS])
@@ -114,6 +172,9 @@ async def test_the_servicer_answers_each_row(gate: Gate, row: Row) -> None:
     headers = {"x-envoy-auth-partial-body": "true"} if row.partial else None
     request = authz_request(row.body, method=row.method, server=row.server, headers=headers)
     response = await ext_authz(gate, request)
+    if isinstance(row.expected, ToCheck) and row.server == ROUTE.server:
+        assert_allowed(response, attested=PRINCIPAL)  # the wait route: the attested principal, no policy
+        return
     if not isinstance(row.expected, Deny):
         assert_allowed(response)  # ToCheck rows carry FREE, which the policy passes without Approvals
         return
@@ -125,6 +186,18 @@ async def test_the_servicer_answers_each_row(gate: Gate, row: Row) -> None:
     error = json.loads(body[len(prefix) : -1])
     message = agent_text(verdict, WAIT_TOOL)
     assert error == {"code": json_rpc_code(verdict), "message": message, "data": {"verdict": verdict_field(verdict)}}
+
+
+async def test_the_wait_route_overwrites_a_client_principal_header_without_policy(gate: Gate) -> None:
+    # GATED would need a person's yes anywhere else, and the `task` member is rejected anywhere else.
+    for params in (GATED, b'{"name":"approval_wait","arguments":{},"task":{}}'):
+        request = authz_request(tools_call(params), server=ROUTE.server, headers={ROUTE.principal_header: "forged"})
+        assert_allowed(await ext_authz(gate, request), attested=PRINCIPAL)
+
+
+async def test_another_route_removes_a_client_principal_header(gate: Gate) -> None:
+    request = authz_request(tools_call(FREE), headers={ROUTE.principal_header: "forged"})
+    assert_allowed(await ext_authz(gate, request))
 
 
 async def test_a_cut_body_in_the_header_map_is_denied(gate: Gate) -> None:
@@ -181,7 +254,7 @@ async def test_the_id_is_echoed_byte_for_byte(tls: TlsFiles) -> None:
 def test_a_checked_call_carries_the_params_span_not_a_re_encoding() -> None:
     body = b'{ "method" : "tools/call", "params" :' + GATED + b' , "id": 1.50e1, "jsonrpc": "2.0" }'
     facts = HttpFacts(method="POST", partial_body=False, body=body, server=SERVER)
-    assert classify(facts, EXT_AUTHZ_PASS_METHODS) == ToCheck(GATED, b"1.50e1")
+    assert classify(facts) == ToCheck(GATED, b"1.50e1")
 
 
 @settings(max_examples=250)
@@ -190,4 +263,4 @@ def test_classify_hands_on_the_exact_params_bytes(params: str) -> None:
     """The kernel's span property, through the mapping: what is checked is the params as sent, never re-encoded."""
     body = b'{"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": ' + params.encode() + b"}"
     facts = HttpFacts(method="POST", partial_body=False, body=body, server=SERVER)
-    assert classify(facts, EXT_AUTHZ_PASS_METHODS) == ToCheck(params.encode(), b"7")
+    assert classify(facts) == ToCheck(params.encode(), b"7")

@@ -81,7 +81,7 @@ binds:
 
 | Setting | Why |
 |---|---|
-| `name` equal to `wait_route.server` | The gate recognises the wait route by this name: it passes its calls without policy and sets the principal header on them. No real tool server may use this name |
+| `name` equal to `wait_route.server` | The gate recognises the wait route by this name: it passes its calls without policy (the rule every adapter shares, [configuration](configuration.md#wait_route-the-wait-servers-route-at-the-gateway)) and sets the principal header on them to the attested principal, replacing any copy the client sent. No real tool server may use this name |
 | `backendTLS`, `backendAuth.key` | The wait server needs TLS and a registry bearer granted `wait.call` (the example's `gateway-wait-route` entry). The bearer replaces the agent's `Authorization` on this hop |
 | `http.requestTimeout` above `wait.max_hold` | A held call sends nothing until the hold ends (up to `wait.max_hold`, 15 minutes in the example), and without this agentgateway gives the response 10 s. The example uses 16 minutes |
 
@@ -129,6 +129,7 @@ gateway can send one on this connection: name the certificate's SHA-256 fingerpr
 | Gate verdict | Through agentgateway |
 |---|---|
 | Pass | The call is forwarded unchanged. The gate removes `wait_route.principal_header` from it, so no tool server sees a copy the client sent |
+| Pass on the wait route | The call is forwarded unchanged but for `wait_route.principal_header`, which the gate sets to the attested principal |
 | Any refusal (pending, refused, rejected, queue full, unavailable) | A `tools/call` result with `isError: true` and the refusal's words (the Check API's `agent_text`) as its text. The gate answers `PERMISSION_DENIED` for pending, refused and rejected, `RESOURCE_EXHAUSTED` for queue full and unavailable |
 | The gate cannot be reached | agentgateway's own error for a failed processor (`failClosed`); the call does not run |
 

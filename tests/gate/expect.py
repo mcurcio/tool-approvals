@@ -7,6 +7,7 @@ from tests.gate.harness import ROUTE, WAIT_TOOL
 from tool_approvals.contract.agentgateway import ext_mcp_pb2
 from tool_approvals.gate.core.check import CheckVerdict, Pass, Pending, Unavailable
 from tool_approvals.gate.core.wording import agent_text
+from tool_approvals.kernel.names import Principal
 from tool_approvals.kernel.requests import QueueFull, Refused, Rejected
 
 _Code = ext_mcp_pb2.AuthorizationError.Code
@@ -35,8 +36,13 @@ def verdict_field(verdict: CheckVerdict) -> str:
 def assert_ext_mcp_shows(result: ext_mcp_pb2.McpRequestResult, verdict: CheckVerdict) -> None:
     if isinstance(verdict, Pass):
         assert result.WhichOneof("result") == "pass"
-        assert list(result.header_mutation.remove) == [ROUTE.principal_header]
-        assert list(result.header_mutation.set) == []
+        if verdict.attested is None:  # no tool sees a principal header a client sent
+            assert list(result.header_mutation.remove) == [ROUTE.principal_header]
+            assert list(result.header_mutation.set) == []
+        else:  # the wait route: the attested principal replaces the client's copy
+            assert list(result.header_mutation.remove) == []
+            stamped = [(header.key, header.value) for header in result.header_mutation.set]
+            assert stamped == [(ROUTE.principal_header, verdict.attested.encode())]
         return
     assert result.WhichOneof("result") == "error"
     # Through agentgateway the reason reaches the agent as the CallToolResult's text.
@@ -45,11 +51,21 @@ def assert_ext_mcp_shows(result: ext_mcp_pb2.McpRequestResult, verdict: CheckVer
     assert not result.HasField("header_mutation")
 
 
-def assert_allowed(response: Any) -> None:
-    """OK, removing the principal header: no tool sees one a client sent."""
+def assert_allowed(response: Any, attested: Principal | None = None) -> None:
+    """OK, removing the principal header, so no tool sees one a client sent; with `attested` (the wait route),
+    setting it to that principal instead, overwriting the client's copy (append false) and removing nothing, since
+    Envoy applies removals after it sets headers."""
     assert response.status.code == 0
     assert response.WhichOneof("http_response") == "ok_response"
-    assert list(response.ok_response.headers_to_remove) == [ROUTE.principal_header]
+    ok = response.ok_response
+    if attested is None:
+        assert list(ok.headers_to_remove) == [ROUTE.principal_header]
+        assert list(ok.headers) == []
+        return
+    assert list(ok.headers_to_remove) == []
+    assert [(h.header.key, h.header.value, h.HasField("append"), h.append.value) for h in ok.headers] == [
+        (ROUTE.principal_header, attested, True, False)
+    ]
 
 
 def assert_denied(response: Any, verdict: CheckVerdict, id_json: bytes) -> dict[str, Any]:

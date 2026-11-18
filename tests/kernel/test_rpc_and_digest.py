@@ -1,4 +1,4 @@
-"""kernel.calls beyond params: the JSON-RPC request reader, the Tasks declaration and the shown digest."""
+"""kernel.calls beyond params: the JSON-RPC message reader, the Tasks declaration and the shown digest."""
 
 import hashlib
 import json
@@ -16,10 +16,11 @@ from tool_approvals.kernel.calls import (
     ParsedCall,
     RejectReason,
     RpcRequest,
+    RpcResponse,
     Span,
     declares_tasks,
     parse_call,
-    read_rpc_request,
+    read_rpc_message,
     shown_digest,
 )
 from tool_approvals.kernel.names import Principal, RequirementName, ServerName, ToolName
@@ -33,7 +34,7 @@ ids = st.none() | st.integers() | texts  # None: a notification
 
 
 def _read(body: bytes) -> RpcRequest:
-    result = read_rpc_request(body)
+    result = read_rpc_message(body)
     assert isinstance(result, RpcRequest), result
     return result
 
@@ -132,6 +133,21 @@ def test_the_span_counts_bytes_not_characters() -> None:
 
 
 @pytest.mark.parametrize(
+    ("body", "id_json"),
+    [
+        (b'{"jsonrpc":"2.0","id":4,"result":{}}', b"4"),
+        (b'{ "result" : {"action":"accept"}, "id" : "s-1", "jsonrpc" : "2.0" }', b'"s-1"'),
+        (b'{"jsonrpc":"2.0","id":4.0,"error":{"code":-1,"message":"no"}}', b"4.0"),
+        (b'{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"parse error"}}', b""),
+        (b'{"jsonrpc":"2.0","error":{"code":-32700,"message":"parse error"}}', b""),
+    ],
+    ids=["result", "result-string-id", "error", "error-null-id", "error-no-id"],
+)
+def test_a_client_response_is_read_with_its_exact_id(body: bytes, id_json: bytes) -> None:
+    assert read_rpc_message(body) == RpcResponse(id_json)
+
+
+@pytest.mark.parametrize(
     "body",
     [
         b'[{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{}}]',  # a batch
@@ -143,7 +159,18 @@ def test_the_span_counts_bytes_not_characters() -> None:
         b'{"jsonrpc":"2.0","id":1,"method":"tools/call","extra":1}',
         b'{"id":1,"method":"tools/call"}',  # no jsonrpc
         b'{"jsonrpc":"1.0","id":1,"method":"tools/call"}',
-        b'{"jsonrpc":"2.0","id":1}',  # no method
+        b'{"jsonrpc":"2.0","id":1}',  # no method, and no result or error
+        b'{"jsonrpc":"2.0","id":1,"params":{}}',  # no method
+        b'{"jsonrpc":"2.0","id":1,"result":{},"error":{}}',  # both a result and an error
+        b'{"jsonrpc":"2.0","result":{}}',  # a result answering no id
+        b'{"jsonrpc":"2.0","id":null,"result":{}}',
+        b'{"jsonrpc":"2.0","id":true,"result":{}}',
+        b'{"jsonrpc":"2.0","id":{},"error":{}}',
+        b'{"jsonrpc":"2.0","id":1,"result":{},"extra":1}',
+        b'{"jsonrpc":"2.0","id":1,"method":"ping","result":{}}',  # a request with a response's member
+        b'{"jsonrpc":"1.0","id":1,"result":{}}',
+        b'{"id":1,"result":{}}',
+        b'{"jsonrpc":"2.0","id":1,"result":{},"result":{}}',
         b'{"jsonrpc":"2.0","id":1,"method":7}',
         b'{"jsonrpc":"2.0","id":null,"method":"ping"}',
         b'{"jsonrpc":"2.0","id":true,"method":"ping"}',
@@ -154,8 +181,8 @@ def test_the_span_counts_bytes_not_characters() -> None:
         b"",
     ],
 )
-def test_anything_but_one_request_object_is_malformed(body: bytes) -> None:
-    assert read_rpc_request(body) == CallRejected(RejectReason.MALFORMED)
+def test_anything_but_one_request_or_response_object_is_malformed(body: bytes) -> None:
+    assert read_rpc_message(body) == CallRejected(RejectReason.MALFORMED)
 
 
 def _nested_params(depth: int) -> bytes:
@@ -172,7 +199,7 @@ def test_the_envelope_adds_one_level_to_the_params_bound() -> None:
     request = _read(b'{"jsonrpc":"2.0","id":1,"method":"tools/call","params":' + deepest + b"}")
     assert request.params is not None
     too_deep = b'{"jsonrpc":"2.0","id":1,"method":"tools/call","params":' + _nested_params(MAX_JSON_DEPTH + 1) + b"}"
-    assert read_rpc_request(too_deep) == CallRejected(RejectReason.MALFORMED)
+    assert read_rpc_message(too_deep) == CallRejected(RejectReason.MALFORMED)
 
 
 @pytest.mark.parametrize(

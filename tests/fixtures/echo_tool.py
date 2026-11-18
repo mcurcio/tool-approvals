@@ -61,7 +61,7 @@ def _serve(port: int, records: Path) -> None:
     from starlette.responses import JSONResponse, PlainTextResponse, Response  # noqa: PLC0415
     from starlette.routing import Route  # noqa: PLC0415
 
-    from tool_approvals.kernel.calls import CallRejected, parse_call, read_rpc_request  # noqa: PLC0415
+    from tool_approvals.kernel.calls import CallRejected, RpcResponse, parse_call, read_rpc_message  # noqa: PLC0415
     from tool_approvals.kernel.names import Principal, ServerName  # noqa: PLC0415
 
     record_file = records / RECORDS_FILE
@@ -100,6 +100,8 @@ def _serve(port: int, records: Path) -> None:
             return reply(id_json, {"protocolVersion": asked, "capabilities": capabilities, "serverInfo": info})
         if method == "ping":
             return reply(id_json, {})
+        if method == "prompts/list":
+            return reply(id_json, {"prompts": []})
         if method == "tools/list":
             return reply(id_json, {"tools": [{"name": name, "inputSchema": {"type": "object"}} for name in ECHO_TOOLS]})
         if method == "tools/call":
@@ -112,10 +114,10 @@ def _serve(port: int, records: Path) -> None:
         if request.method != "POST":  # no server-initiated stream, no session to end
             return PlainTextResponse("method not allowed", 405)
         body = await request.body()
-        rpc = read_rpc_request(body)
+        rpc = read_rpc_message(body)
         if isinstance(rpc, CallRejected):
             return error(b"", -32700, "parse error")
-        if not rpc.id_json:  # a notification
+        if isinstance(rpc, RpcResponse) or not rpc.id_json:  # a client's response, or a notification
             return Response(status_code=202)
         params = body[rpc.params.start : rpc.params.end] if rpc.params else b"{}"
         headers = {key: ", ".join(request.headers.getlist(key)) for key in request.headers}

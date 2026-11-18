@@ -88,7 +88,7 @@ gate:
     hook_timeout: 70s # no default: raise Envoy's ext_authz timeout to match
     principal_path: [envoy.filters.http.jwt_authn, payload, sub] # filter name, then keys
     server_key: server # default; the route's context_extensions key naming its server
-    exposed_wait_tool: approvals-wait_approval_wait
+    exposed_wait_tool: approval_wait # Envoy does not prefix tool names
     attributes: # name: exactly one of metadata (filter name, then keys) or context_extension (a key)
       tenant: { metadata: [envoy.filters.http.jwt_authn, payload, tenant] }
       zone: { context_extension: zone }
