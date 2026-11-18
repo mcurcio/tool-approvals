@@ -2,6 +2,7 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Protocol
 
 from tool_approvals.kernel.names import Principal, RequirementName, ServerName, ToolName
@@ -14,6 +15,20 @@ class GateRequests(Protocol):
     async def request(self, call: CallRef, requirement: RequirementName) -> RequestResult: ...
 
     async def claim(self, call: CallRef, requirement: RequirementName) -> ClaimResult: ...
+
+
+@dataclass(frozen=True, slots=True)
+class GatewayContext:
+    """What a gateway attested about one call, in the gate's own terms: the gateway port. Every adapter (ext_mcp,
+    ext_authz, the Check API) maps its own hook message into this value; nothing in gate.core or gate.policy sees
+    a gateway's types or its metadata key names (import contract C9)."""
+
+    principal: Principal  # the gateway's authentication of the agent, never the call body
+    server: ServerName  # the gateway's route, never the call body
+    # Operator-named, gateway-neutral attributes: only the names an adapter's `attributes` map produced (or a
+    # Check API caller sent), each a string; read-only. Policy matches these names, never a gateway's keys.
+    attributes: Mapping[str, str]
+    deadline: timedelta | None  # how long the gateway's hook still waits for the verdict; None: it sent none
 
 
 @dataclass(frozen=True, slots=True)

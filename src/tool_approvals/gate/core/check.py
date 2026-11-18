@@ -4,9 +4,9 @@ import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Final, assert_never
+from typing import Final, Protocol, assert_never
 
-from tool_approvals.gate.core.ports import GateRequests, NoApproval, Policy, PolicyInput, Require
+from tool_approvals.gate.core.ports import GateRequests, GatewayContext, NoApproval, Policy, PolicyInput, Require
 from tool_approvals.kernel.calls import CallRejected, ParsedCall, parse_call
 from tool_approvals.kernel.names import Principal, RequirementName, ServerName, Ticket
 from tool_approvals.kernel.requests import (
@@ -50,6 +50,13 @@ class Unavailable:
 
 
 type CheckVerdict = Pass | Pending | Refused | Rejected | QueueFull | Unavailable
+
+
+class Checker(Protocol):
+    """The gate's decision as every gateway adapter reaches it: the one port an adapter depends on, never the
+    concrete core. `params` are the exact JSON-RPC params bytes the gateway forwards."""
+
+    async def check(self, context: GatewayContext, params: bytes) -> CheckVerdict: ...
 
 
 class CheckCore:

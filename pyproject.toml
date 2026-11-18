@@ -95,7 +95,7 @@ timeout = 60
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 
-# Import contracts C1-C8: the module map's layering, enforced in CI by `lint-imports`.
+# Import contracts C1-C9: the module map's layering, enforced in CI by `lint-imports`.
 # IO (the I/O and wire libraries no core may import: every runtime dependency's top-level modules, the async
 # runtimes asyncio and anyio, and the standard library's network, process and database modules) is spelled out in
 # C1 and C5-cores; TOML cannot share a list, so tests/test_import_contracts.py keeps the two identical. A core
@@ -311,6 +311,23 @@ forbidden_modules = [
     "tool_approvals.approvals.edges.desk",
     "tool_approvals.approvals.edges.answers",
     "tool_approvals.approvals.domain.issuer",
+]
+
+[[tool.importlinter.contracts]]
+id = "C9"
+name = "the gate's core and policy import no gateway adapter and no gateway's types"
+type = "forbidden"
+# The gateway port is gate.core.ports.GatewayContext and gate.core.check.Checker; each gateway's wire (agentgateway's
+# ext_mcp stubs, Envoy's ext_authz types from xds-protos) is known only to its adapter in gate.mappings and to
+# gate.main.
+source_modules = ["tool_approvals.gate.core", "tool_approvals.gate.policy"]
+forbidden_modules = [
+    "tool_approvals.gate.mappings",
+    "tool_approvals.contract.agentgateway",
+    "envoy",
+    "xds",
+    "udpa",
+    "validate",
 ]
 
 [[tool.importlinter.contracts]]
