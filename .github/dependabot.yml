@@ -1,0 +1,29 @@
+# Commit prefixes drive releases (.releaserc.json): a runtime dependency bump, `build(deps)`, releases a patch;
+# development, release-tooling and workflow bumps release nothing.
+version: 2
+updates:
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: build(deps)
+      prefix-development: build(deps-dev)
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: build(deps-dev)
+    groups:
+      release-tooling:
+        patterns: ["*"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci(deps)
+    groups:
+      actions:
+        patterns: ["*"]

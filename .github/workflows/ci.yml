@@ -1,0 +1,83 @@
+# Checks on every pull request and every push to main. On a push to main that passes them, the release job runs
+# semantic-release (.releaserc.json): Conventional Commit types decide the version, the tag holds it.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# Exact tool versions, one place each. Actions are pinned by full commit sha (tag in the comment).
+env:
+  UV_VERSION: 0.13.5
+
+jobs:
+  check:
+    name: Lint, types, import contracts, tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+      - run: uv sync --locked
+      - run: uv run --locked ruff check .
+      - run: uv run --locked ruff format --check .
+      - run: uv run --locked mypy
+      - run: uv run --locked lint-imports
+      - run: uv run --locked pytest -n auto
+      # The release rules (.releaserc.json) through the pinned commit-analyzer: what each title type releases.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: node --test tests/release_rules.test.mjs
+
+  # Placeholder until the end-to-end harness lands; the release already waits on it.
+  e2e:
+    name: End-to-end (placeholder)
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "No end-to-end suite yet."
+
+  release:
+    name: Release (semantic-release)
+    needs: [check, e2e]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    # contents: write is needed in dry-run too: semantic-release always checks push access.
+    # Comments, labels and failure issues are off in .releaserc.json, so no issues or pull-requests scope.
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # With no v* tag semantic-release would cut 1.0.0; the 0.x line starts from a seed tag pushed once by hand.
+      - name: Require the seed tag
+        run: |
+          if [ -z "$(git tag --list 'v*')" ]; then
+            echo "::error::No v* tag exists, so a release would be 1.0.0. A maintainer must push the seed tag v0.1.0 once before the first release."
+            exit 1
+          fi
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: semantic-release
+        id: release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: npx --no-install semantic-release
