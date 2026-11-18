@@ -194,7 +194,7 @@ requested level. An identity provider that reuses an earlier ceremony for a high
 | Config | pydantic v2 (`extra="forbid"`) over `ruamel.yaml`'s safe loader, which refuses duplicate keys |
 | Telemetry | OpenTelemetry; no parameters, arguments, words or wait ids recorded |
 | Image, chart | One multi-arch image (non-root, read-only root, provenance and SBOM); a compose file and a Helm chart, the chart pushed as an OCI artifact by the release job and versioned from the tag |
-| Release | semantic-release on every merge to `main`: the version held by the tag alone (nothing is committed back), the notes on the GitHub Release, the image built from the tagged commit. `0.x` until the project is declared stable: a breaking change (marked `!`, which `buf breaking` against the last tag demands for contract changes) releases a minor version until then |
+| Release | semantic-release on every merge to `main`: the version held by the tag (no manifest carries it), the notes on the GitHub Release and in `CHANGELOG.md` (the only file the release commits back), the image built from the tagged commit. `0.x` until the project is declared stable: a breaking change (marked `!`, which `buf breaking` against the last tag demands for contract changes) releases a minor version until then |
 
 ## Tests through the real artifact
 
