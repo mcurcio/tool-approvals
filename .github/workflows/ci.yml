@@ -115,13 +115,39 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      # With no v* tag semantic-release would cut 1.0.0; the 0.x line starts from a seed tag pushed once by hand.
-      - name: Require the seed tag
+      # With no v* tag semantic-release would cut 1.0.0, so the first release run seeds the 0.x line: it tags the
+      # repository's root commit v0.1.0 (a lightweight tag, as semantic-release makes) through the GitHub API with
+      # this job's token, and mirrors the tag locally for semantic-release. A tag created meanwhile by a concurrent
+      # run counts as success when it points at the same commit; any other failure fails the job.
+      - name: Seed the 0.x line
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SEED_TAG: v0.1.0
         run: |
-          if [ -z "$(git tag --list 'v*')" ]; then
-            echo "::error::No v* tag exists, so a release would be 1.0.0. A maintainer must push the seed tag v0.1.0 once before the first release."
-            exit 1
+          if [ -n "$(git tag --list 'v*')" ]; then
+            echo "A v* tag exists: no seed needed."
+            exit 0
           fi
+          roots=$(git log --max-parents=0 --format='%ct %H' HEAD | sort -n | cut -d' ' -f2)
+          root=$(printf '%s\n' "$roots" | head -n 1)
+          if [ "$(printf '%s\n' "$roots" | wc -l)" -gt 1 ]; then
+            echo "::warning::Several root commits; seeding $SEED_TAG on the oldest, $root."
+          fi
+          if ! gh api --silent "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f ref="refs/tags/$SEED_TAG" -f sha="$root" 2> "$RUNNER_TEMP/seed.err"; then
+            existing=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$SEED_TAG" --jq '.object.sha') || {
+              cat "$RUNNER_TEMP/seed.err" >&2
+              exit 1
+            }
+            if [ "$existing" != "$root" ]; then
+              cat "$RUNNER_TEMP/seed.err" >&2
+              echo "::error::$SEED_TAG exists on GitHub at $existing, not at the root commit $root."
+              exit 1
+            fi
+            echo "$SEED_TAG already exists at $root (created by a concurrent run)."
+          fi
+          git tag "$SEED_TAG" "$root"
+          echo "Seeded $SEED_TAG on $root."
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc

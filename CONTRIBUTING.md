@@ -65,6 +65,6 @@ dependency or the release tooling, and `ci(deps)` for GitHub Actions (no release
 Releases are automatic: on every merge to `main` that passes CI, [semantic-release](https://semantic-release.gitbook.io)
 works out the version from the commits, tags it and publishes the GitHub release with its notes; nothing is
 committed back, so the tag is the only place the version lives, and the image is built from the tagged commit.
-Never tag or edit a version by hand, except the one-time seed tag: the `0.x` line starts from `v0.1.0`, which a
-maintainer pushes once before the first release (with no `v*` tag semantic-release would cut 1.0.0, so the release
-job refuses to run until it exists).
+Never tag or edit a version by hand. The `0.x` line starts from a seed tag, `v0.1.0`: with no `v*` tag
+semantic-release would cut 1.0.0, so when none exists the release job tags the root commit `v0.1.0` before
+semantic-release runs.
