@@ -2,7 +2,7 @@
 resolved. A command never sees another command's sections or secrets."""
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
 from types import MappingProxyType
@@ -14,6 +14,7 @@ from tool_approvals.config.sections import (
     NO_APPROVAL,
     Approvals,
     ApprovalsClient,
+    ClientCertCredential,
     Database,
     FloorSection,
     Gate,
@@ -49,8 +50,14 @@ class ListenerView:
 
 @dataclass(frozen=True, slots=True)
 class RegistryEntryView:
+    """One caller and its credential: a bearer's SHA-256, or the SHA-256 of its client certificate (DER leaf). The
+    file's grammar gives an entry exactly one of the two."""
+
     name: CallerName
-    bearer_sha256: bytes  # 32 bytes; the file holds it as hex
+    bearer_sha256: bytes | None  # 32 bytes; the file holds it as hex
+    # 32 bytes. Keyword-only, so it follows `grants` in the constructor: (name, bearer_sha256, grants) still builds
+    # a bearer entry.
+    client_cert_sha256: bytes | None = field(default=None, kw_only=True)
     grants: frozenset[Method]
 
 
@@ -440,10 +447,14 @@ def _wait_route(route: WaitRoute) -> WaitRouteView:
 
 
 def _registry(entries: tuple[RegistryEntry, ...]) -> tuple[RegistryEntryView, ...]:
-    return tuple(
-        RegistryEntryView(CallerName(entry.name), entry.credential.bearer_sha256, frozenset(entry.grants))
-        for entry in entries
-    )
+    return tuple(_entry(entry) for entry in entries)
+
+
+def _entry(entry: RegistryEntry) -> RegistryEntryView:
+    name, grants, credential = CallerName(entry.name), frozenset(entry.grants), entry.credential
+    if isinstance(credential, ClientCertCredential):
+        return RegistryEntryView(name, None, client_cert_sha256=credential.client_cert_sha256, grants=grants)
+    return RegistryEntryView(name, credential.bearer_sha256, grants=grants)
 
 
 def _scale(levels: tuple[Level, ...]) -> AssuranceScale:

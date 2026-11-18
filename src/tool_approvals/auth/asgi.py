@@ -1,5 +1,6 @@
 """Registry authentication and a grant for an ASGI app."""
 
+import ssl
 from typing import Final
 
 from starlette.datastructures import Headers
@@ -15,8 +16,9 @@ _WS_POLICY_VIOLATION: Final = 1008
 
 
 class BearerGuard:
-    """401 without a registry bearer; 403 without `method`'s grant (None: authenticate only). The caller is put
-    in the scope for `caller_of`."""
+    """401 without a registry credential (a bearer, or a client certificate the server's TLS verified, read from
+    the ASGI TLS extension); 403 without `method`'s grant (None: authenticate only). The caller is put in the scope
+    for `caller_of`."""
 
     def __init__(self, app: ASGIApp, registry: Registry, method: Method | None) -> None:
         self._app: Final = app
@@ -27,16 +29,32 @@ class BearerGuard:
         if scope["type"] not in {"http", "websocket"}:
             await self._app(scope, receive, send)  # lifespan carries no request
             return
-        headers = Headers(scope=scope).getlist("authorization")
-        caller = self._registry.authenticate(headers[0] if len(headers) == 1 else None)
+        caller = authenticate(self._registry, scope)
         if caller is None:
-            refusal = _refusal(scope, 401, "a registry bearer is required", {"WWW-Authenticate": "Bearer"})
+            refusal = _refusal(scope, 401, "a registry credential is required", {"WWW-Authenticate": "Bearer"})
         elif self._method is not None and self._method not in caller.grants:
             refusal = _refusal(scope, 403, "this caller is not granted this method", {})
         else:
             await self._app({**scope, _SCOPE_KEY: caller}, receive, send)
             return
         await refusal(scope, receive, send)
+
+
+def authenticate(registry: Registry, scope: Scope) -> Caller | None:
+    """The caller an HTTP or WebSocket request's credential names: its one `Authorization` header (a repeated one
+    names no one), and the client certificate in its scope's TLS extension."""
+    headers = Headers(scope=scope).getlist("authorization")
+    if len(headers) > 1:
+        return None
+    return registry.authenticate(headers[0] if headers else None, client_cert_der(scope))
+
+
+def client_cert_der(scope: Scope) -> bytes | None:
+    """The DER of the client's leaf certificate, from the ASGI TLS extension's `client_cert_chain` (PEM, leaf
+    first), or None when the connection carried none."""
+    tls = (scope.get("extensions") or {}).get("tls") or {}
+    chain = tls.get("client_cert_chain") or ()
+    return ssl.PEM_cert_to_DER_cert(chain[0]) if chain else None
 
 
 def _refusal(scope: Scope, status: int, text: str, headers: dict[str, str]) -> ASGIApp:

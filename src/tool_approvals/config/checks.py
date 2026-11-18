@@ -9,7 +9,8 @@ from collections import Counter
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Final
 
-from tool_approvals.config.sections import NO_APPROVAL, Listener
+from tool_approvals.config.sections import NO_APPROVAL, BearerCredential, ClientCertCredential, Listener
+from tool_approvals.kernel.methods import Method
 from tool_approvals.kernel.names import AssuranceName
 from tool_approvals.kernel.requirements import meets_floor
 
@@ -102,10 +103,46 @@ def _requirements(cfg: "ConfigFile") -> Iterator[str]:
 
 def _registry(cfg: "ConfigFile") -> Iterator[str]:
     entries = cfg.registry or ()
-    hashes = [entry.credential.bearer_sha256.hex() for entry in entries]
-    for repeated in _repeated(hashes):
-        names = ", ".join(entry.name for entry in entries if entry.credential.bearer_sha256.hex() == repeated)
-        yield f"registry: one bearer hash on two entries ({names})"
+    bearers = [
+        (entry.name, c.bearer_sha256) for entry in entries if isinstance(c := entry.credential, BearerCredential)
+    ]
+    certs = [
+        (entry.name, c.client_cert_sha256)
+        for entry in entries
+        if isinstance(c := entry.credential, ClientCertCredential)
+    ]
+    for what, named in (("bearer hash", bearers), ("client certificate", certs)):
+        for repeated in _repeated([digest.hex() for _, digest in named]):
+            names = ", ".join(name for name, digest in named if digest.hex() == repeated)
+            yield f"registry: one {what} on two entries ({names})"
+    yield from _client_certificates(cfg)
+
+
+# The grants a client-certificate credential may carry, and the listeners that serve each (question 10): the calls
+# a gateway makes. Calls between this project's own services keep their bearers.
+_CERTIFICATE_LISTENERS: Final = {
+    Method.CHECK: ("gate.check_api.grpc", "gate.check_api.json", "gate.ext_mcp.listener", "gate.ext_authz.listener"),
+    Method.WAIT_CALL: ("wait.listeners.mcp",),
+}
+
+
+def _client_certificates(cfg: "ConfigFile") -> Iterator[str]:
+    """A client-certificate entry is granted only what a gateway calls, and some listener serving one of its grants
+    asks for client certificates. Such a listener asks every caller for one, bearer callers too (question 9)."""
+    asking = {where for where, listener in _bearer_listeners(cfg) if listener.tls and listener.tls.client_ca}
+    for entry in cfg.registry or ():
+        if not isinstance(entry.credential, ClientCertCredential):
+            continue
+        where = f"registry.{entry.name}"
+        if not set(entry.grants) <= set(_CERTIFICATE_LISTENERS):
+            yield f"{where}: a client-certificate credential is accepted only for check and wait.call"
+            continue  # reported once: no listener serves the grants it may not carry
+        serving = {listener for grant in entry.grants for listener in _CERTIFICATE_LISTENERS[grant]}
+        if not serving & asking:
+            yield (
+                f"{where}: a client-certificate credential, but no listener serving its grants asks for client "
+                "certificates (tls.client_ca)"
+            )
 
 
 def _bearer_listeners(cfg: "ConfigFile") -> Iterator[tuple[str, Listener]]:

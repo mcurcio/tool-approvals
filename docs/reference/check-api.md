@@ -17,9 +17,10 @@ last release in CI, so v1 changes only by adding.
 | gRPC | `/tool_approvals.contract.check.v1.CheckService/Check` | `gate.check_api.grpc` |
 | JSON | `POST /v1/check`, the same messages as [proto3 JSON](https://protobuf.dev/programming-guides/json/) | `gate.check_api.json` |
 
-Both need TLS and a registry bearer granted `check` ([configuration](configuration.md#registry-who-may-call-whom)):
-`Authorization: Bearer <bearer>` (gRPC metadata `authorization`). A missing or unknown bearer is `UNAUTHENTICATED`
-(HTTP 401); a bearer without the grant is `PERMISSION_DENIED` (HTTP 403). A JSON body that is not a `CheckRequest`
+Both need TLS and a registry credential granted `check` ([configuration](configuration.md#registry-who-may-call-whom)):
+`Authorization: Bearer <bearer>` (gRPC metadata `authorization`), or a client certificate a registry entry names,
+on a listener with `tls.client_ca`. A missing or unknown credential, or a bearer sent with a certificate naming
+another entry, is `UNAUTHENTICATED` (HTTP 401); a caller without the grant is `PERMISSION_DENIED` (HTTP 403). A JSON body that is not a `CheckRequest`
 (not JSON, or an unknown field) is HTTP 400. Every verdict, refusals included, is a successful reply (gRPC OK,
 HTTP 200).
 

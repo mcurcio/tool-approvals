@@ -19,6 +19,7 @@ from pydantic import (
     StrictBool,
     StrictInt,
     StringConstraints,
+    field_validator,
     model_validator,
 )
 
@@ -49,7 +50,8 @@ def _path(value: object) -> Path:
 def _sha256_hex(value: object) -> bytes:
     if not isinstance(value, str) or _SHA256_HEX.fullmatch(value) is None:
         raise ValueError(
-            "a bearer hash is 64 hex digits (the sha256 line `credentials issue` prints, without 'sha256:')"
+            "a SHA-256 is 64 hex digits (a bearer's: the sha256 line `credentials issue` prints, without 'sha256:'; "
+            "a client certificate's: of its DER leaf certificate)"
         )
     return bytes.fromhex(value)
 
@@ -102,11 +104,38 @@ class BearerCredential(Section):
     bearer_sha256: Annotated[bytes, BeforeValidator(_sha256_hex)]
 
 
+class ClientCertCredential(Section):
+    """A TLS client certificate, by the SHA-256 of its DER leaf certificate. Its listener must name a client CA
+    (`tls.client_ca`), and it may be granted only `check` and `wait.call` (config.checks)."""
+
+    client_cert_sha256: Annotated[bytes, BeforeValidator(_sha256_hex)]
+
+
+_CREDENTIAL_KEYS: Final[dict[str, type[BearerCredential | ClientCertCredential]]] = {
+    "bearer_sha256": BearerCredential,
+    "client_cert_sha256": ClientCertCredential,
+}
+
+
 class RegistryEntry(Section):
     name: Text
     kind: Literal["caller"]
-    credential: BearerCredential
+    credential: BearerCredential | ClientCertCredential
     grants: tuple[Method, ...]
+
+    @field_validator("credential", mode="before")
+    @classmethod
+    def _one_credential(cls, value: object) -> object:
+        """The credential its one key names, validated as that kind alone, so a problem names its own key and not
+        every kind the union holds."""
+        if isinstance(value, BearerCredential | ClientCertCredential):
+            return value
+        if not isinstance(value, dict):
+            raise ValueError("a credential is {bearer_sha256: HEX} or {client_cert_sha256: HEX}")
+        kinds = [kind for key, kind in _CREDENTIAL_KEYS.items() if key in value]
+        if len(kinds) != 1:
+            raise ValueError("a credential names exactly one of bearer_sha256 or client_cert_sha256")
+        return kinds[0].model_validate(value)
 
 
 class Level(Section):

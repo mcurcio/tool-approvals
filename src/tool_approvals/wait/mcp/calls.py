@@ -9,14 +9,13 @@ from mcp.shared.exceptions import MCPError
 from mcp_types import INVALID_REQUEST, CallToolResult, TextContent
 from starlette.requests import Request
 
+from tool_approvals.auth.asgi import authenticate
 from tool_approvals.auth.registry import Registry
 from tool_approvals.kernel.methods import Method
 from tool_approvals.kernel.names import Principal, Ticket
 from tool_approvals.kernel.requests import WaitReport
 from tool_approvals.kernel.words import AgentWords
 from tool_approvals.wait.core.wording import NO_PRINCIPAL, next_step, refusal
-
-_AUTHORIZATION: Final = "authorization"
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,18 +26,18 @@ class WaitCall:
 
 
 def require_wait_call(ctx: ServerRequestContext[Any, Any], registry: Registry) -> None:
-    """Refuse (a JSON-RPC error) a request without one registry bearer granted WAIT_CALL. Discovery never comes
-    here; every call and every task read does."""
+    """Refuse (a JSON-RPC error) a request without one registry credential granted WAIT_CALL: its one bearer, or
+    the client certificate its listener verified (the ASGI TLS extension), or both. Discovery never comes here;
+    every call and every task read does."""
     request = ctx.request
-    values = request.headers.getlist(_AUTHORIZATION) if isinstance(request, Request) else []
-    caller = registry.authenticate(values[0] if len(values) == 1 else None)
+    caller = authenticate(registry, request.scope) if isinstance(request, Request) else None
     if caller is None or Method.WAIT_CALL not in caller.grants:
-        raise MCPError(INVALID_REQUEST, f"a registry bearer granted {Method.WAIT_CALL.value} is required")
+        raise MCPError(INVALID_REQUEST, f"a registry credential granted {Method.WAIT_CALL.value} is required")
 
 
 class WaitCallGuard:
     """Satisfies the MCP SDK's `ServerMiddleware`: every tools/call and every tasks/* request needs one registry
-    bearer granted WAIT_CALL (`require_wait_call`), whether or not Wait Tasks are served; discovery stays open."""
+    credential granted WAIT_CALL (`require_wait_call`), whether or not Wait Tasks are served; discovery stays open."""
 
     def __init__(self, registry: Registry) -> None:
         self._registry: Final = registry

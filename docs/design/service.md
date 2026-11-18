@@ -80,8 +80,8 @@ wait route's server name.
 
 | Caller → listener | Credential | Grants |
 |---|---|---|
-| gateway hook → gate (`ext_mcp`, `ext_authz`, Check API) | bearer over TLS (mTLS from milestone 2) | check; trusted for every principal and server it names |
-| gateway → wait server | bearer over TLS (mTLS from milestone 2), plus a principal header on `tools/call` written by the gateway's hook, conformance-tested to replace any client copy | `tools/call approval_wait`, `tasks/get` (`tasks/cancel` later); `initialize`, `tools/list`, `ping` open for discovery |
+| gateway hook → gate (`ext_mcp`, `ext_authz`, Check API) | bearer or mTLS | check; trusted for every principal and server it names |
+| gateway → wait server | bearer or mTLS, plus a principal header on `tools/call` written by the gateway's hook, conformance-tested to replace any client copy | `tools/call approval_wait`, `tasks/get` (`tasks/cancel` later); `initialize`, `tools/list`, `ping` open for discovery |
 | gate → policy | mTLS or bearer | the policy service's own (it receives arguments) |
 | gate → `:requests` | the gate's | `Request`, `Claim` |
 | wait server → `:requests` | the wait server's | `OpenWait`, `AwaitOutcome` (`CancelWait` later) |
@@ -93,8 +93,17 @@ wait route's server name.
 **Bearers** are 32 random bytes issued by `tool-approvals credentials issue`. The config holds only their
 unsalted SHA-256, so a duplicate is found at load; a callee never stores a bearer in plain text.
 
+**mTLS** is a registry credential beside the bearer, for the calls a gateway makes (check, `wait.call`); calls
+between this project's own services keep their bearers. An entry names a client certificate by the SHA-256 of
+its DER leaf certificate. The listener's `tls.client_ca` verifies the chain in the handshake, and then asks every
+caller for a certificate, bearer callers included. Without an `Authorization` header the certificate's entry is the
+caller; with one the bearer's entry is, and a certificate naming a different entry refuses the call (a certificate
+in no entry changes nothing). The gRPC listeners read the certificate from the RPC's auth context; the HTTP ones
+from the ASGI TLS extension, which the uvicorn runner fills.
+
 **Startup refuses:** a credential shared by any two entries; a grant naming an unknown method; an agents'-side
-entry granted a desk, answers or admin method; a bearer on a plaintext listener.
+entry granted a desk, answers or admin method; a bearer on a plaintext listener; a client-certificate entry granted
+anything but check and `wait.call`, or one no listener serving its grants asks for (`tls.client_ca`).
 
 **The desk's keys:** a session key and a form key, each at least 32 bytes. The session key is answer authority
 (whoever holds it can mint a qualifying session). The one answer POST carries a form token, an HMAC over session,
@@ -134,6 +143,8 @@ type WaitStatus =
    claimed ─► pass (Approved → Used, then forward)      stricter of R's snapshot and R now; approver group; digest and
    not approved ─► request ─► ticket T                  token match; Waiting ─► one commit: state, answer, live waits
  gate ─► pending: refuse "call approval_wait T"         ended with the outcome, events
+ claim: answered_at - sign-in moment <= stricter max_sign_in_age;
+        use deadline = min(stored use_deadline, answered_at + current use_window)
  WAIT                                                 AwaitOutcome ─► approved ─► held wait returns / task completes
  agent ─approval_wait(T, words)─► gateway ─(principal header)─► wait server ─openWait─► Approvals ─► W committed
    held: stream AwaitOutcome(W) until final or 15 min, keep-alive ─► the outcome as the tool result

@@ -165,6 +165,7 @@ class Answer {                       // its constructor needs a key only domain.
   surface: SurfaceName;
   vouchedAssurance: AssuranceLevel;
   signInMoment: Instant;             // a surface vouches its own
+  answeredAt: Instant;               // the unit of work's clock when the answer was recorded; claim re-checks it
   digest: Digest;                    // what the approver was shown
 }
 ```

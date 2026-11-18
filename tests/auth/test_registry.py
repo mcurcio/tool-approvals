@@ -105,3 +105,105 @@ def test_a_shared_or_malformed_hash_is_refused_at_construction() -> None:
         Registry([_entry("a", bearer, Method.CHECK), _entry("b", bearer, Method.CLAIM)])
     with pytest.raises(ValueError, match="32 bytes"):
         Registry([RegistryEntryView(CallerName("a"), b"short", frozenset())])
+
+
+# Client certificates: an entry names one by the SHA-256 of its DER leaf certificate.
+
+
+def _cert_entry(name: str, der: bytes, *grants: Method) -> RegistryEntryView:
+    return RegistryEntryView(
+        CallerName(name), None, client_cert_sha256=hashlib.sha256(der).digest(), grants=frozenset(grants)
+    )
+
+
+GATEWAY_DER = b"0\x82the gateway's DER leaf certificate"
+OTHER_DER = b"0\x82another entry's DER leaf certificate"
+STRANGER_DER = b"0\x82a certificate the CA signed that no entry names"
+
+
+def _mixed() -> tuple[Registry, str]:
+    bearer, _ = issue_bearer()
+    registry = Registry(
+        [
+            _entry("hook", bearer, Method.CHECK),
+            _cert_entry("gateway", GATEWAY_DER, Method.CHECK, Method.WAIT_CALL),
+            _cert_entry("other", OTHER_DER, Method.CHECK),
+        ]
+    )
+    return registry, bearer
+
+
+def test_a_certificate_alone_names_its_caller() -> None:
+    registry, _ = _mixed()
+    assert registry.authenticate(None, GATEWAY_DER) == Caller(
+        CallerName("gateway"), frozenset({Method.CHECK, Method.WAIT_CALL})
+    )
+
+
+def test_an_unknown_certificate_names_no_one() -> None:
+    registry, _ = _mixed()
+    assert registry.authenticate(None, STRANGER_DER) is None
+    assert registry.authenticate(None, None) is None
+
+
+def test_a_bearer_with_another_entrys_certificate_names_no_one() -> None:
+    registry, bearer = _mixed()
+    assert registry.authenticate(f"Bearer {bearer}", OTHER_DER) is None
+
+
+def test_a_bearer_with_its_own_entrys_certificate_names_it() -> None:
+    # The file gives an entry one credential; the registry also takes an entry holding both.
+    bearer, _ = issue_bearer()
+    both = RegistryEntryView(
+        CallerName("both"),
+        hashlib.sha256(bearer.encode()).digest(),
+        client_cert_sha256=hashlib.sha256(GATEWAY_DER).digest(),
+        grants=frozenset({Method.CHECK}),
+    )
+    registry = Registry([both, _cert_entry("other", OTHER_DER, Method.CHECK)])
+    caller = Caller(CallerName("both"), frozenset({Method.CHECK}))
+    assert registry.authenticate(f"Bearer {bearer}", GATEWAY_DER) == caller
+    assert registry.authenticate(f"Bearer {bearer}", None) == caller
+    assert registry.authenticate(None, GATEWAY_DER) == caller
+    assert registry.authenticate(f"Bearer {bearer}", OTHER_DER) is None
+
+
+def test_a_bearer_with_a_certificate_in_no_entry_names_the_bearers_entry() -> None:
+    registry, bearer = _mixed()
+    assert registry.authenticate(f"Bearer {bearer}", STRANGER_DER) == Caller(
+        CallerName("hook"), frozenset({Method.CHECK})
+    )
+
+
+def test_a_header_that_names_no_bearer_is_refused_whatever_certificate_comes_with_it() -> None:
+    registry, _ = _mixed()
+    assert registry.authenticate("Basic x", GATEWAY_DER) is None
+    assert registry.authenticate("Bearer unknown", GATEWAY_DER) is None
+
+
+def test_every_certificate_entry_is_compared_in_constant_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    ders = [f"0\x82certificate {i}".encode() for i in range(4)]
+    registry = Registry([_cert_entry(f"caller-{i}", der, Method.CHECK) for i, der in enumerate(ders)])
+    compared: list[tuple[bytes, bytes]] = []
+    compare = hmac.compare_digest
+
+    def counting(a: bytes, b: bytes) -> bool:
+        compared.append((a, b))
+        return compare(a, b)
+
+    monkeypatch.setattr("tool_approvals.auth.registry.hmac.compare_digest", counting)
+    assert registry.authenticate(None, ders[0]) == Caller(CallerName("caller-0"), frozenset({Method.CHECK}))
+    assert len(compared) == 4  # the first entry matched; the rest were still compared
+    assert all(a == hashlib.sha256(ders[0]).digest() for a, _ in compared)
+
+
+def test_a_shared_or_malformed_fingerprint_is_refused_at_construction() -> None:
+    with pytest.raises(ValueError, match="client certificate is on another entry"):
+        Registry([_cert_entry("a", GATEWAY_DER, Method.CHECK), _cert_entry("b", GATEWAY_DER, Method.WAIT_CALL)])
+    with pytest.raises(ValueError, match="client certificate is not 32 bytes"):
+        Registry([RegistryEntryView(CallerName("a"), None, client_cert_sha256=b"short", grants=frozenset())])
+
+
+def test_an_entry_without_a_credential_is_refused_at_construction() -> None:
+    with pytest.raises(ValueError, match="no credential"):
+        Registry([RegistryEntryView(CallerName("a"), None, grants=frozenset({Method.CHECK}))])

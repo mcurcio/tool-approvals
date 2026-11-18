@@ -61,8 +61,31 @@ registry:
     grants: [wait.call]
 ```
 
-Every service-to-service call carries `Authorization: Bearer <bearer>`. The callee hashes the bearer and compares
-it with every entry; it never holds a bearer in plain text. `tool-approvals credentials issue` prints a new bearer
+A credential is exactly one of:
+
+| Credential | Value | Use |
+|---|---|---|
+| `{ bearer_sha256: HEX }` | The SHA-256 of a bearer, 64 hex digits | Any grant |
+| `{ client_cert_sha256: HEX }` | The SHA-256 of the caller's DER leaf certificate, 64 hex digits | `check` and `wait.call` only: the calls a gateway makes |
+
+A client-certificate entry, in place of a gateway's bearer:
+
+```yaml
+  - name: gateway-hook
+    kind: caller
+    credential: { client_cert_sha256: 5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d }
+    grants: [check]
+```
+
+The fingerprint of a PEM certificate: `openssl x509 -in client.pem -outform DER | sha256sum` (upper or lower case).
+A listener that serves the entry's grants must set `tls.client_ca` to the CA that signed the certificate
+(`check`: `gate.check_api.grpc`, `gate.check_api.json`, `gate.ext_mcp.listener`, `gate.ext_authz.listener`;
+`wait.call`: `wait.listeners.mcp`). A listener with `client_ca` asks every caller for a certificate it signed,
+bearer callers included. Without an `Authorization` header the certificate's entry is the caller; with one, the
+bearer's entry is, and a certificate naming a different entry refuses the call.
+
+A bearer caller sends `Authorization: Bearer <bearer>` on every call. The callee hashes the bearer and compares it
+with every entry; it never holds a bearer in plain text. `tool-approvals credentials issue` prints a new bearer
 and, on the next line, `sha256:<hex>`: the hex goes in `bearer_sha256`, the bearer goes to the caller only.
 
 | Grant | Allows |
@@ -73,8 +96,10 @@ and, on the next line, `sha256:<hex>`: the hex goes in `bearer_sha256`, the bear
 | `wait.call` | A `tools/call` or `tasks/get` to the wait server (discovery needs no grant) |
 
 `kind: caller` is the only kind. A hook credential is trusted for every principal and server it names, so give
-each gateway its own entry. Refused at load: one bearer hash on two entries; a grant that is not in the table; a
-hash that is not 64 hex digits; any listener that accepts registry bearers without `tls`.
+each gateway its own entry. Refused at load: one bearer hash, or one client certificate, on two entries; a grant
+that is not in the table; a hash that is not 64 hex digits; a credential naming both kinds or neither; a
+client-certificate entry granted anything but `check` and `wait.call`, or one that no listener serving its grants
+asks for (`tls.client_ca`); any listener that accepts registry bearers without `tls`.
 
 ## `assurance`, `floor`, `requirements`, `surfaces`: what an answer must meet
 
@@ -294,7 +319,9 @@ Besides each value's grammar and the unknown-key and duplicate-key refusals:
   requirement's minimum. With an `approvals` section, also: every approver group's `claim` is
   `approvals.idp.groups_claim` (the only claim the desk reads groups from), and `approvals.desk.surface` is among
   the allowed surfaces (the desk is the one surface that answers until milestone 3).
-- `registry`: no bearer hash on two entries; grants from the grant table.
+- `registry`: no bearer hash or client certificate on two entries; grants from the grant table; a
+  client-certificate entry granted only `check` and `wait.call`, and some listener serving its grants has
+  `tls.client_ca`.
 - Every listener that accepts registry bearers (`gate.check_api.*`, `gate.ext_mcp.listener`,
   `gate.ext_authz.listener`, `wait.listeners.mcp`, `approvals.listeners.requests`) has `tls`.
 - `gate.check_budget` below every configured `hook_timeout`; every policy `require` and `default` a known
