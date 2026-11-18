@@ -115,17 +115,20 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      # With no v* tag semantic-release would cut 1.0.0, so the first release run seeds the 0.x line: it tags the
-      # repository's root commit v0.1.0 (a lightweight tag, as semantic-release makes) through the GitHub API with
-      # this job's token, and mirrors the tag locally for semantic-release. A tag created meanwhile by a concurrent
-      # run counts as success when it points at the same commit; any other failure fails the job.
+      # With no version tag reachable from HEAD semantic-release would cut 1.0.0, so the first release run seeds the
+      # 0.x line: it creates v0.1.0 on the repository's root commit (a lightweight tag, as semantic-release makes)
+      # through the GitHub API with this job's token, and mirrors the tag locally for semantic-release. The release
+      # concurrency group serializes runs, so a v0.1.0 that already exists on GitHub was made by hand or by an
+      # earlier attempt of this run; it counts as success when it (peeled, if annotated) points at the root commit.
+      # Any other failure fails the job.
       - name: Seed the 0.x line
         env:
           GH_TOKEN: ${{ github.token }}
           SEED_TAG: v0.1.0
         run: |
-          if [ -n "$(git tag --list 'v*')" ]; then
-            echo "A v* tag exists: no seed needed."
+          # The version tags semantic-release counts: tagFormat v${version}, reachable from HEAD.
+          if [ -n "$(git tag --merged HEAD --list 'v[0-9]*.[0-9]*.[0-9]*')" ]; then
+            echo "A version tag is reachable from HEAD: no seed needed."
             exit 0
           fi
           roots=$(git log --max-parents=0 --format='%ct %H' HEAD | sort -n | cut -d' ' -f2)
@@ -135,16 +138,21 @@ jobs:
           fi
           if ! gh api --silent "repos/$GITHUB_REPOSITORY/git/refs" \
               -f ref="refs/tags/$SEED_TAG" -f sha="$root" 2> "$RUNNER_TEMP/seed.err"; then
-            existing=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$SEED_TAG" --jq '.object.sha') || {
+            ref=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$SEED_TAG" --jq '.object.type + " " + .object.sha') || {
               cat "$RUNNER_TEMP/seed.err" >&2
               exit 1
             }
+            type=${ref%% *}
+            existing=${ref#* }
+            if [ "$type" = tag ]; then
+              existing=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$existing" --jq '.object.sha') || exit 1
+            fi
             if [ "$existing" != "$root" ]; then
               cat "$RUNNER_TEMP/seed.err" >&2
               echo "::error::$SEED_TAG exists on GitHub at $existing, not at the root commit $root."
               exit 1
             fi
-            echo "$SEED_TAG already exists at $root (created by a concurrent run)."
+            echo "$SEED_TAG already exists at $root (made by hand or by an earlier attempt)."
           fi
           git tag "$SEED_TAG" "$root"
           echo "Seeded $SEED_TAG on $root."
