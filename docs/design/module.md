@@ -3,9 +3,9 @@
 The Python packages, what each may import, what each module promises, and how Approvals uses Postgres. Read the
 [system](system.md) and [service](service.md) designs first.
 
-> **Status:** milestones 0 and 1 are built: every module below not marked planned exists, and the import contracts
-> are enforced in CI ([roadmap](system.md#delivery-milestones)). Modules for later milestones (`gate.policy`'s
-> gateway-context, AuthZEN and OPA adapters; `approvals.edges.answers` and `admin`; `approvals.infra.channels`;
+> **Status:** milestones 0, 1 and 2 are built: every module below not marked planned exists, and the import
+> contracts are enforced in CI ([roadmap](system.md#delivery-milestones)). Modules for later milestones
+> (`gate.policy`'s AuthZEN and OPA adapters; `approvals.edges.answers` and `admin`; `approvals.infra.channels`;
 > `approvals.app.delivery` and `audit`; telemetry) are planned.
 
 ## Summary
@@ -40,7 +40,8 @@ The Python packages, what each may import, what each module promises, and how Ap
 | Term | Meaning |
 |---|---|
 | Kernel | The pure package the three services share ([Shared Kernel](https://www.domainlanguage.com/ddd/reference/)) |
-| Gateway attributes | Opaque name/value pairs a mapping copies from the gateway's own metadata |
+| Gateway attributes | Operator-named string values a mapping copies from the gateway's own metadata, only the names its `attributes` lists |
+| Gateway port | `GatewayContext` (principal, server, gateway attributes, the hook's deadline) and `Checker`: all the gate's core and policy know of any gateway |
 | Span | The exact byte range of one JSON value inside a larger text |
 | Form token | The desk's signed proof that an answer comes from the page that showed this digest |
 | Cursor | One channel's delivery position (the last delivered event id) |
@@ -57,13 +58,15 @@ The Python packages, what each may import, what each module promises, and how Ap
  │ mappings/ ext_mcp      │ │ mcp/  server (tool)  │ │ edges/ requests (gRPC)  desk/  answers* admin*      │
  │           ext_authz    │ │       tasks, calls   │ │ infra/ store/ (repositories, UoW, locks, clock,     │
  │           check_api    │ │ core/ hold (use case)│ │        migrations)  feed (LISTEN)  sources          │
- │           errors       │ │   wording            │ │        channels/*                                   │
- │ policy/ rules_file     │ │   port WaitRequests  │ │ app/   requests waits answers deadlines rules       │
- │   gateway_context*     │ └──────────────────────┘ │        attempts ports  delivery* audit*             │
+ │           attributes   │ │   wording            │ │        channels/*                                   │
+ │           errors       │ │   port WaitRequests  │ │ app/   requests waits answers deadlines rules       │
+ │ policy/ rules_file     │ └──────────────────────┘ │        attempts ports  delivery* audit*             │
  │   authzen* opa*        │                          │ domain/ approval (Approval, Wait)  answer  issuer   │
  │ core/ check use case,  │                          └─────────────────────────────────────────────────────┘
  │   wording, ports       │
- │   Policy, GateRequests │                                                          * planned
+ │   Policy, GateRequests │
+ │   GatewayContext,      │
+ │   Checker              │                                                          * planned
  └────────────────────────┘
  requests_client/ ApprovalRequests over gRPC (satisfies GateRequests and WaitRequests structurally)
  contract_mapping/ the one translation between the ApprovalRequests wire and the kernel
@@ -87,6 +90,8 @@ standard library's network, process and database modules):
 | C6 | `approvals.domain.issuer` (the only holder of the `Answer` constructor key) is importable only by `approvals.app.answers` and `approvals.infra.store` (which rebuilds stored answers through it) | protected |
 | C7 | `approvals.app.answers` is importable only by `edges.desk`, `edges.answers` and `main`; `edges.requests`, `app.requests`, `app.waits` and `infra.channels` import none of `app.answers`, `edges.desk`, `edges.answers`, `domain.issuer` | protected + forbidden |
 | C8 | `requests_client` is importable only by `gate.main` and `wait.main` | protected |
+| C9 | `gate.core` and `gate.policy` import no `gate.mappings`, no `contract.agentgateway` and no Envoy types (`envoy`, `xds`, `udpa`, `validate`): each gateway is an optional adapter at the edge, reaching the core only through the gateway port | forbidden |
+| C10 | The adapters `gate.mappings.check_api`, `ext_mcp` and `ext_authz` import none of each other; only `ext_authz` imports Envoy's types and only `ext_mcp` imports `contract.agentgateway` (the shared `attributes`, `errors` and `grants` import neither) | independence, forbidden |
 
 `pyproject.toml` holds the exact contracts.
 
@@ -97,9 +102,9 @@ standard library's network, process and database modules):
 | `kernel.calls` | principal, server, params bytes; a JSON-RPC body | `CallIdentity` or `CallRejected`; the params span (`read_rpc_request`); the shown digest (computed only here) | Re-encode; accept duplicate or escaped-duplicate keys, trailing data, extra top-level keys, a task request (a `task` member or a Tasks declaration in `_meta`), nesting past 32 levels, a number that overflows a float, an empty name, a NUL or lone surrogate in a name or an argument key or string; a batch, or a duplicate `method` or `params` |
 | `kernel.requirements` | assurance scale, requirements | `stricter`, `meets_floor`, `qualify` | Read an identity provider or a clock |
 | `contract_mapping` | kernel results; ApprovalRequests replies | the one wire form of each value, both directions; the method paths; the `Refused` and `Rejected` messages the Check API writes too | Know a grant, a configuration or a service; read a reply of a kind it does not know as anything but `UnknownReply` |
-| `gate.core` | a call (principal, server, params, gateway attributes), a deadline | the verdict | Know a wire, a gateway or the wait server |
-| `gate.mappings.*` | one gateway's hook message | a call; the verdict in the gateway's encoding; `ext_mcp` sets the principal header on the wait route | Read caller or server from the body; send the wait route to policy |
-| `gate.policy.*` | principal, server, tool, arguments, gateway attributes | `none` or `require(name)`; anything else refuses | Cache; decide reach |
+| `gate.core` | a `GatewayContext` (principal, server, gateway attributes, the hook's deadline) and the params bytes | the verdict, within the sooner of `check_budget` and the deadline less a 250 ms reply reserve | Know a wire, a gateway or the wait server |
+| `gate.mappings.*` | one gateway's hook message | a `GatewayContext` holding only the attributes its configuration maps, and the RPC's inbound deadline; the verdict in the gateway's encoding; `ext_mcp` sets the principal header on the wait route | Depend on `CheckCore` (only on `Checker`); read caller or server from the body; send the wait route to policy; copy metadata it was not told to |
+| `gate.policy.*` | principal, server, tool, arguments, gateway attributes | `none` or `require(name)`; anything else refuses (the rules file raises when a rule whose principal, server and tool match names an attribute the call lacks) | Cache; decide reach; know a gateway's metadata keys |
 | `wait.core`, `wait.mcp` | principal, ticket, words; a wait id | the held outcome; a task only to a client that declared Tasks, authorised by its id alone (no principal is attested on `tasks/*`), and none with `wait.tasks: disabled` | Keep wait state; answer `tasks/update`; put wait ids in spans or logs; import `asyncio` in the core (it waits through the kernel's `Timeouts` port, which `serving.timeouts` implements) |
 | `approvals.app.requests` | a call reference, a requirement name | `request`; `claim`, the only spend | List, show or answer |
 | `approvals.app.waits` | open, await (and later cancel) a wait | wait ids, status streams | Open a wait on another principal's ticket |
@@ -107,7 +112,7 @@ standard library's network, process and database modules):
 | `approvals.app.deadlines`, `delivery`, `audit` | the due index; committed events; `after=<id>` | ended deadlines; deliveries, pauses, dead letters; audit records | Poll; send arguments or words |
 | `approvals.edges.desk` | a browser session (OIDC code + PKCE, `acr_values`, `max_age`; checks `aud`, `azp`, `nonce`, `acr`, `auth_time`) | review pages; answers as the desk surface; push subscriptions to configured push origins only | Render agent words or arguments other than as escaped text (never in an attribute, URL or script); hide control or bidi characters (they show visibly) |
 | `config` | file, command | that command's typed view; every refusal listed | Resolve another command's secrets; call an identity provider |
-| `auth` | the registry; a credential | one decision (entry, grants), used by both the gRPC interceptor and the ASGI guard | Store a bearer in plain text |
+| `auth` | the registry; a bearer and, on a listener with `tls.client_ca`, the client certificate's DER leaf | one decision (entry, grants), used by both the gRPC interceptor and the ASGI guard; a bearer naming a different entry than the certificate refuses | Store a bearer in plain text |
 
 **Persistence:** one repository per aggregate: `Approval` (with its `Wait` entities and its answer, held as
 all-or-none answer columns on the Approval row, including the digest it answered), `ChannelCursor` (with its dead
@@ -128,13 +133,15 @@ when its retention ends (the foreign keys cascade); longer audit is the integrat
 | 7 | feed → `wait.mcp`; repeat → gate → `claim` | `approved`; the same bytes | Approved → Used |
 
 - **One call library:** the gate parses to ask policy, Approvals parses for identity, the `ext_authz` mapping
-  finds `params` with the span reader, and the digest and desk use the shown digest. Batches, GET, DELETE and
-  unclassifiable requests are refused by the mapping before parsing.
+  finds `params` with the span reader, and the digest and desk use the shown digest. The `ext_authz` mapping
+  classifies each HTTP request with one pure function (`classify`) before parsing: any method but POST, a cut
+  body, a batch or anything but one JSON-RPC request is refused; only one `tools/call` reaches the checker.
 - **Contracts:** `proto/` holds `calls/v1` (the shared `Rejected` and `Refused`), `check/v1`, `requests/v1`, then
   `answers/v1`, `events/v1`, `audit/v1`. The proto package equals the directory equals the Python package
   (`tool_approvals.contract.check.v1`), so generated stubs import each other without rewriting. Stubs are
   generated by `grpcio-tools`, pinned in `uv.lock` so they match the protobuf runtime; buf lints and checks
-  breaking changes. Envoy's `ext_authz` types come from `xds-protos` (E11), nothing vendored.
+  breaking changes. Envoy's `ext_authz` types come from `xds-protos` (E11), nothing vendored: the optional
+  `envoy` extra, imported only when `gate.ext_authz` is enabled.
 - **The executor seam (reserved, not built):** `claim` stays the only spend; `check/v1` keeps field 8 of the
   verdict for it, by a comment; a new registry entry kind is additive.
 
@@ -161,6 +168,7 @@ class Answer {                       // its constructor needs a key only domain.
   surface: SurfaceName;
   vouchedAssurance: AssuranceLevel;
   signInMoment: Instant;             // a surface vouches its own
+  answeredAt: Instant;               // the unit of work's clock when the answer was recorded; claim re-checks it
   digest: Digest;                    // what the approver was shown
 }
 ```
@@ -200,15 +208,15 @@ requested level. An identity provider that reuses an earlier ceremony for a high
 
 | Module | Proof |
 |---|---|
-| `kernel.calls` | Hypothesis: identity ignores `_meta` and changes with any argument byte; every refusal above; planned: the span reader returns exact bytes under any whitespace |
+| `kernel.calls` | Hypothesis: identity ignores `_meta` and changes with any argument byte; every refusal above; the span reader returns the exact params bytes under any insignificant whitespace and member order, in the params and in the envelope |
 | Pure cores | Fakes for their ports; every verdict and error |
-| Mappings | **Conformance suite per gateway** (real agentgateway, real Envoy): the gate is the last processor (a fixture tool records the bytes it receives), exact bytes, attested server, header replacement on the wait route, fail closed when the gate is stopped or slow |
+| Mappings | **One conformance suite, run through each adapter** (real agentgateway, real Envoy, a plain Check API caller over gRPC and JSON): the gate is the last processor (a fixture tool records the bytes it receives), exact bytes, attested server, gateway attributes, header replacement on the wait route, the agent's credentials kept from the gate, fail closed when the gate is stopped or slow. A case an adapter cannot express is skipped by name with its reason. `ext_authz`'s classification table is also tested row by row as a pure function. A real listener proves an inbound deadline reaches Approvals less the reply reserve |
 | Check API, policy | The same golden cases over gRPC and JSON; OPA and an AuthZEN PDP as real images |
 | Store | Real Postgres: concurrent writers paused before commit never expose a later, lower id; an EVENTS wait past `lock_timeout` refuses; the waker and an event writer on one row do not deadlock; killing the channel-lock connection moves delivery with no cursor regression |
 | Desk | A scripted OIDC provider: too weak, too old, future `auth_time`, wrong `aud`, `azp` or `nonce` refused; a form token for another ticket, session or digest refused; hostile words and arguments (HTML, `javascript:` URLs, control and bidi characters) render as visible escaped text |
 | Answers API | Above-cap assurance, surface not allowed, digest mismatch, already answered, past deadline |
 | Channels | Order by id, at least once, pause, give-up; Web Push decrypted with test keys; a subscription outside the configured push origins refused |
-| Config | Refused: below the floor; a shared credential; an agents'-side entry granted a desk, answers or admin method; a bearer on a plaintext listener; retention shorter than the give-up horizon; a duplicate YAML key |
+| Config | Refused: below the floor; a shared credential; an agents'-side entry granted a desk, answers or admin method; a bearer on a plaintext listener; a client-certificate entry granted more than check and `wait.call`, or one no listener asks for; a rule attribute an enabled adapter does not map; retention shorter than the give-up horizon; a duplicate YAML key |
 | End to end, chart | Compose with both gateways; `helm lint` and kubeconform, an install on kind only when the chart changes |
 
 ## Canonical shape and design rules
@@ -234,6 +242,7 @@ requested level. An identity provider that reuses an earlier ceremony for a high
   channel per replica; ordering only by id at the receiver; a Connect client cannot call the JSON binding
   directly; order holds per sender only, so a delivery takeover can interleave; one Web Push cursor pauses every
   device when one push service fails.
-- **Deferred:** a published conformance kit for third-party mappings; `connectrpc` once it reaches 1.0; per-role
+- **Deferred:** a published conformance kit for third-party adapters (the suite's cases live in one module, so a
+  kit can export them); `connectrpc` once it reaches 1.0; per-role
   database users.
 - **Not planned:** Python plugin loading; hot reload; a policy cache.

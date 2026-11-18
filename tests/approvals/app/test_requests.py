@@ -1,6 +1,8 @@
 """app.requests over the in-memory unit of work: every result kind of request and claim, and their conflicts."""
 
+import dataclasses
 from dataclasses import replace
+from datetime import timedelta
 
 import pytest
 
@@ -23,7 +25,8 @@ from tests.approvals.memory import MemoryUnitOfWork
 from tool_approvals.approvals.app.answers import ApprovalDetail
 from tool_approvals.approvals.app.ports import MAX_ATTEMPTS, ConcurrentChange, StoreUnavailable
 from tool_approvals.approvals.app.requests import RequestService
-from tool_approvals.approvals.domain.answer import Verdict
+from tool_approvals.approvals.domain import issuer
+from tool_approvals.approvals.domain.answer import Answer, Verdict
 from tool_approvals.approvals.domain.approval import EventKind, State
 from tool_approvals.kernel.calls import RejectReason
 from tool_approvals.kernel.names import AssuranceName, RequirementName, Ticket
@@ -37,6 +40,7 @@ from tool_approvals.kernel.requests import (
     Ticketed,
     UnknownRequirement,
 )
+from tool_approvals.kernel.requirements import Requirement
 
 T1 = Ticket("ticket-1")
 
@@ -131,6 +135,62 @@ async def test_a_weak_yes_is_not_spent_once_the_requirement_is_raised() -> None:
     assert spent is not None
     assert spent.state is State.EXPIRED
     assert [event.created_by for event in world.store.events if event.kind is EventKind.EXPIRED] == ["requirement"]
+
+
+def configured(world: World, requirement: Requirement) -> World:
+    """The same store, with the requirement as configured now."""
+    return World(rules=replace(RULES, requirements={HUMAN.name: requirement}), store=world.store)
+
+
+def expired_by_the_requirement(world: World) -> None:
+    approval = world.store.stored(T1)
+    assert approval is not None
+    assert approval.state is State.EXPIRED
+    assert [event.created_by for event in world.store.events][-1] == "requirement"
+
+
+async def test_a_yes_is_not_spent_once_the_sign_in_age_it_was_given_under_is_too_old() -> None:
+    world = World()
+    await world.requests.request(CALL_REF, HUMAN.name, HOOK)
+    await approve(world)  # signed in a minute before the answer
+    shortened = configured(world, replace(HUMAN, max_sign_in_age=timedelta(seconds=30)))
+    assert await shortened.requests.claim(CALL_REF, HUMAN.name, HOOK) == NotApproved()
+    expired_by_the_requirement(world)
+
+
+async def test_a_sign_in_exactly_the_max_age_old_is_claimed() -> None:
+    world = World()
+    await world.requests.request(CALL_REF, HUMAN.name, HOOK)
+    await approve(world)
+    exact = configured(world, replace(HUMAN, max_sign_in_age=timedelta(minutes=1)))
+    assert await exact.requests.claim(CALL_REF, HUMAN.name, HOOK) == Claimed()
+
+
+@pytest.mark.parametrize(("window", "result"), [(timedelta(minutes=5), NotApproved()), (None, Claimed())])
+async def test_a_claim_ten_minutes_after_the_answer_meets_the_current_use_window(
+    window: timedelta | None, result: Claimed | NotApproved
+) -> None:
+    long = replace(HUMAN, use_window=timedelta(minutes=15))
+    world = configured(World(), long)
+    await world.requests.request(CALL_REF, HUMAN.name, HOOK)
+    await approve(world)
+    world.store.clock += timedelta(minutes=10)
+    now = world if window is None else configured(world, replace(long, use_window=window))
+    assert await now.requests.claim(CALL_REF, HUMAN.name, HOOK) == result
+    if window is not None:
+        expired_by_the_requirement(world)
+
+
+async def test_a_yes_stored_without_answered_at_is_not_claimed() -> None:
+    world = World()
+    await world.requests.request(CALL_REF, HUMAN.name, HOOK)
+    await approve(world)
+    stored = world.store._approvals[T1]
+    assert stored.answer is not None
+    fields = {field.name: getattr(stored.answer, field.name) for field in dataclasses.fields(Answer)}
+    stored.answer = issuer.rebuild(**fields | {"answered_at": None})  # as a row from before migration 0002 loads
+    assert await world.requests.claim(CALL_REF, HUMAN.name, HOOK) == NotApproved()
+    expired_by_the_requirement(world)
 
 
 async def test_of_two_claims_of_one_yes_exactly_one_is_claimed() -> None:

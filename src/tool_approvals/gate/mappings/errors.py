@@ -1,5 +1,6 @@
-"""The JSON-RPC error codes a refused tools/call carries: agentgateway v1.7.0's own, so both mappings agree with
-what agents already see from that gateway. Also each refusal's name, the Check API's own verdict field name."""
+"""The JSON-RPC error codes a refused tools/call carries. The codes are the gate's own, chosen to match
+agentgateway v1.7.0's, so agents see the same codes whichever gateway's mapping refused them. Also each refusal's
+name, the Check API's own verdict field name."""
 
 from typing import Final, assert_never
 

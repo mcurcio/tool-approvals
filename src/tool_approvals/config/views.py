@@ -2,7 +2,7 @@
 resolved. A command never sees another command's sections or secrets."""
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
 from types import MappingProxyType
@@ -14,6 +14,7 @@ from tool_approvals.config.sections import (
     NO_APPROVAL,
     Approvals,
     ApprovalsClient,
+    ClientCertCredential,
     Database,
     FloorSection,
     Gate,
@@ -49,8 +50,14 @@ class ListenerView:
 
 @dataclass(frozen=True, slots=True)
 class RegistryEntryView:
+    """One caller and its credential: a bearer's SHA-256, or the SHA-256 of its client certificate (DER leaf). The
+    file's grammar gives an entry exactly one of the two."""
+
     name: CallerName
-    bearer_sha256: bytes  # 32 bytes; the file holds it as hex
+    bearer_sha256: bytes | None  # 32 bytes; the file holds it as hex
+    # 32 bytes. Keyword-only, so it follows `grants` in the constructor: (name, bearer_sha256, grants) still builds
+    # a bearer entry.
+    client_cert_sha256: bytes | None = field(default=None, kw_only=True)
     grants: frozenset[Method]
 
 
@@ -73,6 +80,7 @@ class RuleView:
     server: str
     tool: str
     require: RequirementName | None  # None: no approval needed
+    attributes: Mapping[str, str]  # gateway attribute name → fnmatch pattern, matched case-sensitively
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +102,15 @@ class ExtMcpView:
     hook_timeout: timedelta  # the gateway's own timeout on the hook; check_budget is below it
     principal_key: str  # the metadata_context key holding the attested principal
     exposed_wait_tool: str
+    attributes: Mapping[str, tuple[str, ...]]  # gateway attribute name → key path into metadata_context
+
+
+@dataclass(frozen=True, slots=True)
+class ExtAuthzAttributeView:
+    """Exactly one source is set."""
+
+    metadata: tuple[str, ...] | None  # filter name, then keys, into the request's dynamic metadata
+    context_extension: str | None  # a context_extensions key
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +120,7 @@ class ExtAuthzView:
     principal_path: tuple[str, ...]  # filter name, then keys, into the request's dynamic metadata
     server_key: str  # the context_extensions key naming the route's server
     exposed_wait_tool: str
+    attributes: Mapping[str, ExtAuthzAttributeView]  # gateway attribute name → its source
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,6 +238,7 @@ def gate_view(cfg: ConfigFile, env: Mapping[str, str]) -> GateView:
             hook_timeout=gate.ext_mcp.hook_timeout,
             principal_key=gate.ext_mcp.principal_key,
             exposed_wait_tool=gate.ext_mcp.exposed_wait_tool,
+            attributes=MappingProxyType(dict(gate.ext_mcp.attributes)),
         ),
         ext_authz=None
         if gate.ext_authz is None
@@ -229,10 +248,23 @@ def gate_view(cfg: ConfigFile, env: Mapping[str, str]) -> GateView:
             principal_path=gate.ext_authz.principal_path,
             server_key=gate.ext_authz.server_key,
             exposed_wait_tool=gate.ext_authz.exposed_wait_tool,
+            attributes=MappingProxyType(
+                {
+                    name: ExtAuthzAttributeView(source.metadata, source.context_extension)
+                    for name, source in gate.ext_authz.attributes.items()
+                }
+            ),
         ),
         policy=RulesView(
             rules=tuple(
-                RuleView(rule.principal, rule.server, rule.tool, _required(rule.require)) for rule in gate.policy.rules
+                RuleView(
+                    rule.principal,
+                    rule.server,
+                    rule.tool,
+                    _required(rule.require),
+                    MappingProxyType(dict(rule.attributes)),
+                )
+                for rule in gate.policy.rules
             ),
             default=_required(gate.policy.default),
         ),
@@ -415,10 +447,14 @@ def _wait_route(route: WaitRoute) -> WaitRouteView:
 
 
 def _registry(entries: tuple[RegistryEntry, ...]) -> tuple[RegistryEntryView, ...]:
-    return tuple(
-        RegistryEntryView(CallerName(entry.name), entry.credential.bearer_sha256, frozenset(entry.grants))
-        for entry in entries
-    )
+    return tuple(_entry(entry) for entry in entries)
+
+
+def _entry(entry: RegistryEntry) -> RegistryEntryView:
+    name, grants, credential = CallerName(entry.name), frozenset(entry.grants), entry.credential
+    if isinstance(credential, ClientCertCredential):
+        return RegistryEntryView(name, None, client_cert_sha256=credential.client_cert_sha256, grants=grants)
+    return RegistryEntryView(name, credential.bearer_sha256, grants=grants)
 
 
 def _scale(levels: tuple[Level, ...]) -> AssuranceScale:

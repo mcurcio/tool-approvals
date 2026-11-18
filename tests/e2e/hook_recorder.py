@@ -1,20 +1,21 @@
-"""What agentgateway sends the gate's ext_mcp hook, as the gate receives it: a gRPC hop on the host between the
-gateway and the gate that records each call and forwards it unchanged.
+"""What a gateway sends one of the gate's hooks (agentgateway's ext_mcp, Envoy's ext_authz), as the gate receives
+it: a gRPC hop on the host between the gateway and the gate that records each call and forwards it unchanged.
 
 It serves TLS only (the test certificate, which names the host the gateway dials), so a recorded call proves the
 gateway spoke TLS. Each call is kept with its gRPC metadata (the bearer the gateway presented) and the McpRequest
-it carried (the HTTP headers the gateway chose to forward), then sent on as raw bytes, with the same metadata and
-the time the gateway has left, to `upstream` (the slow relay in front of the gate). A failure upstream reaches the
-gateway as the same gRPC status.
+or the ext_authz CheckRequest it carried (either way, the HTTP headers the gateway chose to forward), then sent on
+as raw bytes, with the same metadata and the time the gateway has left, to `upstream` (the slow relay in front of
+the gate). A failure upstream reaches the gateway as the same gRPC status.
 """
 
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 import grpc
 import grpc.aio
+from envoy.service.auth.v3 import external_auth_pb2
 
 from tool_approvals.contract.agentgateway import ext_mcp_pb2
 
@@ -25,13 +26,27 @@ _FORWARDED_METADATA: Final = ("authorization",)
 class HookCall:
     method: str  # the gRPC method path
     authorization: tuple[str, ...]  # every `authorization` metadata value the gateway sent
-    request: ext_mcp_pb2.McpRequest | None  # None for a method other than CheckRequest
+    request: ext_mcp_pb2.McpRequest | None  # an ext_mcp CheckRequest's message; None for any other method
+    authz: Any = None  # an ext_authz Check's CheckRequest (xds-protos ships no stubs); None for any other method
 
     def header(self, name: str) -> list[bytes]:
         """Every value of the HTTP header `name` the gateway forwarded with the call."""
-        if self.request is None:
+        wanted = name.lower()
+        if self.request is not None:
+            return [header.value for header in self.request.headers if header.key.lower() == wanted]
+        if self.authz is None:
             return []
-        return [header.value for header in self.request.headers if header.key.lower() == name.lower()]
+        http = self.authz.attributes.request.http
+        values = [value.encode() for key, value in http.headers.items() if key.lower() == wanted]
+        for entry in http.header_map.headers:
+            if entry.key.lower() == wanted:
+                values.append(entry.raw_value or entry.value.encode())
+        return values
+
+    @property
+    def is_check(self) -> bool:
+        """Whether this was the hook's check (not, say, a reflection or health call)."""
+        return self.request is not None or self.authz is not None
 
 
 class HookRecorder:
@@ -62,7 +77,7 @@ class HookRecorder:
     async def forward(self, method: str, request: bytes, context: grpc.aio.ServicerContext[bytes, bytes]) -> bytes:
         metadata = [(key, value) for key, value in context.invocation_metadata() or () if isinstance(value, str)]
         authorization = tuple(value for key, value in metadata if key == "authorization")
-        self._calls.append(HookCall(method, authorization, _mcp_request(method, request)))
+        self._calls.append(HookCall(method, authorization, _mcp_request(method, request), _authz(method, request)))
         host, port = self._upstream()
         options = [("grpc.ssl_target_name_override", self._name), ("grpc.default_authority", self._name)]
         async with grpc.aio.secure_channel(f"{host}:{port}", self._upstream_credentials, options=options) as channel:
@@ -96,3 +111,9 @@ def _mcp_request(method: str, request: bytes) -> ext_mcp_pb2.McpRequest | None:
     if not method.endswith("/CheckRequest"):
         return None
     return ext_mcp_pb2.McpRequest.FromString(request)
+
+
+def _authz(method: str, request: bytes) -> Any:
+    if method != "/envoy.service.auth.v3.Authorization/Check":
+        return None
+    return external_auth_pb2.CheckRequest.FromString(request)

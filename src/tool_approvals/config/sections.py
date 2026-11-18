@@ -7,9 +7,10 @@ default. Rules between sections live in `config.checks`.
 """
 
 import re
+from collections.abc import Iterator, Mapping
 from datetime import timedelta
 from pathlib import Path
-from typing import Annotated, Final, Literal, Self
+from typing import Annotated, ClassVar, Final, Literal, NamedTuple, Protocol, Self
 
 from pydantic import (
     BaseModel,
@@ -19,6 +20,7 @@ from pydantic import (
     StrictBool,
     StrictInt,
     StringConstraints,
+    field_validator,
     model_validator,
 )
 
@@ -49,7 +51,8 @@ def _path(value: object) -> Path:
 def _sha256_hex(value: object) -> bytes:
     if not isinstance(value, str) or _SHA256_HEX.fullmatch(value) is None:
         raise ValueError(
-            "a bearer hash is 64 hex digits (the sha256 line `credentials issue` prints, without 'sha256:')"
+            "a SHA-256 is 64 hex digits (a bearer's: the sha256 line `credentials issue` prints, without 'sha256:'; "
+            "a client certificate's: of its DER leaf certificate)"
         )
     return bytes.fromhex(value)
 
@@ -102,11 +105,38 @@ class BearerCredential(Section):
     bearer_sha256: Annotated[bytes, BeforeValidator(_sha256_hex)]
 
 
+class ClientCertCredential(Section):
+    """A TLS client certificate, by the SHA-256 of its DER leaf certificate. Its listener must name a client CA
+    (`tls.client_ca`), and it may be granted only `check` and `wait.call` (config.checks)."""
+
+    client_cert_sha256: Annotated[bytes, BeforeValidator(_sha256_hex)]
+
+
+_CREDENTIAL_KEYS: Final[dict[str, type[BearerCredential | ClientCertCredential]]] = {
+    "bearer_sha256": BearerCredential,
+    "client_cert_sha256": ClientCertCredential,
+}
+
+
 class RegistryEntry(Section):
     name: Text
     kind: Literal["caller"]
-    credential: BearerCredential
+    credential: BearerCredential | ClientCertCredential
     grants: tuple[Method, ...]
+
+    @field_validator("credential", mode="before")
+    @classmethod
+    def _one_credential(cls, value: object) -> object:
+        """The credential its one key names, validated as that kind alone, so a problem names its own key and not
+        every kind the union holds."""
+        if isinstance(value, BearerCredential | ClientCertCredential):
+            return value
+        if not isinstance(value, dict):
+            raise ValueError("a credential is {bearer_sha256: HEX} or {client_cert_sha256: HEX}")
+        kinds = [kind for key, kind in _CREDENTIAL_KEYS.items() if key in value]
+        if len(kinds) != 1:
+            raise ValueError("a credential names exactly one of bearer_sha256 or client_cert_sha256")
+        return kinds[0].model_validate(value)
 
 
 class Level(Section):
@@ -181,25 +211,71 @@ class CheckApi(Section):
     exposed_wait_tool: Text
 
 
+# A key path into a gateway's metadata: one or more keys, each descending into the struct the one before names.
+KeyPath = Annotated[tuple[Text, ...], Field(min_length=1)]
+
+
+class PackageExtra(NamedTuple):
+    """An optional dependency a section needs installed: the package extra, and a module it provides."""
+
+    name: str
+    module: str
+
+
+class GatewayAdapter(Protocol):
+    """The shape every gateway adapter's section shares, which the cross-section checks read."""
+
+    needs: ClassVar[PackageExtra | None]
+
+    @property
+    def listener(self) -> "Listener": ...
+
+    @property
+    def hook_timeout(self) -> timedelta: ...
+
+    @property
+    def attributes(self) -> Mapping[str, object]: ...
+
+
 class ExtMcp(Section):
+    needs: ClassVar[PackageExtra | None] = None  # agentgateway's types ship in the package
     listener: Listener
     hook_timeout: Duration = timedelta(seconds=10)
     principal_key: Text
     exposed_wait_tool: Text
+    # Each gateway attribute policy may read, by name: its key path into the processor's metadata_context.
+    attributes: dict[Text, KeyPath] = {}
+
+
+class ExtAuthzAttribute(Section):
+    """Where one gateway attribute is read from in Envoy's CheckRequest: a string in the dynamic metadata, or a
+    route's context_extensions entry."""
+
+    metadata: Annotated[tuple[Text, ...], Field(min_length=2)] | None = None  # the filter name, then keys
+    context_extension: Text | None = None
+
+    @model_validator(mode="after")
+    def _exactly_one(self) -> Self:
+        if (self.metadata is None) == (self.context_extension is None):
+            raise ValueError("an ext_authz attribute names exactly one of metadata or context_extension")
+        return self
 
 
 class ExtAuthz(Section):
+    needs: ClassVar[PackageExtra | None] = PackageExtra("envoy", "envoy.service.auth.v3.external_auth_pb2")
     listener: Listener
     hook_timeout: Duration  # no default: Envoy's own default is far below a held check
     principal_path: Annotated[tuple[Text, ...], Field(min_length=2)]  # the filter name, then one or more keys
     server_key: Text = "server"
     exposed_wait_tool: Text
+    attributes: dict[Text, ExtAuthzAttribute] = {}  # each gateway attribute policy may read, by name
 
 
 class Rule(Section):
     principal: Text = DEFAULT_PATTERN
     server: Text = DEFAULT_PATTERN
     tool: Text = DEFAULT_PATTERN
+    attributes: dict[Text, Text] = {}  # gateway attribute name → case-sensitive pattern; every one must match
     require: Text  # a requirement's name, or NO_APPROVAL
 
 
@@ -222,6 +298,17 @@ class Gate(Section):
     ext_mcp: ExtMcp | None = None
     ext_authz: ExtAuthz | None = None
     policy: Policy
+
+    def adapters(self) -> Iterator[tuple[str, GatewayAdapter]]:
+        """Each enabled gateway adapter section, by its key, in GATEWAY_ADAPTERS order."""
+        for name in GATEWAY_ADAPTERS:
+            section: GatewayAdapter | None = getattr(self, name)
+            if section is not None:
+                yield name, section
+
+
+# Every Gate key holding a gateway adapter's section: a new adapter adds its section here, and the checks follow.
+GATEWAY_ADAPTERS: Final = ("ext_mcp", "ext_authz")
 
 
 class WaitListeners(Section):

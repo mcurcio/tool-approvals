@@ -75,7 +75,7 @@ binds:
 | `backendTLS` with `root` and `hostname` | The hook carries a bearer, so it runs over verified TLS to `gate.ext_mcp.listener` |
 | `backendAuth.key` | A registry bearer granted `check` (the example's `gateway-hook` entry) |
 | `metadata: {principal: jwt.sub}` | The attested principal, under the key `gate.ext_mcp.principal_key` names. Any CEL expression over what the gateway authenticated works; it must give a non-empty string, or the call is refused as `misconfigured` |
-| `requestHeaders: {disallowed: [authorization, cookie]}` | By default agentgateway sends the processor the agent's request headers, its credentials included. The gate reads no header, and the agent's credentials are not the gate's to see. jwtAuth in strict mode already strips `Authorization`; the filter is what keeps `Cookie` (and `Authorization` under any other authentication) out, and the conformance suite checks it with a cookie |
+| `requestHeaders: {disallowed: [authorization, cookie]}` | By default agentgateway sends the processor the agent's request headers, its credentials included. The gate reads no header, and the agent's credentials are not the gate's to see. jwtAuth in strict mode already strips `Authorization`; the filter is what keeps `Cookie` (and `Authorization` under any other authentication) out, and the conformance suite checks it with a cookie (as it checks Envoy's `disallowed_headers`) |
 
 **The wait target** (`targets`):
 
@@ -109,7 +109,20 @@ wait_route:
 ```
 
 `hook_timeout` is agentgateway's own timeout on the guardrail call, 10 s in v1.7.0; `gate.check_budget` (default
-5 s) must stay below it, so a slow check is refused by the gate rather than cut off by the gateway.
+5 s) must stay below it, so a slow check is refused by the gate rather than cut off by the gateway. If the
+guardrail call carries a gRPC deadline, the gate also finishes 250 ms before it.
+
+**Gateway attributes for policy.** To let policy rules match a value agentgateway attested (a tenant claim, say),
+add it to the processor's `metadata` beside the principal, as any CEL expression, and name it in
+`gate.ext_mcp.attributes` with its key path into that metadata: one key for a string value, more keys to descend
+into a value that is itself a map. For example, `metadata: {principal: jwt.sub, tenant: jwt.tenant}` on the
+gateway and `attributes: {tenant: [tenant]}` on the gate. The gate copies only the names listed; a value that is
+missing or not a string is left out, and a rule that reads it refuses the call as `unavailable`
+([configuration](configuration.md#gate)).
+
+**mTLS instead of the bearer.** The hook may present a client certificate in place of `backendAuth.key`, where the
+gateway can send one on this connection: name the certificate's SHA-256 fingerprint in the registry entry and set
+`tls.client_ca` on `gate.ext_mcp.listener` ([configuration](configuration.md#registry-who-may-call-whom)).
 
 ## What the agent sees
 

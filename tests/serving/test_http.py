@@ -1,16 +1,20 @@
-"""serve_asgi, the proto3-JSON route and the health app, over real TLS sockets."""
+"""serve_asgi (the ASGI TLS extension included), the proto3-JSON route and the health app, over real TLS sockets."""
 
 import asyncio
 import ssl
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
 import trustme
+import uvicorn
 from starlette.applications import Starlette
+from starlette.responses import PlainTextResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
 
-from tests.fixtures.certs import TlsFiles, tls_files
+from tests.fixtures.certs import TlsFiles, client_cert, tls_files
 from tests.fixtures.ports import free_port, serving_asgi
 from tool_approvals.config.views import ListenerView, TlsView
 from tool_approvals.contract.calls.v1 import calls_pb2
@@ -113,6 +117,55 @@ async def test_a_listener_with_a_client_ca_requires_a_client_certificate(tls: Tl
                 await client.get("/healthz")
 
 
+def _scope_tls_app(seen: list[dict[str, object]]) -> ASGIApp:
+    """An ASGI app that records each request's TLS extension (or {} without one) and answers 200."""
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            return
+        seen.append(dict((scope.get("extensions") or {}).get("tls", {})))
+        await PlainTextResponse("ok")(scope, receive, send)
+
+    return app
+
+
+async def test_the_scope_carries_the_client_certificate_in_the_tls_extension(tls: TlsFiles, tmp_path: Path) -> None:
+    presented = client_cert(tls.authority, tmp_path, "gateway")
+    listener = _listener(tls, tls.ca)
+    seen: list[dict[str, object]] = []
+    async with serving_asgi(_scope_tls_app(seen), listener):
+        context = ssl.create_default_context(cafile=tls.ca)
+        context.load_cert_chain(presented.cert, presented.key)
+        async with httpx.AsyncClient(base_url=f"https://localhost:{listener.port}", verify=context) as client:
+            assert (await client.get("/")).status_code == 200
+    (extension,) = seen
+    chain = extension["client_cert_chain"]
+    assert isinstance(chain, list)
+    assert chain[0] == presented.pem
+    assert ssl.PEM_cert_to_DER_cert(chain[0]) == presented.der
+    assert extension["tls_version"] in {0x0303, 0x0304}
+    assert extension["server_cert"] is None
+    assert extension["cipher_suite"] is None
+
+
+async def test_a_tls_listener_without_a_client_ca_has_an_empty_chain(tls: TlsFiles) -> None:
+    listener = _listener(tls)
+    seen: list[dict[str, object]] = []
+    async with serving_asgi(_scope_tls_app(seen), listener), _client(listener, tls.ca) as client:
+        assert (await client.get("/")).status_code == 200
+    (extension,) = seen
+    assert extension["client_cert_chain"] == []
+
+
+async def test_a_plaintext_listener_has_no_tls_extension() -> None:
+    listener = ListenerView("localhost", free_port(), None)
+    seen: list[dict[str, object]] = []
+    plain = httpx.AsyncClient(base_url=f"http://localhost:{listener.port}")
+    async with serving_asgi(_scope_tls_app(seen), listener), plain as client:
+        assert (await client.get("/")).status_code == 200
+    assert seen == [{}]
+
+
 async def test_serve_asgi_returns_once_stop_is_set(tls: TlsFiles) -> None:
     listener = _listener(tls)
     async with serving_asgi(health_app({}), listener) as stop:
@@ -149,3 +202,51 @@ async def test_an_idle_client_that_never_starts_tls_does_not_hold_the_stop(tls: 
     async with asyncio.timeout(2):
         assert await reader.read() == b""  # the server cut it rather than leaving it to the handshake timeout
     idle.close()
+
+
+async def test_a_websocket_upgrade_is_served_as_plain_http(tls: TlsFiles, tmp_path: Path) -> None:
+    """No route speaks WebSocket, and the TLS extension is filled only on the HTTP protocol: an upgrade request
+    never reaches an app as a websocket scope (where a client certificate could not be read)."""
+    presented = client_cert(tls.authority, tmp_path, "gateway")
+    listener = _listener(tls, tls.ca)
+    seen: list[tuple[str, bool]] = []
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "lifespan":
+            return
+        seen.append((scope["type"], "tls" in (scope.get("extensions") or {})))
+        if scope["type"] == "http":
+            await PlainTextResponse("ok")(scope, receive, send)
+
+    upgrade = {
+        "Connection": "Upgrade",
+        "Upgrade": "websocket",
+        "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==",
+        "Sec-WebSocket-Version": "13",
+    }
+    async with serving_asgi(app, listener):
+        context = ssl.create_default_context(cafile=tls.ca)
+        context.load_cert_chain(presented.cert, presented.key)
+        async with httpx.AsyncClient(base_url=f"https://localhost:{listener.port}", verify=context) as client:
+            reply = await client.get("/", headers=upgrade)
+    assert (reply.status_code, seen) == (200, [("http", True)])
+
+
+async def test_serve_asgi_turns_websocket_off_whatever_is_installed(
+    tls: TlsFiles, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """uvicorn's "auto" serves WebSocket once a WebSocket library is installed, through protocols that never see
+    the TLS extension: serve_asgi asks for none."""
+    asked: list[object] = []
+    real = uvicorn.Config
+
+    def config(*args: Any, **kwargs: Any) -> uvicorn.Config:
+        asked.append(kwargs.get("ws", "auto"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(uvicorn, "Config", config)
+    stop = asyncio.Event()
+    stop.set()
+    async with asyncio.timeout(10):
+        await serve_asgi(health_app({}), _listener(tls), stop)
+    assert asked == ["none"]

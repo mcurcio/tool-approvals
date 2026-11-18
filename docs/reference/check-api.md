@@ -1,9 +1,10 @@
 # The Check API
 
 The gate's public, versioned contract: one method, "may this call run now?". A gateway with no first-party
-mapping calls it from its own hook or plugin, before it forwards a `tools/call`. The agentgateway and Envoy
-mappings ([agentgateway](agentgateway.md), [Envoy](envoy.md)) put the same question to the same core and add only
-their gateways' encodings.
+adapter calls it from its own hook or plugin, before it forwards a `tools/call`. The Check API is itself one of the
+gate's adapters: it and the agentgateway and Envoy adapters ([agentgateway](agentgateway.md), [Envoy](envoy.md))
+each build the same gateway context (principal, server, gateway attributes, deadline) for one gateway-neutral core,
+and differ only in their gateways' encodings. Each is optional; a gate serves the ones its configuration names.
 
 The schema is [`proto/tool_approvals/contract/check/v1/check.proto`](../../proto/tool_approvals/contract/check/v1/check.proto),
 with the shared `Refused` and `Rejected` messages in
@@ -17,9 +18,10 @@ last release in CI, so v1 changes only by adding.
 | gRPC | `/tool_approvals.contract.check.v1.CheckService/Check` | `gate.check_api.grpc` |
 | JSON | `POST /v1/check`, the same messages as [proto3 JSON](https://protobuf.dev/programming-guides/json/) | `gate.check_api.json` |
 
-Both need TLS and a registry bearer granted `check` ([configuration](configuration.md#registry-who-may-call-whom)):
-`Authorization: Bearer <bearer>` (gRPC metadata `authorization`). A missing or unknown bearer is `UNAUTHENTICATED`
-(HTTP 401); a bearer without the grant is `PERMISSION_DENIED` (HTTP 403). A JSON body that is not a `CheckRequest`
+Both need TLS and a registry credential granted `check` ([configuration](configuration.md#registry-who-may-call-whom)):
+`Authorization: Bearer <bearer>` (gRPC metadata `authorization`), or a client certificate a registry entry names,
+on a listener with `tls.client_ca`. A missing or unknown credential, or a bearer sent with a certificate naming
+another entry, is `UNAUTHENTICATED` (HTTP 401); a caller without the grant is `PERMISSION_DENIED` (HTTP 403). A JSON body that is not a `CheckRequest`
 (not JSON, or an unknown field) is HTTP 400. Every verdict, refusals included, is a successful reply (gRPC OK,
 HTTP 200).
 
@@ -38,8 +40,12 @@ message CheckRequest {
   agent, its route), never from the call. Empty values are refused.
 - **`params`** must be the exact bytes of the JSON-RPC `params` the gateway will forward, not a re-encoding, and
   nothing after the gate may change them: the approval covers these bytes. In proto3 JSON, `bytes` are base64.
-- **`gateway_attributes`** are passed to policy. The built-in rules-file policy does not read them yet (planned,
-  milestone 2).
+- **`gateway_attributes`** are passed to policy as sent: the rules-file policy matches a rule's `attributes`
+  against them ([configuration](configuration.md#gate)). A rule whose principal, server and tool match and
+  that names an attribute the request leaves out answers `unavailable`.
+- **The deadline:** over gRPC, the call's own deadline bounds the check: it finishes 250 ms before it (or within
+  `gate.check_budget`, if that is sooner), and a deadline with less than 250 ms left answers `unavailable` at
+  once. The JSON binding reads no deadline header; a JSON check runs within `gate.check_budget`.
 
 ```json
 {"principal": "agent-7", "server": "files", "params": "eyJuYW1lIjoiZGVsZXRlX2ZpbGUiLCJhcmd1bWVudHMiOnsicGF0aCI6Ii90bXAvcmVwb3J0LnR4dCJ9fQ==", "gatewayAttributes": {"tenant": "blue"}}
@@ -115,6 +121,7 @@ A `pending` refusal tells the agent to call the wait tool, which your gateway mu
 any MCP server ([the wait tool](wait.md)). The first-party agentgateway mapping recognises the wait route and sets
 the attested principal on it; a gateway using the Check API must do the same itself: on the route named
 `wait_route.server`, set the header `wait_route.principal_header` to the principal it attested, replacing any copy
-the client sent, and authenticate to the wait server with a bearer granted `wait.call`. On every other route,
+the client sent, and authenticate to the wait server with a registry credential granted `wait.call` (a bearer,
+or a client certificate on a listener with `tls.client_ca`). On every other route,
 remove that header. Do not send the wait route's calls to the Check API: policy would judge them like any other
 call.

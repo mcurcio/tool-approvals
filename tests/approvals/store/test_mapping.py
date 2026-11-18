@@ -4,6 +4,7 @@ refuses (a lost race, a lock wait past lock_timeout)."""
 from datetime import timedelta
 
 import pytest
+from sqlalchemy import text
 
 from tests.approvals.domain.examples import (
     AGENT,
@@ -65,6 +66,30 @@ async def test_a_stored_approval_loads_back_as_the_domain_object_it_was(world: S
     assert row["requirement_name"] == HUMAN.name
     assert snapshot_json(loaded.requirement) == snapshot_json(HUMAN)
     assert row["version"] == loaded.version
+
+
+async def test_answered_at_is_the_answers_database_time_and_loads_back(world: StoreWorld) -> None:
+    ticket = await world.ticket()
+    await world.answer(ticket, Verdict.APPROVE)
+    row = await world.row(ticket)
+    assert row["answered_at"] is not None
+    assert row["answered_at"] == row["updated_at"]  # the unit of work's one clock reading
+    loaded = await _load(world, ticket)
+    assert loaded.answer is not None
+    assert loaded.answer.answered_at == row["answered_at"]
+
+
+async def test_a_yes_stored_before_answered_at_loads_and_is_not_claimed(world: StoreWorld) -> None:
+    ticket = await world.ticket()
+    await world.answer(ticket, Verdict.APPROVE)
+    async with world.engine.begin() as connection:
+        await connection.execute(text("UPDATE approvals SET answered_at = NULL WHERE ticket = :t"), {"t": ticket})
+    loaded = await _load(world, ticket)
+    assert loaded.answer is not None
+    assert (loaded.answer.verdict, loaded.answer.answered_at) == (Verdict.APPROVE, None)
+    assert await world.requests.claim(CALL_REF, HUMAN.name, HOOK) == NotApproved()
+    assert (await _load(world, ticket)).state is State.EXPIRED
+    assert (await world.events(ticket))[-1] == ("expired", "requirement")
 
 
 async def test_every_change_is_stamped_with_its_actor_and_the_database_time(world: StoreWorld) -> None:

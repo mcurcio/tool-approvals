@@ -20,7 +20,7 @@ from mcp_types import (
     TextContent,
 )
 
-from tests.fixtures.certs import TlsFiles, tls_files
+from tests.fixtures.certs import ClientCert, TlsFiles, client_cert, tls_files
 from tests.fixtures.scripted_requests import Script
 from tests.wait.harness import (
     GATEWAY_BEARER,
@@ -29,14 +29,17 @@ from tests.wait.harness import (
     TTL,
     UNGRANTED_BEARER,
     WAIT,
+    Mtls,
     TaskHandle,
     client,
     get_task,
     report,
     wait_server,
 )
+from tool_approvals.config.views import RegistryEntryView
 from tool_approvals.kernel.calls import CLIENT_CAPABILITIES_META_KEY, TASKS_EXTENSION
-from tool_approvals.kernel.names import Principal, Ticket, WaitId
+from tool_approvals.kernel.methods import Method
+from tool_approvals.kernel.names import CallerName, Principal, Ticket, WaitId
 from tool_approvals.kernel.requests import TicketError, TooManyWaits, WaitReport, WaitState
 from tool_approvals.kernel.words import MAX_REASON_CHARS, AgentWords, WordsError
 
@@ -237,7 +240,7 @@ async def test_without_approvals_discovery_answers_and_calls_are_refused(tls: Tl
     assert task_read.value.code == INTERNAL_ERROR
 
 
-# Discovery is open; every call and task read needs a registry bearer granted wait.call.
+# Discovery is open; every call and task read needs a registry credential granted wait.call.
 
 
 @pytest.mark.parametrize(
@@ -364,5 +367,46 @@ async def test_with_tasks_disabled_calls_still_need_a_bearer(tls: TlsFiles) -> N
     ):
         with pytest.raises(MCPError) as call:
             await mcp.session.call_tool(TOOL, {"ticket": TICKET})
+    assert call.value.code == INVALID_REQUEST
+    assert script.calls == []
+
+
+# Client certificates: with a client CA on the MCP listener, a certificate entry granted wait.call is the gateway.
+
+
+@pytest.fixture
+def certs(tls: TlsFiles, tmp_path: Path) -> dict[str, ClientCert]:
+    return {name: client_cert(tls.authority, tmp_path, name) for name in ("gateway-cert", "stranger")}
+
+
+def _mtls(certs: dict[str, ClientCert]) -> Mtls:
+    entry = RegistryEntryView(
+        CallerName("gateway-cert"),
+        None,
+        client_cert_sha256=certs["gateway-cert"].sha256,
+        grants=frozenset({Method.WAIT_CALL}),
+    )
+    return Mtls([entry])  # the stranger's certificate is signed by the same CA but named by no entry
+
+
+async def test_a_certificate_entry_granted_wait_call_is_served(tls: TlsFiles, certs: dict[str, ClientCert]) -> None:
+    script = Script(open_wait=[WAIT], reports={WAIT: [report(WaitState.APPROVED)]})
+    async with wait_server(script, tls, mtls=_mtls(certs)) as running:
+        headers = {PRINCIPAL_HEADER: "agent-1"}
+        async with client(running, headers=headers, cert=certs["gateway-cert"]) as mcp:
+            result = await mcp.session.call_tool(TOOL, {"ticket": TICKET})
+    assert _text(result) == APPROVED_WORDS
+    assert result.structured_content == {"state": "approved"}
+
+
+async def test_an_unregistered_certificate_is_refused(tls: TlsFiles, certs: dict[str, ClientCert]) -> None:
+    script = Script(open_wait=[WAIT], reports={WAIT: [report(WaitState.APPROVED)]})
+    async with wait_server(script, tls, mtls=_mtls(certs)) as running:
+        headers = {PRINCIPAL_HEADER: "agent-1"}
+        async with client(running, headers=headers, cert=certs["stranger"]) as mcp:
+            listed = await mcp.list_tools()
+            with pytest.raises(MCPError) as call:
+                await mcp.session.call_tool(TOOL, {"ticket": TICKET})
+    assert [tool.name for tool in listed.tools] == [TOOL]
     assert call.value.code == INVALID_REQUEST
     assert script.calls == []

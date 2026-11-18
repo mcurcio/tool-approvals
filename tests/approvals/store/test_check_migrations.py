@@ -40,6 +40,18 @@ def test_the_packaged_migrations_pass() -> None:
     assert checker.main([]) == 0
 
 
+ANSWERED_AT = checker.VERSIONS / "0002_answered_at.py"
+
+
+def test_answered_at_is_an_expand_migration_and_needs_its_column_nullable(tmp_path: Path) -> None:
+    assert checker.check(ANSWERED_AT) == []
+    source = ANSWERED_AT.read_text()
+    assert source.count("nullable=True") == 1
+    required = tmp_path / ANSWERED_AT.name
+    required.write_text(source.replace("nullable=True", "nullable=False"))
+    assert checker.check(required) != []
+
+
 @pytest.mark.parametrize(
     "upgrade",
     [

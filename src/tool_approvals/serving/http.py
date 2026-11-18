@@ -7,6 +7,7 @@ import socket
 import ssl
 from collections.abc import Awaitable, Callable, Generator, Mapping
 from datetime import timedelta
+from typing import Final
 
 import uvicorn
 from google.protobuf import json_format
@@ -15,10 +16,49 @@ from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse, Response
 from starlette.routing import Route
-from starlette.types import ASGIApp
+from starlette.types import ASGIApp, Receive, Scope, Send
+from uvicorn.protocols.http.h11_impl import H11Protocol
 
 from tool_approvals.config.views import ListenerView
 from tool_approvals.serving.signals import STOP_GRACE
+
+# TLS protocol versions as the ASGI TLS extension numbers them (the TLS wire value).
+_TLS_VERSIONS: Final = {"TLSv1": 0x0301, "TLSv1.1": 0x0302, "TLSv1.2": 0x0303, "TLSv1.3": 0x0304}
+
+
+class _TlsScopeProtocol(H11Protocol):
+    """uvicorn's h11 HTTP protocol that also fills the ASGI TLS extension (`scope["extensions"]["tls"]`) on a TLS
+    connection, so an app can read the client certificate the handshake verified; uvicorn itself exposes none.
+    `client_cert_chain` holds the leaf only (`getpeercert`; the leaf is what a registry entry names);
+    `cipher_suite` is None (Python's ssl names the suite, not its number)."""
+
+    def connection_made(self, transport: asyncio.Transport) -> None:  # type: ignore[override]
+        super().connection_made(transport)
+        tls = _tls_extension(transport)
+        if tls is None:
+            return
+        app = self.app
+
+        async def with_tls(scope: Scope, receive: Receive, send: Send) -> None:
+            extensions = {**(scope.get("extensions") or {}), "tls": tls}
+            await app({**scope, "extensions": extensions}, receive, send)
+
+        self.app = with_tls
+
+
+def _tls_extension(transport: asyncio.Transport) -> dict[str, object] | None:
+    """The ASGI TLS extension for a connection whose handshake has finished, or None on a plaintext one."""
+    ssl_object = transport.get_extra_info("ssl_object")
+    if not isinstance(ssl_object, ssl.SSLObject):
+        return None
+    leaf = ssl_object.getpeercert(binary_form=True)
+    version = ssl_object.version()
+    return {
+        "server_cert": None,
+        "client_cert_chain": [] if leaf is None else [ssl.DER_cert_to_PEM_cert(leaf)],
+        "tls_version": None if version is None else _TLS_VERSIONS.get(version),
+        "cipher_suite": None,
+    }
 
 
 class _Server(uvicorn.Server):
@@ -39,19 +79,22 @@ class _Server(uvicorn.Server):
 async def serve_asgi(app: ASGIApp, listener: ListenerView, stop: asyncio.Event, grace: timedelta = STOP_GRACE) -> None:
     """Serve `app` with uvicorn on `listener` (TLS from its view) until `stop` is set, then give in-flight
     requests `grace` to finish and cut whatever is still connected; installs no signal handlers of its own
-    (stop_on_signals owns them)."""
+    (stop_on_signals owns them). HTTP only: a WebSocket upgrade request is served as plain HTTP."""
     tls = listener.tls
     config = uvicorn.Config(
         app,
         host=listener.host,
         port=listener.port,
         log_config=None,  # the process's logging stays its own
+        http=_TlsScopeProtocol,
+        # No route speaks WebSocket, and uvicorn's WebSocket protocols would never see the TLS extension.
+        ws="none",
         server_header=False,
         ssl_certfile=None if tls is None else tls.cert,
         ssl_keyfile=None if tls is None else tls.key,
         ssl_ca_certs=None if tls is None or tls.client_ca is None else str(tls.client_ca),
         ssl_cert_reqs=ssl.CERT_NONE if tls is None or tls.client_ca is None else ssl.CERT_REQUIRED,
-        timeout_graceful_shutdown=max(1, round(grace.total_seconds())),  # whole seconds only  # whole seconds only
+        timeout_graceful_shutdown=max(1, round(grace.total_seconds())),  # whole seconds only
     )
     server = _Server(config)
 

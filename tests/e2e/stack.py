@@ -1,17 +1,20 @@
 """The e2e stack (compose): Postgres, migrate, Approvals, gate and wait from this commit's image, agentgateway,
-Envoy and the echo tool; the scripted IdP on the host. What S1.7's tracer and conformance cases drive.
+Envoy and the echo tool; the scripted IdP on the host. What the tracer and the conformance cases drive: each
+gateway, and a plain Check API caller over JSON and over gRPC (`CheckApiGateway`).
 
 `stack(tmp)` renders every file the containers read into `tmp` (one service configuration, a test CA and its
-certificate, the registry's bearers, the agents' key set, both gateway configurations), runs compose.yaml as its
-own project and tears it down. The gateways reach the gate's hooks through host relays (`SlowRelay`), so
-`GateControl.slow` can hold the gate's answers back; agentgateway's ext_mcp hop passes a recorder first
-(`HookRecorder`), so a case can read what the gate is sent. The image is $TOOL_APPROVALS_E2E_IMAGE, never pulled.
+certificate, the registry's bearers, the agents' key set, both gateway configurations, the ports compose
+publishes), runs compose.yaml as its own project and tears it down. The gateways reach the gate's hooks through
+host relays (`SlowRelay`), so `GateControl.slow` can hold the gate's answers back; each gateway's hop passes a
+recorder first (`HookRecorder`: agentgateway's ext_mcp, Envoy's ext_authz), so a case can read what the gate is
+sent. The image is $TOOL_APPROVALS_E2E_IMAGE, never pulled.
 """
 
 import asyncio
 import json
 import os
 import secrets
+import ssl
 import sys
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
@@ -20,12 +23,15 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Final, Literal, Protocol
 
+import grpc
+import grpc.aio
 import httpx
 import psycopg
 import pytest
+from google.protobuf import json_format
 
 from tests.approvals.desk.driver import DeskPerson
-from tests.conformance.gateways import GatewayUnderTest
+from tests.conformance.gateways import CheckApiGateway, GatewayUnderTest
 from tests.e2e import agentgateway, envoy
 from tests.e2e.agents import AUDIENCE, ISSUER, AgentKeys
 from tests.e2e.clients import HttpMcpGateway
@@ -37,15 +43,21 @@ from tests.fixtures.echo_tool import EchoTool
 from tests.fixtures.oidc_provider import ScriptedIdp, SignInScript
 from tests.fixtures.ports import free_port
 from tool_approvals.auth.registry import issue_bearer
+from tool_approvals.contract.check.v1 import check_pb2, check_pb2_grpc
 from tool_approvals.kernel.methods import Method
 
 IMAGE_ENV: Final = "TOOL_APPROVALS_E2E_IMAGE"
 COMPOSE_FILE: Final = Path(__file__).with_name("compose.yaml")
+PORTS_FILE: Final = "ports.yaml"  # under E2E_DIR: the compose file over COMPOSE_FILE that publishes PUBLISHED
 TOOL_SERVERS: Final = ("files", "notes")  # echo tool routes behind both gateways
 WAIT_SERVER: Final = "approvals-wait"  # wait_route.server
 PRINCIPAL_HEADER: Final = "x-approvals-principal"
 PRINCIPAL_KEY: Final = "principal"  # gate.ext_mcp.principal_key
 SERVER_KEY: Final = "server"  # gate.ext_authz.server_key
+# The one gateway attribute the stack maps (conformance case 12): the attested principal again, under another name
+# and from its own source in each mapping, so a rule can match on it. Every gateway attests it on every call.
+CALLER_ATTRIBUTE: Final = "caller"
+ATTRIBUTE_GATED: Final = "-attribute-gated"  # a principal ending so needs approval on TOOL_SERVERS[1] (`notes`)
 DRAIN: Final = "1s"  # each service's stop drain: no load balancer to move away here, so the shortest there is
 # gate.ext_authz.hook_timeout, and Envoy's raised timeout: agentgateway's own fixed 10 s for its processors, so a
 # gate slower than both hooks needs one delay. Above the gate's check budget (5 s), as `config check` demands.
@@ -62,6 +74,7 @@ APPROVER_GROUP: Final = "approvers"
 APPROVER: Final = "approver-1"  # the IdP subject the desk driver signs in as
 # The container side of every port the compose file names.
 GATE_CHECK_JSON_PORT: Final = 8443
+GATE_CHECK_GRPC_PORT: Final = 9446
 GATE_EXT_MCP_PORT: Final = 9444
 GATE_EXT_AUTHZ_PORT: Final = 9445
 WAIT_MCP_PORT: Final = 8443
@@ -70,6 +83,16 @@ APPROVALS_DESK_PORT: Final = 8080
 HEALTH_PORT: Final = 8081
 ECHO_PORT: Final = 8080
 POSTGRES_PORT: Final = 5432
+# Every container port the host reaches, by compose service, each on 127.0.0.1 at a port Docker picks: the one list
+# compose publishes (render writes it as PORTS_FILE; compose.yaml publishes nothing itself) and Compose.port answers
+# from, so a port the harness dials cannot go unpublished. The desk is published apart, on its fixed public port.
+PUBLISHED: Final[Mapping[str, tuple[int, ...]]] = {
+    "postgres": (POSTGRES_PORT,),
+    "gate": (GATE_CHECK_JSON_PORT, GATE_CHECK_GRPC_PORT, GATE_EXT_MCP_PORT, GATE_EXT_AUTHZ_PORT),
+    "echo": (ECHO_PORT,),
+    "agentgateway": (agentgateway.PORT, agentgateway.READINESS_PORT),
+    "envoy": (envoy.PORT, envoy.ADMIN_PORT),
+}
 _HOST: Final = "host.docker.internal"  # the host, as the containers reach it: the relays and the recorder
 _HOSTS: Final = ("gate", "wait", "approvals", _HOST, "localhost", "127.0.0.1")
 _READY_TIMEOUT_S: Final = 60.0
@@ -105,7 +128,7 @@ class StoreProbe(Protocol):
 
 class HookProbe(Protocol):
     def received(self) -> list[HookCall]:
-        """Every call agentgateway made to the gate's ext_mcp hook, in order."""
+        """Every call the gateway made to the gate's hook, in order."""
         ...
 
 
@@ -130,6 +153,7 @@ class Stack:
     gate: GateControl
     ca: Path  # the test CA every TLS listener of the stack chains to (a plain HTTPS Check API caller trusts it)
     ext_mcp_hook: HookProbe
+    ext_authz_hook: HookProbe  # every call Envoy made to the gate's ext_authz hook
     agents: AgentKeys  # the agents' identity provider: a token for any principal, or one attesting none
 
 
@@ -138,15 +162,17 @@ class ComposeError(RuntimeError):
 
 
 class Compose:
-    """compose.yaml as one project of its own."""
+    """compose.yaml, with the rendered PORTS_FILE over it, as one project of its own."""
 
-    def __init__(self, directory: Path, image: str, desk_port: int) -> None:
+    def __init__(self, directory: Path, image: str) -> None:
         self.project = f"ta-e2e-{secrets.token_hex(4)}"
-        self._env = {**os.environ, IMAGE_ENV: image, "E2E_DIR": str(directory), "DESK_PORT": str(desk_port)}
+        self._files = (str(COMPOSE_FILE), str(directory / PORTS_FILE))
+        self._env = {**os.environ, IMAGE_ENV: image, "E2E_DIR": str(directory)}
 
     async def run(self, *args: str) -> str:
         """`docker compose <args>`'s output; ComposeError (with the output) on a non-zero exit."""
-        command = ("docker", "compose", "--project-name", self.project, "--file", str(COMPOSE_FILE), *args)
+        files = [option for file in self._files for option in ("--file", file)]
+        command = ("docker", "compose", "--project-name", self.project, *files, *args)
         process = await asyncio.create_subprocess_exec(
             *command, env=self._env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
         )
@@ -161,6 +187,9 @@ class Compose:
         await self.run("up", "--detach", "--wait", "--wait-timeout", str(int(_READY_TIMEOUT_S)), *services)
 
     async def port(self, service: str, container_port: int) -> int:
+        """The host port `service`'s `container_port` is published on; ComposeError for a port PUBLISHED lacks."""
+        if container_port not in PUBLISHED.get(service, ()):
+            raise ComposeError(f"{service}:{container_port} is not in PUBLISHED, so compose does not publish it")
         published = (await self.run("port", service, str(container_port))).strip()
         return int(published.rpartition(":")[2])
 
@@ -251,7 +280,11 @@ def render(  # noqa: PLR0913 (every setting a case varies)
     agw = agentgateway.config(
         servers={name: f"http://echo:{ECHO_PORT}{envoy.mcp_path(name)}" for name in TOOL_SERVERS},
         agents=agents_jwt,
-        guardrail=(Hook(*ext_mcp, ca_file=ca, bearer=hook_bearer), PRINCIPAL_KEY) if guardrails else None,
+        guardrail=(
+            (Hook(*ext_mcp, ca_file=ca, bearer=hook_bearer), PRINCIPAL_KEY, {CALLER_ATTRIBUTE: "jwt.sub"})
+            if guardrails
+            else None
+        ),
         wait=(
             WaitTarget(
                 WAIT_SERVER,
@@ -273,6 +306,7 @@ def render(  # noqa: PLR0913 (every setting a case varies)
         else None,
     )
     (mounted / "envoy.json").write_text(json.dumps(env, indent=2))
+    (directory / PORTS_FILE).write_text(json.dumps(_ports(desk_port), indent=2))
 
     # The containers run as other users: everything readable, the record directory writable.
     for path in mounted.rglob("*"):
@@ -294,6 +328,15 @@ def render(  # noqa: PLR0913 (every setting a case varies)
         cert=tls.cert,
         key=tls.key,
     )
+
+
+def _ports(desk_port: int) -> dict[str, object]:
+    """PORTS_FILE: PUBLISHED, and the desk on `desk_port` (the host port its public URL names)."""
+    services: dict[str, object] = {
+        name: {"ports": [f"127.0.0.1::{port}" for port in ports]} for name, ports in PUBLISHED.items()
+    }
+    services["approvals"] = {"ports": [f"127.0.0.1:{desk_port}:{APPROVALS_DESK_PORT}"]}
+    return {"services": services}
 
 
 def _service_config(
@@ -335,11 +378,16 @@ def _service_config(
                 "ca": "/e2e/tls/ca.pem",
                 "credential": secret("gate-approvals-bearer"),
             },
-            "check_api": {"json": listener(GATE_CHECK_JSON_PORT), "exposed_wait_tool": exposed_wait_tool},
+            "check_api": {
+                "grpc": listener(GATE_CHECK_GRPC_PORT),
+                "json": listener(GATE_CHECK_JSON_PORT),
+                "exposed_wait_tool": exposed_wait_tool,
+            },
             "ext_mcp": {
                 "listener": listener(GATE_EXT_MCP_PORT),
                 "principal_key": PRINCIPAL_KEY,
                 "exposed_wait_tool": exposed_wait_tool,
+                "attributes": {CALLER_ATTRIBUTE: [CALLER_ATTRIBUTE]},
             },
             "ext_authz": {
                 "listener": listener(GATE_EXT_AUTHZ_PORT),
@@ -347,10 +395,18 @@ def _service_config(
                 "principal_path": [envoy.JWT_FILTER, envoy.JWT_PAYLOAD_KEY, "sub"],
                 "server_key": SERVER_KEY,
                 "exposed_wait_tool": exposed_wait_tool,
+                "attributes": {CALLER_ATTRIBUTE: {"metadata": [envoy.JWT_FILTER, envoy.JWT_PAYLOAD_KEY, "sub"]}},
             },
             "policy": {
                 "kind": "rules",
-                "rules": [{"server": "files", "tool": GATED_TOOL, "require": REQUIREMENT}],
+                "rules": [
+                    {"server": TOOL_SERVERS[0], "tool": GATED_TOOL, "require": REQUIREMENT},
+                    {
+                        "server": TOOL_SERVERS[1],
+                        "attributes": {CALLER_ATTRIBUTE: f"*{ATTRIBUTE_GATED}"},
+                        "require": REQUIREMENT,
+                    },
+                ],
                 "default": "none",
             },
         },
@@ -420,7 +476,7 @@ def image() -> str:
 @asynccontextmanager
 async def project(rendered: Rendered) -> AsyncIterator[Compose]:
     """compose.yaml over `rendered`, torn down on exit; its logs on stderr when the block fails."""
-    compose = Compose(rendered.directory, image(), rendered.desk_port)
+    compose = Compose(rendered.directory, image())
     try:
         yield compose
     except BaseException:
@@ -536,22 +592,78 @@ def _published_gate(published: Mapping[int, int], container_port: int) -> Callab
     return lambda: ("127.0.0.1", published[container_port])
 
 
+def _relay(port: int) -> Callable[[], tuple[str, int]]:
+    return lambda: ("127.0.0.1", port)
+
+
+def check_api_gateways(  # noqa: PLR0913 (one caller's whole addressing)
+    *, json_url: str, grpc_target: str, bearer: str, ca: Path, echo_url: str, echo: EchoTool
+) -> tuple[CheckApiGateway, CheckApiGateway]:
+    """A plain Check API caller over JSON (POST `json_url`) and one over gRPC (`grpc_target`), both over TLS with
+    the `check-client` bearer, each attesting the principal as CALLER_ATTRIBUTE too, as the gateways do, and
+    forwarding a passed call to the echo tool at `echo_url`."""
+    certificate = ca.read_bytes()
+
+    def metadata(with_bearer: bool) -> dict[str, str]:
+        return {"authorization": f"Bearer {bearer}"} if with_bearer else {}
+
+    async def over_json(request: check_pb2.CheckRequest, with_bearer: bool) -> check_pb2.CheckResponse | None:
+        verify = ssl.create_default_context(cafile=ca)
+        async with httpx.AsyncClient(verify=verify, timeout=30.0) as http:
+            try:
+                response = await http.post(
+                    json_url,
+                    content=json_format.MessageToJson(request),
+                    headers={**metadata(with_bearer), "content-type": "application/json"},
+                )
+            except httpx.TransportError:
+                return None
+        if response.status_code != 200:
+            return None
+        return json_format.Parse(response.text, check_pb2.CheckResponse())
+
+    async def over_grpc(request: check_pb2.CheckRequest, with_bearer: bool) -> check_pb2.CheckResponse | None:
+        credentials = grpc.ssl_channel_credentials(root_certificates=certificate)
+        options = [("grpc.ssl_target_name_override", "localhost")]
+        async with grpc.aio.secure_channel(grpc_target, credentials, options=options) as channel:
+            try:
+                answer: check_pb2.CheckResponse = await check_pb2_grpc.CheckServiceStub(channel).Check(
+                    request, metadata=tuple(metadata(with_bearer).items()), timeout=30.0
+                )
+            except grpc.aio.AioRpcError:
+                return None
+        return answer
+
+    def caller(binding: Literal["json", "grpc"]) -> CheckApiGateway:
+        return CheckApiGateway(
+            binding,
+            ask=over_json if binding == "json" else over_grpc,
+            tool_url_of=lambda server: f"{echo_url}{envoy.mcp_path(server)}",
+            attributes_of=lambda principal: {CALLER_ATTRIBUTE: principal},
+            received=lambda: len(echo.received()),
+        )
+
+    return caller("json"), caller("grpc")
+
+
 @asynccontextmanager
 async def _stack(tmp: Path, max_hold: timedelta, wait_request_timeout: timedelta) -> AsyncIterator[Stack]:
     published = {GATE_EXT_MCP_PORT: 0, GATE_EXT_AUTHZ_PORT: 0}  # filled in once the gate runs
     relays = {port: SlowRelay(_published_gate(published, port)) for port in published}
     relay_ports = {port: free_port() for port in published}
-    recorder_port = free_port()
+    recorder_ports = {port: free_port() for port in published}  # each gateway dials its recorder, then the relay
     rendered = render(
         tmp,
         guardrails=True,
-        ext_mcp=(_HOST, recorder_port),
-        ext_authz=(_HOST, relay_ports[GATE_EXT_AUTHZ_PORT]),
+        ext_mcp=(_HOST, recorder_ports[GATE_EXT_MCP_PORT]),
+        ext_authz=(_HOST, recorder_ports[GATE_EXT_AUTHZ_PORT]),
         max_hold=max_hold,
         wait_request_timeout=wait_request_timeout,
     )
-    ext_mcp_relay = relay_ports[GATE_EXT_MCP_PORT]
-    recorder = HookRecorder(lambda: ("127.0.0.1", ext_mcp_relay), rendered.cert, rendered.key, rendered.ca, _HOST)
+    recorders = {
+        port: HookRecorder(_relay(relay_ports[port]), rendered.cert, rendered.key, rendered.ca, _HOST)
+        for port in published
+    }
     echo = EchoTool(rendered.records)
     idp = ScriptedIdp(
         idp_issuer(rendered.idp_port),
@@ -561,7 +673,8 @@ async def _stack(tmp: Path, max_hold: timedelta, wait_request_timeout: timedelta
     )
     for port, relay in relays.items():
         await relay.start(relay_ports[port])
-    await recorder.start(recorder_port)
+    for port, recorder in recorders.items():
+        await recorder.start(recorder_ports[port])
     try:
         # Every interface: the Approvals container reaches the host through the bridge's gateway address.
         async with idp.serving("0.0.0.0", rendered.idp_port), project(rendered) as compose:  # noqa: S104
@@ -569,20 +682,33 @@ async def _stack(tmp: Path, max_hold: timedelta, wait_request_timeout: timedelta
             control = _GateControl(compose, list(relays.values()), published)
             await control.refresh()
             await compose.up("agentgateway", "envoy")
+            check_api_url = f"https://127.0.0.1:{await compose.port('gate', GATE_CHECK_JSON_PORT)}/v1/check"
+            check_api_grpc = f"127.0.0.1:{await compose.port('gate', GATE_CHECK_GRPC_PORT)}"
+            echo_url = f"http://127.0.0.1:{await compose.port('echo', ECHO_PORT)}"
+            callers = check_api_gateways(
+                json_url=check_api_url,
+                grpc_target=check_api_grpc,
+                bearer=rendered.check_api_bearer,
+                ca=rendered.ca,
+                echo_url=echo_url,
+                echo=echo,
+            )
             yield Stack(
-                gateways=await gateways(compose, rendered, echo),
-                check_api_url=f"https://127.0.0.1:{await compose.port('gate', GATE_CHECK_JSON_PORT)}/v1/check",
+                gateways={**await gateways(compose, rendered, echo), **{caller.name: caller for caller in callers}},
+                check_api_url=check_api_url,
                 check_api_bearer=rendered.check_api_bearer,
                 echo=echo,
                 desk=_Desk(idp, desk_url(rendered.desk_port)),
                 store=_PostgresStore(await compose.port("postgres", POSTGRES_PORT), rendered.postgres_password),
                 gate=control,
                 ca=rendered.ca,
-                ext_mcp_hook=recorder,
+                ext_mcp_hook=recorders[GATE_EXT_MCP_PORT],
+                ext_authz_hook=recorders[GATE_EXT_AUTHZ_PORT],
                 agents=rendered.agents,
             )
     finally:
-        await recorder.close()
+        for recorder in recorders.values():
+            await recorder.close()
         for relay in relays.values():
             await relay.close()
 

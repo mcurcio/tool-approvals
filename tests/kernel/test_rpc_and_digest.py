@@ -4,7 +4,7 @@ import hashlib
 import json
 
 import pytest
-from hypothesis import given
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from tool_approvals.kernel.calls import (
@@ -66,6 +66,59 @@ def test_the_params_span_is_the_exact_bytes_a_gateway_forwards(
     assert params == params_json.encode()
     # The span hands parse_call the same call the params alone would give.
     assert parse_call(PRINCIPAL, SERVER, params) == parse_call(PRINCIPAL, SERVER, params_json.encode())
+
+
+insignificant = st.text(st.sampled_from(" \t\n\r"), max_size=3)  # RFC 8259 §2's whitespace, any run of it
+scalars = st.none() | st.booleans() | st.integers() | st.floats(allow_nan=False, allow_infinity=False) | texts
+json_values = st.recursive(
+    scalars,
+    lambda inner: st.lists(inner, max_size=3) | st.dictionaries(texts, inner, max_size=3),
+    max_leaves=8,
+)
+
+
+@st.composite
+def spelled(draw: st.DrawFn, value: object) -> str:
+    """`value` as JSON text, with insignificant whitespace drawn around every token and members in a drawn order."""
+
+    def ws() -> str:
+        return draw(insignificant)
+
+    if isinstance(value, dict):
+        items = draw(st.permutations(list(value.items())))
+        members = [f"{ws()}{json.dumps(key)}{ws()}:{ws()}{draw(spelled(item))}{ws()}" for key, item in items]
+        return "{" + (",".join(members) if members else ws()) + "}"
+    if isinstance(value, list):
+        elements = [f"{ws()}{draw(spelled(item))}{ws()}" for item in value]
+        return "[" + (",".join(elements) if elements else ws()) + "]"
+    return json.dumps(value, ensure_ascii=draw(st.booleans()))
+
+
+@st.composite
+def spelled_params(draw: st.DrawFn) -> str:
+    params: dict[str, object] = {"name": draw(texts.filter(bool))}
+    if draw(st.booleans()):
+        params["arguments"] = draw(st.dictionaries(texts, json_values, max_size=4))
+    return draw(spelled(params))
+
+
+@settings(max_examples=250)
+@given(params=spelled_params(), around=st.lists(insignificant, min_size=9, max_size=9), order=st.permutations(range(4)))
+def test_the_params_span_is_exact_under_any_whitespace_and_member_order(
+    params: str, around: list[str], order: list[int]
+) -> None:
+    """module.md's property: whatever insignificant whitespace and member order the params and the envelope use,
+    the span is exactly the params bytes as sent."""
+    members = [
+        f'"jsonrpc"{around[0]}:{around[1]}"2.0"',
+        f'"id"{around[2]}:{around[3]}7',
+        f'"method"{around[4]}:{around[5]}"tools/call"',
+        f'"params"{around[6]}:{around[7]}{params}',
+    ]
+    body = ("{" + around[8] + ",".join(members[index] for index in order) + around[8] + "}").encode()
+    request = _read(body)
+    assert request.params is not None
+    assert body[request.params.start : request.params.end] == params.encode()
 
 
 def test_a_request_without_params_has_no_span() -> None:

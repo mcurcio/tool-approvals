@@ -25,8 +25,8 @@ The person answering sees `reason` and `work_ref` as quoted text. The first word
 later ones are ignored, so a review is never changed under the person reading it.
 
 **Who may call it.** `initialize` and `tools/list` are open, so a gateway can list the tool. A `tools/call` or
-`tasks/get` needs a registry bearer granted `wait.call` (JSON-RPC error `-32600` without one): the gateway's,
-not the agent's. The principal is read only from `wait_route.principal_header`, which the gate sets on the wait
+`tasks/get` needs a registry credential granted `wait.call` (JSON-RPC error `-32600` without one): the
+gateway's bearer, or its client certificate on a `wait.listeners.mcp` with `tls.client_ca`; never the agent's. The principal is read only from `wait_route.principal_header`, which the gate sets on the wait
 route ([agentgateway](agentgateway.md)); without it no wait opens. A principal can wait only on its own tickets.
 
 ## A held call

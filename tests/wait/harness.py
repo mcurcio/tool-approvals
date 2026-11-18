@@ -4,7 +4,7 @@ import asyncio
 import dataclasses
 import hashlib
 import ssl
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final, Literal
@@ -16,7 +16,7 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp_types import CallToolResult, GetTaskRequest, GetTaskRequestParams, Result
 from pydantic import ConfigDict, TypeAdapter
 
-from tests.fixtures.certs import TlsFiles
+from tests.fixtures.certs import ClientCert, TlsFiles
 from tests.fixtures.ports import free_port
 from tests.fixtures.scripted_requests import Script, scripted_requests
 from tool_approvals.config.views import ListenerView, RegistryEntryView, TlsView, WaitRouteView, WaitView
@@ -53,33 +53,47 @@ class Running:
         return f"https://localhost:{self.view.mcp.port}/mcp"
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class Mtls:
+    """The MCP listener asks for client certificates its test CA signed, and the registry also holds `entries`."""
+
+    entries: Sequence[RegistryEntryView]
+
+
 def wait_server(
-    script: Script | None, tls: TlsFiles, *, max_hold: timedelta = timedelta(seconds=20), tasks: bool = True
+    script: Script | None,
+    tls: TlsFiles,
+    *,
+    max_hold: timedelta = timedelta(seconds=20),
+    tasks: bool = True,
+    mtls: Mtls | None = None,
 ) -> AbstractAsyncContextManager[Running]:
     """`serve(view, stop)` on free local ports, its Approvals the scripted server (None: not configured); Wait
-    Tasks served unless `tasks` is False."""
-    return _wait_server(script, tls, max_hold, tasks)
+    Tasks served unless `tasks` is False; client certificates asked for with `mtls`."""
+    return _wait_server(script, tls, max_hold, tasks, mtls)
 
 
 @asynccontextmanager
 async def _wait_server(
-    script: Script | None, tls: TlsFiles, max_hold: timedelta, tasks: bool
+    script: Script | None, tls: TlsFiles, max_hold: timedelta, tasks: bool, mtls: Mtls | None
 ) -> AsyncIterator[Running]:
     if script is None:
-        async with _running(None, tls, max_hold, tasks) as running:
+        async with _running(None, tls, max_hold, tasks, mtls) as running:
             yield running
         return
     async with (
         scripted_requests(script, tls, APPROVALS_BEARER) as approvals,
-        _running(approvals, tls, max_hold, tasks) as running,
+        _running(approvals, tls, max_hold, tasks, mtls) as running,
     ):
         yield running
 
 
 @asynccontextmanager
-async def _running(approvals: Any, tls: TlsFiles, max_hold: timedelta, tasks: bool) -> AsyncIterator[Running]:
+async def _running(
+    approvals: Any, tls: TlsFiles, max_hold: timedelta, tasks: bool, mtls: Mtls | None
+) -> AsyncIterator[Running]:
     view = WaitView(
-        mcp=ListenerView("localhost", free_port(), TlsView(tls.cert, tls.key, None)),
+        mcp=ListenerView("localhost", free_port(), TlsView(tls.cert, tls.key, None if mtls is None else tls.ca)),
         health=ListenerView("localhost", free_port(), None),
         drain=timedelta(0),
         tool=TOOL,
@@ -91,6 +105,7 @@ async def _running(approvals: Any, tls: TlsFiles, max_hold: timedelta, tasks: bo
         registry=(
             RegistryEntryView(CallerName("gateway"), _sha256(GATEWAY_BEARER), frozenset({Method.WAIT_CALL})),
             RegistryEntryView(CallerName("operator"), _sha256(UNGRANTED_BEARER), frozenset({Method.CHECK})),
+            *(() if mtls is None else mtls.entries),
         ),
     )
     stop = asyncio.Event()
@@ -163,18 +178,24 @@ def client(
     mode: str = MODERN,
     tasks: bool = False,
     headers: Mapping[str, str] | None = None,
+    cert: ClientCert | None = None,
 ) -> AbstractAsyncContextManager[Client]:
     """A real MCP client over Streamable HTTP with TLS; by default with the gateway's bearer and an attested
-    principal, as the gateway's wait route sends them."""
-    return _client(running, mode, tasks, headers)
+    principal, as the gateway's wait route sends them; presenting `cert` when given."""
+    return _client(running, mode, tasks, headers, cert)
 
 
 @asynccontextmanager
-async def _client(running: Running, mode: str, tasks: bool, headers: Mapping[str, str] | None) -> AsyncIterator[Client]:
+async def _client(
+    running: Running, mode: str, tasks: bool, headers: Mapping[str, str] | None, cert: ClientCert | None
+) -> AsyncIterator[Client]:
     sent = {"authorization": f"Bearer {GATEWAY_BEARER}", PRINCIPAL_HEADER: "agent-1"} if headers is None else headers
+    context = ssl.create_default_context(cafile=running.tls.ca)
+    if cert is not None:
+        context.load_cert_chain(cert.cert, cert.key)
     async with httpx2.AsyncClient(
         headers=dict(sent),
-        verify=ssl.create_default_context(cafile=running.tls.ca),
+        verify=context,
         timeout=httpx2.Timeout(30, read=60),
     ) as http:
         transport = streamable_http_client(running.url, http_client=http)

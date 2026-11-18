@@ -1,4 +1,5 @@
-"""GrpcAuth on a real TLS gRPC server: the bearer, the grant and the transport, for unary and streaming methods."""
+"""GrpcAuth on a real TLS gRPC server: the bearer or client certificate, the grant and the transport, for unary and
+streaming methods."""
 
 import asyncio
 import hashlib
@@ -10,7 +11,7 @@ import grpc
 import grpc.aio
 import pytest
 
-from tests.fixtures.certs import TlsFiles, tls_files
+from tests.fixtures.certs import ClientCert, TlsFiles, client_cert, tls_files
 from tests.fixtures.ports import free_port
 from tool_approvals.auth.grpc_auth import GrpcAuth, current_caller
 from tool_approvals.auth.registry import Registry, issue_bearer
@@ -187,5 +188,113 @@ async def test_a_server_the_client_does_not_trust_is_refused(served: Served, tmp
         with pytest.raises(grpc.aio.AioRpcError) as refused:
             await check_pb2_grpc.CheckServiceStub(channel).Check(
                 check_pb2.CheckRequest(), metadata=_auth(served.bearers["checker"]), timeout=5
+            )
+    assert refused.value.code() is grpc.StatusCode.UNAVAILABLE
+
+
+# Client certificates: a listener with a client CA, and registry entries naming certificates it signed.
+
+
+class MtlsServed:
+    def __init__(self, tls: TlsFiles, port: int, certs: dict[str, ClientCert], bearer: str) -> None:
+        self.tls = tls
+        self.port = port
+        self.certs = certs
+        self.bearer = bearer
+
+    def channel(self, presenting: str) -> grpc.aio.Channel:
+        cert = self.certs[presenting]
+        credentials = grpc.ssl_channel_credentials(
+            root_certificates=self.tls.ca.read_bytes(),
+            private_key=cert.key.read_bytes(),
+            certificate_chain=cert.cert.read_bytes(),
+        )
+        return grpc.aio.secure_channel(f"localhost:{self.port}", credentials)
+
+
+@pytest.fixture
+async def mtls(tmp_path: Path) -> AsyncIterator[MtlsServed]:
+    tls = tls_files(tmp_path, ["localhost"])
+    certs = {name: client_cert(tls.authority, tmp_path, name) for name in ("gateway", "waiter", "stranger")}
+    bearer = issue_bearer()[0]
+    grants = {"gateway": {Method.CHECK}, "waiter": {Method.AWAIT_OUTCOME}}  # the stranger is in no entry
+    registry = Registry(
+        [
+            *(
+                RegistryEntryView(
+                    CallerName(name), None, client_cert_sha256=certs[name].sha256, grants=frozenset(granted)
+                )
+                for name, granted in grants.items()
+            ),
+            RegistryEntryView(CallerName("hook"), hashlib.sha256(bearer.encode()).digest(), frozenset({Method.CHECK})),
+        ]
+    )
+    port = free_port()
+    server = grpc_server(
+        ListenerView("localhost", port, TlsView(tls.cert, tls.key, tls.ca)),
+        [GrpcAuth(registry, {CHECK: Method.CHECK, AWAIT: Method.AWAIT_OUTCOME})],
+    )
+    check_pb2_grpc.add_CheckServiceServicer_to_server(_Check(), server)
+    requests_pb2_grpc.add_ApprovalRequestsServiceServicer_to_server(_Requests(), server)
+    await server.start()
+    try:
+        yield MtlsServed(tls, port, certs, bearer)
+    finally:
+        await server.stop(None)
+
+
+async def _check(served: MtlsServed, presenting: str, metadata: tuple[tuple[str, str], ...] = ()) -> str:
+    async with served.channel(presenting) as channel:
+        reply = await check_pb2_grpc.CheckServiceStub(channel).Check(check_pb2.CheckRequest(), metadata=metadata)
+    return reply.agent_text
+
+
+async def test_a_certificate_entry_granted_check_is_served_as_itself(mtls: MtlsServed) -> None:
+    assert await _check(mtls, "gateway") == "gateway"
+
+
+async def test_a_certificate_entry_streams_as_itself(mtls: MtlsServed) -> None:
+    async with mtls.channel("waiter") as channel:
+        stream = requests_pb2_grpc.ApprovalRequestsServiceStub(channel).AwaitOutcome(requests_pb2.AwaitOutcomeRequest())
+        comments = [reply.refused.comment async for reply in stream]
+    assert comments == ["waiter"] * 3
+
+
+async def test_a_certificate_entry_without_the_grant_is_denied(mtls: MtlsServed) -> None:
+    with pytest.raises(grpc.aio.AioRpcError) as refused:
+        await _check(mtls, "waiter")
+    assert refused.value.code() is grpc.StatusCode.PERMISSION_DENIED
+
+
+async def test_an_unregistered_certificate_is_unauthenticated(mtls: MtlsServed) -> None:
+    with pytest.raises(grpc.aio.AioRpcError) as refused:
+        await _check(mtls, "stranger")
+    assert refused.value.code() is grpc.StatusCode.UNAUTHENTICATED
+
+
+async def test_a_bearer_with_an_unregistered_certificate_is_the_bearers_caller(mtls: MtlsServed) -> None:
+    assert await _check(mtls, "stranger", _auth(mtls.bearer)) == "hook"
+
+
+async def test_a_bearer_with_another_entrys_certificate_is_unauthenticated(mtls: MtlsServed) -> None:
+    with pytest.raises(grpc.aio.AioRpcError) as refused:
+        await _check(mtls, "gateway", _auth(mtls.bearer))
+    assert refused.value.code() is grpc.StatusCode.UNAUTHENTICATED
+
+
+async def test_a_repeated_authorization_is_unauthenticated_even_with_a_registered_certificate(
+    mtls: MtlsServed,
+) -> None:
+    with pytest.raises(grpc.aio.AioRpcError) as refused:
+        await _check(mtls, "gateway", (*_auth(mtls.bearer), *_auth(mtls.bearer)))
+    assert refused.value.code() is grpc.StatusCode.UNAUTHENTICATED
+
+
+async def test_a_listener_with_a_client_ca_refuses_a_caller_without_a_certificate(mtls: MtlsServed) -> None:
+    credentials = grpc.ssl_channel_credentials(root_certificates=mtls.tls.ca.read_bytes())
+    async with grpc.aio.secure_channel(f"localhost:{mtls.port}", credentials) as channel:
+        with pytest.raises(grpc.aio.AioRpcError) as refused:
+            await check_pb2_grpc.CheckServiceStub(channel).Check(
+                check_pb2.CheckRequest(), metadata=_auth(mtls.bearer), timeout=5
             )
     assert refused.value.code() is grpc.StatusCode.UNAVAILABLE

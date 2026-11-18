@@ -74,7 +74,75 @@
 
 - name: a bearer hash that is not 64 hex digits
   set: { registry.0.credential.bearer_sha256: "sha256:1f0b" }
-  expect: ["registry[0].credential.bearer_sha256: a bearer hash is 64 hex digits"]
+  expect: ["registry[0].credential.bearer_sha256: a SHA-256 is 64 hex digits"]
+
+- name: a client-certificate fingerprint that is not 64 hex digits
+  set:
+    registry.0.credential: { client_cert_sha256: "AB:CD" }
+    gate.check_api.grpc.tls.client_ca: /etc/tool-approvals/gateway-ca.pem
+  expect: ["registry[0].credential.client_cert_sha256: a SHA-256 is 64 hex digits"]
+
+- name: a credential naming both a bearer and a client certificate
+  set:
+    registry.0.credential:
+      bearer_sha256: 1f0b6c6e2a2d4b5f8e9a0c1d2e3f405162738495a6b7c8d9e0f1a2b3c4d5e6f7
+      client_cert_sha256: 5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d
+  expect: ["registry[0].credential: a credential names exactly one of bearer_sha256 or client_cert_sha256"]
+
+- name: a credential naming neither
+  set: { registry.0.credential: { sha256: 1f0b6c6e2a2d4b5f8e9a0c1d2e3f405162738495a6b7c8d9e0f1a2b3c4d5e6f7 } }
+  expect: ["registry[0].credential: a credential names exactly one of bearer_sha256 or client_cert_sha256"]
+
+- name: a credential that is not a mapping
+  set: { registry.0.credential: 1f0b6c6e2a2d4b5f8e9a0c1d2e3f405162738495a6b7c8d9e0f1a2b3c4d5e6f7 }
+  expect: ["registry[0].credential: a credential is {bearer_sha256: HEX} or {client_cert_sha256: HEX}"]
+
+- name: one client certificate on two entries
+  set:
+    registry.0.credential: { client_cert_sha256: 5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d }
+    registry.3.credential: { client_cert_sha256: 5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d }
+    gate.check_api.grpc.tls.client_ca: /etc/tool-approvals/gateway-ca.pem
+    wait.listeners.mcp.tls.client_ca: /etc/tool-approvals/gateway-ca.pem
+  expect: ["registry: one client certificate on two entries (gateway-hook, gateway-wait-route)"]
+
+- name: a client certificate granted a method a gateway does not call
+  set:
+    registry.1.credential: { client_cert_sha256: 5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d }
+    approvals.listeners.requests.tls.client_ca: /etc/tool-approvals/gate-ca.pem
+  expect: ["registry.gate: a client-certificate credential is accepted only for check and wait.call"]
+
+- name: a client certificate granted check and a method a gateway does not call
+  set:
+    registry.0.credential: { client_cert_sha256: 5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d }
+    registry.0.grants: [check, requests.request]
+    gate.check_api.grpc.tls.client_ca: /etc/tool-approvals/gateway-ca.pem
+  expect: ["registry.gateway-hook: a client-certificate credential is accepted only for check and wait.call"]
+
+- name: a client certificate where no listener asks for one
+  set: { registry.0.credential: { client_cert_sha256: 5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d } }
+  expect:
+    - "registry.gateway-hook: a client-certificate credential, but no listener serving its grants asks for client certificates (tls.client_ca)"
+
+- name: a client certificate granted check where only the wait server asks for one
+  set:
+    registry.0.credential: { client_cert_sha256: 5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d }
+    wait.listeners.mcp.tls.client_ca: /etc/tool-approvals/gateway-ca.pem
+  expect:
+    - "registry.gateway-hook: a client-certificate credential, but no listener serving its grants asks for client certificates (tls.client_ca)"
+
+- name: a client certificate granted wait.call where only the gate asks for one
+  set:
+    registry.3.credential: { client_cert_sha256: 5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d }
+    gate.ext_authz.listener.tls.client_ca: /etc/tool-approvals/gateway-ca.pem
+  expect:
+    - "registry.gateway-wait-route: a client-certificate credential, but no listener serving its grants asks for client certificates (tls.client_ca)"
+
+- name: a client certificate where the asking listener has no tls
+  set: { registry.3.credential: { client_cert_sha256: 5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d } }
+  delete: [wait.listeners.mcp.tls]
+  expect:
+    - "registry.gateway-wait-route: a client-certificate credential, but no listener serving its grants asks"
+    - "wait.listeners.mcp: carries registry bearers, so it needs tls"
 
 - name: every registry-authenticated listener without tls, all listed
   delete:
@@ -241,3 +309,45 @@
   command: gate
   env: {}
   expect: ["gate.approvals.credential: the environment variable GATE_APPROVALS_BEARER is unset or empty"]
+
+# ---- gateway attributes: every attribute a rule reads, mapped by every enabled mapping that maps attributes ----
+
+- name: a rule attribute neither gateway mapping maps
+  set: { gate.policy.rules.0.attributes: { region: "north" } }
+  expect:
+    - "gate.policy.rules[0].attributes.region: not mapped by gate.ext_mcp.attributes"
+    - "gate.policy.rules[0].attributes.region: not mapped by gate.ext_authz.attributes"
+
+- name: a rule attribute ext_mcp does not map
+  delete: [gate.ext_mcp.attributes.tenant]
+  expect: ["gate.policy.rules[1].attributes.tenant: not mapped by gate.ext_mcp.attributes"]
+
+- name: a rule attribute ext_authz does not map
+  delete: [gate.ext_authz.attributes.tenant]
+  expect: ["gate.policy.rules[1].attributes.tenant: not mapped by gate.ext_authz.attributes"]
+
+- name: a rule attribute no enabled mapping supplies
+  delete: [gate.check_api, gate.ext_mcp, gate.ext_authz]
+  expect: ["gate.policy.rules[1].attributes.tenant: no enabled mapping supplies it"]
+
+- name: a rule attribute only an unenabled check_api could supply, with ext_mcp not mapping it
+  delete: [gate.check_api, gate.ext_authz, gate.ext_mcp.attributes]
+  expect:
+    - "gate.policy.rules[1].attributes.tenant: not mapped by gate.ext_mcp.attributes"
+    - "gate.policy.rules[1].attributes.tenant: no enabled mapping supplies it"
+
+- name: an ext_authz attribute naming both sources
+  set: { gate.ext_authz.attributes.zone: { metadata: [envoy.filters.http.jwt_authn, zone], context_extension: zone } }
+  expect: ["gate.ext_authz.attributes.zone: an ext_authz attribute names exactly one of metadata or context_extension"]
+
+- name: an ext_authz attribute naming neither source
+  set: { gate.ext_authz.attributes.zone: {} }
+  expect: ["gate.ext_authz.attributes.zone: an ext_authz attribute names exactly one of metadata or context_extension"]
+
+- name: an ext_authz metadata source without a key after the filter name
+  set: { gate.ext_authz.attributes.zone: { metadata: [envoy.filters.http.jwt_authn] } }
+  expect: ["gate.ext_authz.attributes.zone.metadata: Tuple should have at least 2 items"]
+
+- name: an ext_mcp attribute with an empty key path
+  set: { gate.ext_mcp.attributes.tenant: [] }
+  expect: ["gate.ext_mcp.attributes.tenant: Tuple should have at least 1 item"]

@@ -1,5 +1,6 @@
 """domain.approval: the Approval's lifecycle, its answer and claim rules, its waits, and the version on every change."""
 
+import dataclasses
 from dataclasses import replace
 from datetime import datetime, timedelta
 
@@ -36,6 +37,7 @@ from tool_approvals.approvals.domain.approval import (
     EventKind,
     State,
     Wait,
+    _still_meets,
 )
 from tool_approvals.kernel.calls import shown_digest
 from tool_approvals.kernel.names import CallerName, Digest, Ticket
@@ -262,6 +264,125 @@ def test_a_yes_is_not_spent_once_its_group_or_surface_no_longer_counts(current: 
     answer(approval)
     assert approval.claim(current, SCALE, BY_AGENT, NOW, RETENTION) == NotApproved()
     assert approval.state is State.EXPIRED
+
+
+@pytest.mark.parametrize("verdict", [Verdict.APPROVE, Verdict.REFUSE])
+def test_an_answer_keeps_the_moment_it_was_recorded(verdict: Verdict) -> None:
+    approval = opened()
+    at = NOW + timedelta(minutes=5)  # the unit of work's clock, a minute after the approver signed in
+    recorded = answer(approval, verdict, at=at)
+    assert isinstance(recorded, Answer)
+    assert recorded.answered_at == at
+    assert approval.answer is not None
+    assert approval.answer.answered_at == at
+
+
+def without_answered_at(approval: Approval) -> None:
+    """The Approval's yes as a row stored before migration 0002 loads: no answered_at."""
+    assert approval.answer is not None
+    fields = {field.name: getattr(approval.answer, field.name) for field in dataclasses.fields(Answer)}
+    approval.answer = issuer.rebuild(**fields | {"answered_at": None})
+
+
+def test_a_yes_whose_sign_in_was_older_than_the_current_max_age_when_answered_is_not_spent() -> None:
+    """The approver signed in a minute before answering; the requirement now allows 30 seconds."""
+    approval = opened()
+    answer(approval)
+    wait = Wait(b"w" * 32, AGENT, None)  # a wait still live (a yes ends the ones it finds, so placed by hand)
+    approval.waits.append(wait)
+    approval.events.clear()
+    current = replace(HUMAN, max_sign_in_age=timedelta(seconds=30))
+    assert approval.claim(current, SCALE, BY_AGENT, NOW, RETENTION) == NotApproved()
+    assert (approval.state, approval.delete_after) == (State.EXPIRED, NOW + RETENTION)
+    assert kinds(approval) == [(EventKind.EXPIRED, str(REQUIREMENT_ACTOR))]
+    assert wait.outcome is WaitState.EXPIRED
+
+
+def test_a_sign_in_exactly_the_max_age_old_when_answered_is_still_spent() -> None:
+    approval = opened()
+    answer(approval)  # signed in a minute before the answer
+    current = replace(HUMAN, max_sign_in_age=timedelta(minutes=1))
+    assert approval.claim(current, SCALE, BY_AGENT, NOW, RETENTION) == Claimed()
+    assert approval.state is State.USED
+
+
+def test_a_yes_whose_sign_in_moment_is_after_its_answer_is_not_spent() -> None:
+    """A row qualify never saw (another writer, a restore): the sign-in after the answer is a negative age, which
+    R1 refuses at claim by itself."""
+    approval = opened()
+    answer(approval)
+    assert approval.answer is not None
+    assert approval.answer.answered_at is not None
+    fields = {field.name: getattr(approval.answer, field.name) for field in dataclasses.fields(Answer)}
+    late = approval.answer.answered_at + timedelta(seconds=1)
+    approval.answer = issuer.rebuild(**fields | {"sign_in_moment": late})
+    assert not _still_meets(approval.answer, HUMAN, SCALE)
+    approval.events.clear()
+    assert approval.claim(HUMAN, SCALE, BY_AGENT, NOW, RETENTION) == NotApproved()
+    assert approval.state is State.EXPIRED
+    assert kinds(approval) == [(EventKind.EXPIRED, str(REQUIREMENT_ACTOR))]
+
+
+def test_a_use_window_shortened_since_the_answer_ends_the_yes_early() -> None:
+    """Answered 10 minutes ago with a 15-minute use window stored; the current window is 5 minutes."""
+    snapshot = replace(HUMAN, use_window=timedelta(minutes=15))
+    approval = Approval.open(CALL, snapshot, TICKET, BY_AGENT, NOW)
+    answer(approval, current=snapshot)
+    approval.events.clear()
+    assert approval.use_deadline == NOW + timedelta(minutes=15)
+    later = NOW + timedelta(minutes=10)
+    assert approval.claim(replace(snapshot, use_window=timedelta(minutes=5)), SCALE, BY_AGENT, later, RETENTION) == (
+        NotApproved()
+    )
+    assert (approval.state, approval.delete_after) == (State.EXPIRED, later + RETENTION)
+    assert kinds(approval) == [(EventKind.EXPIRED, str(REQUIREMENT_ACTOR))]
+
+
+def test_an_unchanged_use_window_spends_the_yes_inside_it() -> None:
+    snapshot = replace(HUMAN, use_window=timedelta(minutes=15))
+    approval = Approval.open(CALL, snapshot, TICKET, BY_AGENT, NOW)
+    answer(approval, current=snapshot)
+    assert approval.claim(snapshot, SCALE, BY_AGENT, NOW + timedelta(minutes=10), RETENTION) == Claimed()
+    assert approval.state is State.USED
+
+
+def test_a_yes_without_answered_at_is_not_spent() -> None:
+    """A yes stored before migration 0002, or recorded after it by a replica of the previous release still serving
+    during the roll, has no answered_at: it fails closed, and the approver answers again."""
+    approval = opened()
+    answer(approval)
+    without_answered_at(approval)
+    assert approval.answer is not None
+    assert not _still_meets(approval.answer, HUMAN, SCALE)
+    approval.events.clear()
+    assert approval.claim(HUMAN, SCALE, BY_AGENT, NOW, RETENTION) == NotApproved()
+    assert approval.state is State.EXPIRED
+    assert kinds(approval) == [(EventKind.EXPIRED, str(REQUIREMENT_ACTOR))]
+
+
+def test_an_approved_approval_without_a_use_deadline_is_not_spent() -> None:
+    """The schema lets an approved row hold no use deadline; such a yes has no window to be spent in."""
+    approval = opened()
+    answer(approval)
+    approval.use_deadline = None
+    approval.events.clear()
+    assert approval.claim(HUMAN, SCALE, BY_AGENT, NOW, RETENTION) == NotApproved()
+    assert approval.state is State.EXPIRED
+    assert kinds(approval) == [(EventKind.EXPIRED, str(REQUIREMENT_ACTOR))]
+
+
+def test_the_use_deadline_is_the_earlier_of_the_stored_one_and_the_current_window() -> None:
+    approval = opened()
+    assert approval._use_deadline(HUMAN) is None  # no answer
+    answer(approval)
+    assert approval._use_deadline(HUMAN) == NOW + HUMAN.use_window
+    assert approval._use_deadline(replace(HUMAN, use_window=timedelta(minutes=3))) == NOW + timedelta(minutes=3)
+    assert approval._use_deadline(replace(HUMAN, use_window=timedelta(hours=1))) == NOW + HUMAN.use_window
+    without_answered_at(approval)
+    assert approval._use_deadline(HUMAN) is None
+    refused = opened()
+    answer(refused, Verdict.REFUSE)
+    assert refused._use_deadline(HUMAN) is None  # a no: no use deadline
 
 
 def test_pass_deadlines_ends_only_what_is_due() -> None:

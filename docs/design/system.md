@@ -4,15 +4,16 @@ The whole system: what problem it solves, its parts, the public contracts and ho
 [service design](service.md) goes one level down (the three services, what crosses between them, state and
 failure); the [module design](module.md) goes one further (packages, import rules, storage mechanics).
 
-> **Status:** milestones 0 and 1 are built; nothing here is deployable until milestone 3
+> **Status:** milestones 0, 1 and 2 are built; nothing here is deployable until milestone 3
 > ([roadmap](#delivery-milestones)). The [reference pages](../reference/configuration.md) document what is built.
 > Where code and these pages disagree, one of them has a bug: please open an issue.
 
 ## Summary
 
-1. **The gate's decision is a public, versioned, language-neutral contract** (the Check API). Any gateway hook
-   that can call gRPC or HTTP plugs in through a thin mapping; agentgateway (`ext_mcp`) and the Envoy family
-   (`ext_authz`) get first-party mappings.
+1. **The gate's decision is a public, versioned, language-neutral contract** (the Check API), over one
+   gateway-neutral port. Every gateway is an optional adapter at the edge: agentgateway (`ext_mcp`) and the Envoy
+   family (`ext_authz`) get first-party adapters, and any other hook that can call gRPC or HTTP uses the Check
+   API. No gateway is required, and the core imports none.
 2. **One Approval model** on the approvers' side. Policy, notification channels and **answer surfaces** (the
    built-in desk, or any integrated system with its own credential) are swappable edges, each over an existing
    standard: AuthZEN or OPA, CloudEvents webhooks, OIDC.
@@ -45,8 +46,9 @@ failure); the [module design](module.md) goes one further (packages, import rule
 | Approval | One request for a person's yes or no on one exact call |
 | Ticket | The unguessable handle of an Approval that the agent is given |
 | Check API | The gate's public contract: check a call |
-| Mapping | Thin code turning one gateway's hook into a Check API call |
-| Gateway attributes | Opaque name/value pairs a mapping copies from the gateway's own metadata, for policy |
+| Gateway port | What the gate's core knows of any gateway: a gateway context (attested principal and server, gateway attributes, the hook's deadline) and the exact params bytes |
+| Mapping | Thin adapter code turning one gateway's hook into the gateway port the gate decides on; each is optional |
+| Gateway attributes | Operator-named string values a mapping copies from the gateway's own metadata, for policy; never a gateway's own key names |
 | Policy port | Says "no approval needed" or "requires X" for a call; what an agent may reach at all stays the gateway's job |
 | Approval requirement | A named rule: approver groups, allowed surfaces, minimum assurance, sign-in age, deadlines |
 | Assurance level | An operator-named strength of a sign-in (for example password, MFA, passkey), read from the identity provider's `acr` claim |
@@ -70,7 +72,7 @@ failure); the [module design](module.md) goes one further (packages, import rule
 
 | Part | Does | Never does |
 |---|---|---|
-| Mapping | Builds a call from the gateway's attested caller and route; renders the verdict in the gateway's encoding | Re-serialise the call; read the caller or server from the call body |
+| Mapping | Builds the gateway port's context (attested caller, route, the configured attributes, the hook's deadline) and hands it with the params to the gate; renders the verdict in the gateway's encoding | Re-serialise the call; read the caller or server from the call body; let the gate's core depend on a gateway's types |
 | Gate | Asks policy; spends or requests an Approval; stateless | List, show or answer Approvals; carry tool traffic |
 | Wait server | Serves the `approval_wait` tool; returns a Wait Task where declared | Answer, or wait on another caller's ticket |
 | Approvals | Owns Approvals, requirements, waits, answers, the audit report, events | Run a tool; decide what needs approval |
@@ -100,7 +102,8 @@ answer counts.
   deadlines.
 - **Policy sits outside the Approval domain** and answers only "no approval needed" or "requires X".
 - **A yes is bound to the requirement it was given under:** the requirement is snapshotted on the Approval, and a
-  claim or answer must meet the stricter of the snapshot and the current requirement.
+  claim or answer must meet the stricter of the snapshot and the current requirement. The answer records when it
+  was given, so a claim re-checks the sign-in age at that moment and ends the use window counted from it.
 - **A wait can be a Task,** stored with the Approval.
 
 **Patterns and prior art:**
@@ -125,12 +128,16 @@ answer counts.
 3. **Fail closed, authenticated edges.** Caller and server come only from gateway metadata; every hop (hook to
    gate, gate to policy and Approvals, gateway to wait server) is authenticated; a missing caller, an unknown
    requirement name or an unreachable dependency refuses.
+4. **Gateways are adapters behind a port.** The core (policy, the claim, Approvals) depends only on the
+   gateway-neutral port; agentgateway's `ext_mcp`, Envoy's `ext_authz` and the Check API are adapters at the
+   edge, each optional, and no core module imports a gateway adapter's types (import contract C9 in the
+   [module design](module.md)).
 
 **How third parties extend it.** Over the standards above, out of process, in any language; a compromised
 channel can only send notices. Loading third-party plugin code inside the services was considered and not
 chosen: it would tie extensions to Python, make a Python API to keep stable, and put third-party code in the
-process that records answers. First-party pieces (the two mappings, the rules-file policy, the desk) ship inside;
-integrated surfaces are out of process by nature.
+process that records answers. First-party pieces (the two gateway adapters, the rules-file policy, the desk) ship
+inside; integrated surfaces are out of process by nature.
 
 ## Public contracts
 
@@ -258,7 +265,7 @@ Gated calls that declare Tasks stay refused behind gateways, because the follow-
 |---|---|---|
 | **agentgateway** | Guardrail processor, last, `tools/call` request phase, `ext_mcp` mapping, fail closed; the wait server as an MCP target. `ext_mcp` rather than agentgateway's own `ext_authz`, because only it hands over the parameter bytes agentgateway forwards | A configured metadata value from the gateway's key or token check |
 | **Envoy family** (Envoy, Envoy Gateway, Istio) | `ext_authz` gRPC with the request body, last body-touching filter; the mapping finds the params bytes without re-encoding and denies with a JSON-RPC error body; the wait server on its own route | `jwt_authn` metadata |
-| **Other gateways** | A mapping onto the Check API, owned with that gateway's plugin | That gateway's authentication |
+| **Other gateways** | The gateway's own plugin calling the Check API (gRPC or JSON) | That gateway's authentication |
 | **No gateway** | Not designed: run any small gateway as the enforcement point | — |
 
 **An example configuration,** from the [reference file](../../examples/config.yaml) (its grammar:
@@ -308,11 +315,17 @@ once. The same refusal and claim through Envoy's `ext_authz` and through a plain
 assurance-cap rule for integrated surfaces is proven inside Approvals against real Postgres; its end-to-end path
 needs the Answers API (milestone 3).
 
+**Gateway breadth (milestone 2):** every adapter builds the same gateway context; the rules file matches gateway
+attributes; Envoy's requests are classified by one pure table; a gateway hook may authenticate with mTLS; an
+inbound gRPC deadline bounds the check; a claim re-checks how long after the sign-in the yes was given and caps the
+use window from the answer's own moment. One conformance suite runs the same cases through agentgateway, Envoy
+and a plain Check API caller (gRPC and JSON), each case an adapter cannot express skipped by name with its reason.
+
 | Milestone | Delivers |
 |---|---|
 | 0 | Repository, CI, release automation, the shared call parser, these design docs |
 | 1 | Tracer: Check API v1, requirement on Approval and claim, rules-file policy, config with floor and registry, held wait and Wait Task create and get, minimal desk with step-up |
-| 2 | Gateway breadth: full `ext_authz` classification, gateway-context policy, mTLS, inbound deadlines, complete conformance suites |
+| 2 | Gateway breadth: gateways as optional adapters behind one port, full `ext_authz` classification, gateway-attribute policy, mTLS, inbound deadlines, one conformance suite for every adapter |
 | 3 | Approvers' side: desk complete, Answers API with per-surface credentials and caps, audit report, CloudEvents channels, Web Push, retention, compose and Helm chart: the first deployable release |
 | 4 | Wait Task complete: cancel, replacement, caps, time to live, the Envoy wait route |
 | 5 | AuthZEN and OPA policy adapters |

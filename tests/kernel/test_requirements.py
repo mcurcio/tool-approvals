@@ -20,6 +20,7 @@ from tool_approvals.kernel.requirements import (
     SurfaceRule,
     meets_floor,
     qualify,
+    sign_in_fresh,
     snapshot_json,
     snapshot_of,
     stricter,
@@ -237,3 +238,16 @@ def test_a_snapshot_of_another_version_is_none(version: object) -> None:
 def test_a_version_1_snapshot_of_another_shape_is_an_error(data: bytes) -> None:
     with pytest.raises(ValueError, match="snapshot"):
         snapshot_of(data)
+
+
+@pytest.mark.parametrize(
+    ("sign_in_moment", "fresh"),
+    [
+        (NOW, True),
+        (NOW - HUMAN.max_sign_in_age, True),
+        (NOW - HUMAN.max_sign_in_age - timedelta(microseconds=1), False),
+        (NOW + timedelta(microseconds=1), False),  # after the moment judged: a negative age is never fresh
+    ],
+)
+def test_sign_in_fresh_is_r1s_one_rule(sign_in_moment: datetime, fresh: bool) -> None:
+    assert sign_in_fresh(sign_in_moment, HUMAN, NOW) is fresh

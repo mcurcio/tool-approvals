@@ -4,10 +4,12 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
+import pytest
 from ruamel.yaml import YAML
 
 from tool_approvals.config.file import load
 from tool_approvals.config.views import (
+    ExtAuthzAttributeView,
     ListenerView,
     RuleView,
     TlsView,
@@ -58,9 +60,15 @@ def test_the_gate_view_mirrors_its_sections() -> None:
     assert view.ext_authz is not None
     assert view.ext_authz.principal_path == ("envoy.filters.http.jwt_authn", "payload", "sub")
     assert view.ext_authz.server_key == "server"
+    assert view.ext_mcp.attributes == {"tenant": ("jwt", "tenant")}
+    assert view.ext_authz.attributes == {
+        "tenant": ExtAuthzAttributeView(("envoy.filters.http.jwt_authn", "payload", "tenant"), None),
+        "zone": ExtAuthzAttributeView(None, "zone"),
+    }
     assert view.policy.rules == (
-        RuleView("*", "files", "delete_*", RequirementName("reviewed")),
-        RuleView("ci-*", "*", "*", None),
+        RuleView("*", "files", "delete_*", RequirementName("reviewed"), {}),
+        RuleView("*", "billing", "*", RequirementName("reviewed"), {"tenant": "blue"}),
+        RuleView("ci-*", "*", "*", None, {}),
     )
     assert view.policy.default is None
     assert view.requirements == {RequirementName("reviewed")}
@@ -155,6 +163,7 @@ def test_defaults_fill_what_the_file_leaves_out(tmp_path: Path) -> None:
     del document["gate"]["check_budget"]
     del document["gate"]["ext_mcp"]["hook_timeout"]
     del document["gate"]["ext_authz"]["server_key"]
+    del document["gate"]["ext_mcp"]["attributes"]
     document["gate"]["policy"]["rules"] = [{"require": "reviewed"}]
     view = gate_view(load(_write(tmp_path, document)), {"GATE_APPROVALS_BEARER": "b"})
     assert view.check_budget == timedelta(seconds=5)
@@ -162,4 +171,37 @@ def test_defaults_fill_what_the_file_leaves_out(tmp_path: Path) -> None:
     assert view.ext_mcp.hook_timeout == timedelta(seconds=10)
     assert view.ext_authz is not None
     assert view.ext_authz.server_key == "server"
-    assert view.policy.rules == (RuleView("*", "*", "*", RequirementName("reviewed")),)
+    assert view.policy.rules == (RuleView("*", "*", "*", RequirementName("reviewed"), {}),)
+    assert view.ext_mcp.attributes == {}
+
+
+CERT_SHA256 = "5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d"
+
+
+@pytest.mark.parametrize(
+    ("entry", "listener"),
+    [
+        (0, ("gate", "check_api", "grpc")),
+        (0, ("gate", "check_api", "json")),
+        (0, ("gate", "ext_mcp", "listener")),
+        (0, ("gate", "ext_authz", "listener")),
+        (3, ("wait", "listeners", "mcp")),
+    ],
+)
+def test_a_client_certificate_entry_loads_where_a_listener_serving_its_grant_asks_for_one(
+    tmp_path: Path, entry: int, listener: tuple[str, ...]
+) -> None:
+    document = _example()
+    document["registry"][entry]["credential"] = {"client_cert_sha256": CERT_SHA256.upper()}
+    node = document
+    for key in listener:
+        node = node[key]
+    node["tls"]["client_ca"] = "/etc/tool-approvals/gateway-ca.pem"
+    cfg = load(_write(tmp_path, document))
+    env = {"GATE_APPROVALS_BEARER": "gate-bearer", "WAIT_APPROVALS_BEARER": "wait-bearer"}
+    view = gate_view(cfg, env) if listener[0] == "gate" else wait_view(cfg, env)
+    certified = view.registry[entry]
+    assert certified.bearer_sha256 is None
+    assert certified.client_cert_sha256 == bytes.fromhex(CERT_SHA256)
+    assert view.registry[1].bearer_sha256 is not None
+    assert view.registry[1].client_cert_sha256 is None

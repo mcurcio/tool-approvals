@@ -14,9 +14,16 @@ _KEY: Final = IssuerKey()
 
 
 def issue(  # noqa: PLR0913, PLR0917 (answer.Issue's positional shape)
-    ticket: Ticket, digest: Digest, facts: AnswerFacts, group: GroupRef, verdict: Verdict, comment: str | None
+    ticket: Ticket,
+    digest: Digest,
+    facts: AnswerFacts,
+    group: GroupRef,
+    verdict: Verdict,
+    comment: str | None,
+    answered_at: datetime,
 ) -> Answer:
-    """A new answer from qualified facts (`kernel.requirements.qualify` gave `group`). Satisfies `answer.Issue`."""
+    """A new answer from qualified facts (`kernel.requirements.qualify` gave `group`), given at `answered_at`.
+    Satisfies `answer.Issue`."""
     return Answer(
         _KEY,
         ticket=ticket,
@@ -28,6 +35,7 @@ def issue(  # noqa: PLR0913, PLR0917 (answer.Issue's positional shape)
         sign_in_moment=facts.sign_in_moment,
         verdict=verdict,
         comment=comment,
+        answered_at=answered_at,
     )
 
 
@@ -42,6 +50,7 @@ def rebuild(  # noqa: PLR0913 (one keyword per answer field)
     sign_in_moment: datetime,
     verdict: Verdict,
     comment: str | None,
+    answered_at: datetime | None,
 ) -> Answer:
     """A stored answer, from the Approval row's answer columns (the store's load event); Answer's own fields."""
     return Answer(
@@ -55,4 +64,5 @@ def rebuild(  # noqa: PLR0913 (one keyword per answer field)
         sign_in_moment=sign_in_moment,
         verdict=verdict,
         comment=comment,
+        answered_at=answered_at,
     )

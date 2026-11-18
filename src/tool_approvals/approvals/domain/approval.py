@@ -21,6 +21,7 @@ from tool_approvals.kernel.requirements import (
     Requirement,
     SurfaceRule,
     qualify,
+    sign_in_fresh,
     stricter,
 )
 from tool_approvals.kernel.words import AgentWords
@@ -164,16 +165,30 @@ class Approval:
     def claim(
         self, current: Requirement, scale: AssuranceScale, by: Actor, now: datetime, retention: timedelta
     ) -> Claimed | NotApproved:
-        """Spend the yes: Approved, within its use window, and its answer meeting stricter(snapshot, current)
-        becomes Used (event USED). A yes not meeting it ends Expired by REQUIREMENT: NotApproved."""
+        """Spend the yes: Approved, its answer meeting stricter(snapshot, current), and `now` before the use deadline
+        as the current use window reckons it, becomes Used (event USED). A yes failing either ends Expired by
+        REQUIREMENT: NotApproved."""
         self.pass_deadlines(now, retention, DEADLINE_ACTOR)
         if self.state is not State.APPROVED or self.answer is None:
             return NotApproved()
-        if not _still_meets(self.answer, stricter(self.requirement, current, scale), scale):
+        effective = stricter(self.requirement, current, scale)
+        if not _still_meets(self.answer, effective, scale):
+            self._end(State.EXPIRED, REQUIREMENT_ACTOR, now, retention)
+            return NotApproved()
+        deadline = self._use_deadline(current)
+        if deadline is None or now >= deadline:
             self._end(State.EXPIRED, REQUIREMENT_ACTOR, now, retention)
             return NotApproved()
         self._end(State.USED, by, now, retention)
         return Claimed()
+
+    def _use_deadline(self, current: Requirement) -> datetime | None:
+        """The earlier of the stored use deadline and answered_at + the current use window; None without a yes
+        or an answered_at."""
+        answer = self.answer
+        if self.use_deadline is None or answer is None or answer.answered_at is None:
+            return None
+        return min(self.use_deadline, answer.answered_at + current.use_window)
 
     def record_answer(  # noqa: PLR0913, PLR0917 (the frozen page's signature)
         self,
@@ -204,7 +219,7 @@ class Approval:
         group = qualify(facts, effective, surface, scale, now)
         if isinstance(group, AnswerError):
             return group
-        answer = issue(self.ticket, digest, facts, group, verdict, comment)
+        answer = issue(self.ticket, digest, facts, group, verdict, comment, now)
         self.answer = answer
         if verdict is Verdict.APPROVE:
             self.state = State.APPROVED
@@ -278,10 +293,14 @@ _ENDED_EVENT: Final = {State.REFUSED: EventKind.REFUSED, State.USED: EventKind.U
 
 def _still_meets(answer: Answer, requirement: Requirement, scale: AssuranceScale) -> bool:
     """Whether a recorded yes still meets `requirement`: its surface allowed, its qualifying group an approver
-    group, and its vouched level at least the minimum (a level the scale does not hold meets nothing)."""
+    group, its vouched level at least the minimum (a level the scale does not hold meets nothing), and its sign-in
+    fresh (kernel.requirements.sign_in_fresh) at the moment it was answered (a yes with no answered_at meets
+    nothing)."""
     vouched, minimum = scale.rank(answer.vouched_assurance), scale.rank(requirement.min_assurance)
     return (
-        answer.surface in requirement.allowed_surfaces
+        answer.answered_at is not None
+        and sign_in_fresh(answer.sign_in_moment, requirement, answer.answered_at)
+        and answer.surface in requirement.allowed_surfaces
         and answer.qualifying_group in requirement.approver_groups
         and vouched is not None
         and minimum is not None

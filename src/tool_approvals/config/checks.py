@@ -5,11 +5,19 @@ the file leaves out is unknown: a requirement naming a level needs `assurance`, 
 needs `requirements`.
 """
 
+import importlib.util
 from collections import Counter
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Final
 
-from tool_approvals.config.sections import NO_APPROVAL, Listener
+from tool_approvals.config.sections import (
+    GATEWAY_ADAPTERS,
+    NO_APPROVAL,
+    BearerCredential,
+    ClientCertCredential,
+    Listener,
+)
+from tool_approvals.kernel.methods import Method
 from tool_approvals.kernel.names import AssuranceName
 from tool_approvals.kernel.requirements import meets_floor
 
@@ -102,10 +110,50 @@ def _requirements(cfg: "ConfigFile") -> Iterator[str]:
 
 def _registry(cfg: "ConfigFile") -> Iterator[str]:
     entries = cfg.registry or ()
-    hashes = [entry.credential.bearer_sha256.hex() for entry in entries]
-    for repeated in _repeated(hashes):
-        names = ", ".join(entry.name for entry in entries if entry.credential.bearer_sha256.hex() == repeated)
-        yield f"registry: one bearer hash on two entries ({names})"
+    bearers = [
+        (entry.name, c.bearer_sha256) for entry in entries if isinstance(c := entry.credential, BearerCredential)
+    ]
+    certs = [
+        (entry.name, c.client_cert_sha256)
+        for entry in entries
+        if isinstance(c := entry.credential, ClientCertCredential)
+    ]
+    for what, named in (("bearer hash", bearers), ("client certificate", certs)):
+        for repeated in _repeated([digest.hex() for _, digest in named]):
+            names = ", ".join(name for name, digest in named if digest.hex() == repeated)
+            yield f"registry: one {what} on two entries ({names})"
+    yield from _client_certificates(cfg)
+
+
+# The grants a client-certificate credential may carry, and the listeners that serve each (question 10): the calls
+# a gateway makes. Calls between this project's own services keep their bearers.
+_CERTIFICATE_LISTENERS: Final = {
+    Method.CHECK: (
+        "gate.check_api.grpc",
+        "gate.check_api.json",
+        *(f"gate.{name}.listener" for name in GATEWAY_ADAPTERS),
+    ),
+    Method.WAIT_CALL: ("wait.listeners.mcp",),
+}
+
+
+def _client_certificates(cfg: "ConfigFile") -> Iterator[str]:
+    """A client-certificate entry is granted only what a gateway calls, and some listener serving one of its grants
+    asks for client certificates. Such a listener asks every caller for one, bearer callers too (question 9)."""
+    asking = {where for where, listener in _bearer_listeners(cfg) if listener.tls and listener.tls.client_ca}
+    for entry in cfg.registry or ():
+        if not isinstance(entry.credential, ClientCertCredential):
+            continue
+        where = f"registry.{entry.name}"
+        if not set(entry.grants) <= set(_CERTIFICATE_LISTENERS):
+            yield f"{where}: a client-certificate credential is accepted only for check and wait.call"
+            continue  # reported once: no listener serves the grants it may not carry
+        serving = {listener for grant in entry.grants for listener in _CERTIFICATE_LISTENERS[grant]}
+        if not serving & asking:
+            yield (
+                f"{where}: a client-certificate credential, but no listener serving its grants asks for client "
+                "certificates (tls.client_ca)"
+            )
 
 
 def _bearer_listeners(cfg: "ConfigFile") -> Iterator[tuple[str, Listener]]:
@@ -116,10 +164,8 @@ def _bearer_listeners(cfg: "ConfigFile") -> Iterator[tuple[str, Listener]]:
                 yield "gate.check_api.grpc", cfg.gate.check_api.grpc
             if cfg.gate.check_api.json_ is not None:
                 yield "gate.check_api.json", cfg.gate.check_api.json_
-        if cfg.gate.ext_mcp is not None:
-            yield "gate.ext_mcp.listener", cfg.gate.ext_mcp.listener
-        if cfg.gate.ext_authz is not None:
-            yield "gate.ext_authz.listener", cfg.gate.ext_authz.listener
+        for name, adapter in cfg.gate.adapters():
+            yield f"gate.{name}.listener", adapter.listener
     if cfg.wait is not None:
         yield "wait.listeners.mcp", cfg.wait.listeners.mcp
     if cfg.approvals is not None:
@@ -136,15 +182,43 @@ def _gate(cfg: "ConfigFile") -> Iterator[str]:
     gate = cfg.gate
     if gate is None:
         return
-    if gate.ext_mcp is not None and not gate.check_budget < gate.ext_mcp.hook_timeout:
-        yield "gate.check_budget: not below gate.ext_mcp.hook_timeout"
-    if gate.ext_authz is not None and not gate.check_budget < gate.ext_authz.hook_timeout:
-        yield "gate.check_budget: not below gate.ext_authz.hook_timeout"
+    for name, adapter in gate.adapters():
+        if not gate.check_budget < adapter.hook_timeout:
+            yield f"gate.check_budget: not below gate.{name}.hook_timeout"
+        if adapter.needs is not None and not _installed(adapter.needs.module):
+            extra = adapter.needs.name
+            yield f"gate.{name}: needs the {extra} extra, which is not installed (tool-approvals[{extra}])"
     known = set(cfg.requirements or {})
     named = [(f"gate.policy.rules[{index}].require", rule.require) for index, rule in enumerate(gate.policy.rules)]
     for where, name in [*named, ("gate.policy.default", gate.policy.default)]:
         if name != NO_APPROVAL and name not in known:
             yield f"{where}: unknown requirement {name!r}"
+    yield from _rule_attributes(cfg)
+
+
+def _installed(module: str) -> bool:
+    """Whether `module` can be imported (its parent packages are imported to find it)."""
+    try:
+        return importlib.util.find_spec(module) is not None
+    except (ImportError, ValueError):  # a parent missing, or blocked in sys.modules
+        return False
+
+
+def _rule_attributes(cfg: "ConfigFile") -> Iterator[str]:
+    """Every attribute a policy rule reads is supplied by every enabled gateway adapter, and by at least one enabled
+    mapping (the Check API's caller sends its own)."""
+    gate = cfg.gate
+    if gate is None:
+        return
+    mapped = {name: set(adapter.attributes) for name, adapter in gate.adapters()}
+    for index, rule in enumerate(gate.policy.rules):
+        for name in rule.attributes:
+            where = f"gate.policy.rules[{index}].attributes.{name}"
+            for mapping, names in mapped.items():
+                if name not in names:
+                    yield f"{where}: not mapped by gate.{mapping}.attributes"
+            if gate.check_api is None and not any(name in names for names in mapped.values()):
+                yield f"{where}: no enabled mapping supplies it"
 
 
 def _approvals(cfg: "ConfigFile") -> Iterator[str]:
