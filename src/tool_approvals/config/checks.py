@@ -10,7 +10,13 @@ from collections import Counter
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Final
 
-from tool_approvals.config.sections import NO_APPROVAL, BearerCredential, ClientCertCredential, Listener
+from tool_approvals.config.sections import (
+    GATEWAY_ADAPTERS,
+    NO_APPROVAL,
+    BearerCredential,
+    ClientCertCredential,
+    Listener,
+)
 from tool_approvals.kernel.methods import Method
 from tool_approvals.kernel.names import AssuranceName
 from tool_approvals.kernel.requirements import meets_floor
@@ -23,10 +29,6 @@ if TYPE_CHECKING:
 # lock is refused by Approvals as unavailable (and logged there as a lock wait) well before the gate's budget runs
 # out mid-commit.
 LOCK_WAITS_PER_CHECK: Final = 4
-
-# The module gate.ext_authz needs, from the `envoy` extra (xds-protos); every other gateway's types ship in the
-# package.
-ENVOY_TYPES: Final = "envoy.service.auth.v3.external_auth_pb2"
 
 
 def problems(cfg: "ConfigFile") -> list[str]:
@@ -126,7 +128,11 @@ def _registry(cfg: "ConfigFile") -> Iterator[str]:
 # The grants a client-certificate credential may carry, and the listeners that serve each (question 10): the calls
 # a gateway makes. Calls between this project's own services keep their bearers.
 _CERTIFICATE_LISTENERS: Final = {
-    Method.CHECK: ("gate.check_api.grpc", "gate.check_api.json", "gate.ext_mcp.listener", "gate.ext_authz.listener"),
+    Method.CHECK: (
+        "gate.check_api.grpc",
+        "gate.check_api.json",
+        *(f"gate.{name}.listener" for name in GATEWAY_ADAPTERS),
+    ),
     Method.WAIT_CALL: ("wait.listeners.mcp",),
 }
 
@@ -158,10 +164,8 @@ def _bearer_listeners(cfg: "ConfigFile") -> Iterator[tuple[str, Listener]]:
                 yield "gate.check_api.grpc", cfg.gate.check_api.grpc
             if cfg.gate.check_api.json_ is not None:
                 yield "gate.check_api.json", cfg.gate.check_api.json_
-        if cfg.gate.ext_mcp is not None:
-            yield "gate.ext_mcp.listener", cfg.gate.ext_mcp.listener
-        if cfg.gate.ext_authz is not None:
-            yield "gate.ext_authz.listener", cfg.gate.ext_authz.listener
+        for name, adapter in cfg.gate.adapters():
+            yield f"gate.{name}.listener", adapter.listener
     if cfg.wait is not None:
         yield "wait.listeners.mcp", cfg.wait.listeners.mcp
     if cfg.approvals is not None:
@@ -178,12 +182,12 @@ def _gate(cfg: "ConfigFile") -> Iterator[str]:
     gate = cfg.gate
     if gate is None:
         return
-    if gate.ext_mcp is not None and not gate.check_budget < gate.ext_mcp.hook_timeout:
-        yield "gate.check_budget: not below gate.ext_mcp.hook_timeout"
-    if gate.ext_authz is not None and not gate.check_budget < gate.ext_authz.hook_timeout:
-        yield "gate.check_budget: not below gate.ext_authz.hook_timeout"
-    if gate.ext_authz is not None and not _installed(ENVOY_TYPES):
-        yield "gate.ext_authz: Envoy's types are not installed: install the envoy extra (tool-approvals[envoy])"
+    for name, adapter in gate.adapters():
+        if not gate.check_budget < adapter.hook_timeout:
+            yield f"gate.check_budget: not below gate.{name}.hook_timeout"
+        if adapter.needs is not None and not _installed(adapter.needs.module):
+            extra = adapter.needs.name
+            yield f"gate.{name}: needs the {extra} extra, which is not installed (tool-approvals[{extra}])"
     known = set(cfg.requirements or {})
     named = [(f"gate.policy.rules[{index}].require", rule.require) for index, rule in enumerate(gate.policy.rules)]
     for where, name in [*named, ("gate.policy.default", gate.policy.default)]:
@@ -201,16 +205,12 @@ def _installed(module: str) -> bool:
 
 
 def _rule_attributes(cfg: "ConfigFile") -> Iterator[str]:
-    """Every attribute a policy rule reads is supplied by every enabled gateway mapping that maps attributes
-    (ext_mcp, ext_authz), and by at least one enabled mapping (the Check API's caller sends its own)."""
+    """Every attribute a policy rule reads is supplied by every enabled gateway adapter, and by at least one enabled
+    mapping (the Check API's caller sends its own)."""
     gate = cfg.gate
     if gate is None:
         return
-    mapped: dict[str, set[str]] = {}
-    if gate.ext_mcp is not None:
-        mapped["ext_mcp"] = set(gate.ext_mcp.attributes)
-    if gate.ext_authz is not None:
-        mapped["ext_authz"] = set(gate.ext_authz.attributes)
+    mapped = {name: set(adapter.attributes) for name, adapter in gate.adapters()}
     for index, rule in enumerate(gate.policy.rules):
         for name in rule.attributes:
             where = f"gate.policy.rules[{index}].attributes.{name}"

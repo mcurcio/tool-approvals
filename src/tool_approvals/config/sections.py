@@ -7,9 +7,10 @@ default. Rules between sections live in `config.checks`.
 """
 
 import re
+from collections.abc import Iterator, Mapping
 from datetime import timedelta
 from pathlib import Path
-from typing import Annotated, Final, Literal, Self
+from typing import Annotated, ClassVar, Final, Literal, NamedTuple, Protocol, Self
 
 from pydantic import (
     BaseModel,
@@ -214,7 +215,30 @@ class CheckApi(Section):
 KeyPath = Annotated[tuple[Text, ...], Field(min_length=1)]
 
 
+class PackageExtra(NamedTuple):
+    """An optional dependency a section needs installed: the package extra, and a module it provides."""
+
+    name: str
+    module: str
+
+
+class GatewayAdapter(Protocol):
+    """The shape every gateway adapter's section shares, which the cross-section checks read."""
+
+    needs: ClassVar[PackageExtra | None]
+
+    @property
+    def listener(self) -> "Listener": ...
+
+    @property
+    def hook_timeout(self) -> timedelta: ...
+
+    @property
+    def attributes(self) -> Mapping[str, object]: ...
+
+
 class ExtMcp(Section):
+    needs: ClassVar[PackageExtra | None] = None  # agentgateway's types ship in the package
     listener: Listener
     hook_timeout: Duration = timedelta(seconds=10)
     principal_key: Text
@@ -238,6 +262,7 @@ class ExtAuthzAttribute(Section):
 
 
 class ExtAuthz(Section):
+    needs: ClassVar[PackageExtra | None] = PackageExtra("envoy", "envoy.service.auth.v3.external_auth_pb2")
     listener: Listener
     hook_timeout: Duration  # no default: Envoy's own default is far below a held check
     principal_path: Annotated[tuple[Text, ...], Field(min_length=2)]  # the filter name, then one or more keys
@@ -273,6 +298,17 @@ class Gate(Section):
     ext_mcp: ExtMcp | None = None
     ext_authz: ExtAuthz | None = None
     policy: Policy
+
+    def adapters(self) -> Iterator[tuple[str, GatewayAdapter]]:
+        """Each enabled gateway adapter section, by its key, in GATEWAY_ADAPTERS order."""
+        for name in GATEWAY_ADAPTERS:
+            section: GatewayAdapter | None = getattr(self, name)
+            if section is not None:
+                yield name, section
+
+
+# Every Gate key holding a gateway adapter's section: a new adapter adds its section here, and the checks follow.
+GATEWAY_ADAPTERS: Final = ("ext_mcp", "ext_authz")
 
 
 class WaitListeners(Section):

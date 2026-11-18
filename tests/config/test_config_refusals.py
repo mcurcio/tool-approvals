@@ -12,9 +12,9 @@ import pytest
 from ruamel.yaml import YAML
 
 from tool_approvals.cli import EXIT_CONFIG_REFUSED, EXIT_OK, main
-from tool_approvals.config import checks
 from tool_approvals.config.errors import ConfigError
 from tool_approvals.config.file import ConfigFile, load
+from tool_approvals.config.sections import ExtAuthz, PackageExtra
 from tool_approvals.config.views import approvals_view, gate_view, migrate_view, wait_view
 
 EXAMPLE = Path(__file__).parents[2] / "examples" / "config.yaml"
@@ -112,14 +112,13 @@ def test_a_rule_attribute_with_only_the_check_api_enabled_passes(tmp_path: Path)
 
 
 def test_an_ext_authz_section_without_envoys_types_installed_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(checks, "ENVOY_TYPES", "tool_approvals_absent.envoy.types")
+    monkeypatch.setattr(ExtAuthz, "needs", PackageExtra("envoy", "tool_approvals_absent.envoy.types"))
     (problem,) = _problems(EXAMPLE, "config", EXAMPLE_ENV)
-    assert problem.startswith("gate.ext_authz: Envoy's types are not installed")
-    assert "tool-approvals[envoy]" in problem
+    assert problem == "gate.ext_authz: needs the envoy extra, which is not installed (tool-approvals[envoy])"
 
 
 def test_without_envoys_types_a_file_with_no_ext_authz_passes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(checks, "ENVOY_TYPES", "tool_approvals_absent.envoy.types")
+    monkeypatch.setattr(ExtAuthz, "needs", PackageExtra("envoy", "tool_approvals_absent.envoy.types"))
     load(_write(tmp_path, _edit(_yaml().load(EXAMPLE), {"delete": ["gate.ext_authz"]})))
 
 
