@@ -4,6 +4,7 @@ import asyncio
 import errno
 import itertools
 import os
+import random
 import socket
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -20,18 +21,21 @@ from tool_approvals.serving.signals import STOP_GRACE
 # number on) is a race: between the probe's close and the server's bind the kernel may give the same port to another
 # test worker's probe, to this worker's next probe, or to any outgoing connection. These ports sit below every common
 # ephemeral range (Linux 32768-60999, IANA and macOS 49152-65535), which the kernel never assigns on its own, and each
-# pytest-xdist worker takes its own slice of them in turn.
+# pytest-xdist worker takes its own slice of them in turn, from a random start so that two runs on one host (or two
+# workers sharing a slice) do not walk the same sequence.
 PORTS: Final = range(20000, 32768)
 
 
 class PortBlock:
-    """Ports from `ports` in turn, wrapping round, skipping any already bound on either loopback address."""
+    """Ports from `ports` in turn from a random one (drawn from `rng`), wrapping round, skipping any already bound on
+    either loopback address."""
 
-    def __init__(self, ports: range) -> None:
+    def __init__(self, ports: range, rng: random.Random | None = None) -> None:
         if not ports:
             raise ValueError("an empty port block")
         self._ports = ports
-        self._turn = itertools.cycle(ports)
+        start = (rng or random.SystemRandom()).randrange(len(ports))
+        self._turn = itertools.cycle(itertools.chain(ports[start:], ports[:start]))
 
     def take(self) -> int:
         for port in itertools.islice(self._turn, len(self._ports)):
@@ -56,7 +60,9 @@ def _unbound(port: int) -> bool:
 
 def worker_ports(worker: str | None, workers: int) -> range:
     """The slice of PORTS for pytest-xdist worker `worker` ("gw3") of `workers`; all of PORTS outside xdist. A worker
-    xdist starts in place of a crashed one has an id past the count and takes over a slice whose worker is gone."""
+    xdist starts in place of a crashed one takes the next unused id (gwN, gwN+1, ...), so it wraps onto a live worker's
+    slice (gwN onto gw0's), not the dead one's; each block's random start makes that shared slice a low-odds clash
+    rather than the same sequence."""
     if worker is None:
         return PORTS
     size = len(PORTS) // workers
