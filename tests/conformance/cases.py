@@ -390,6 +390,7 @@ def _without_ticket(answer: check_pb2.CheckResponse) -> check_pb2.CheckResponse:
 class Sent:
     outcome: CallOutcome
     arguments: bytes  # unique to this call, so the echo tool's record tells whether this call ran
+    status: int | None = None  # the HTTP status, for a call sent raw (Envoy's gated tools/call)
 
 
 async def _send(  # noqa: PLR0913 (every setting a fail-closed case varies)
@@ -409,7 +410,7 @@ async def _send(  # noqa: PLR0913 (every setting a fail-closed case varies)
         # tools/call; the tools/call is sent alone (the echo tool keeps no session) so that it is what is judged.
         raw = await gateway.raw(principal, "POST", _tools_call(tool, arguments))
         text = f"HTTP {raw.status} {raw.body[:200]!r}"
-        return Sent(CallOutcome(ran=False, code=None, text=text, structured=None), arguments)
+        return Sent(CallOutcome(ran=False, code=None, text=text, structured=None), arguments, raw.status)
     return Sent(await gateway.call(principal, server, tool, arguments), arguments)
 
 
@@ -426,5 +427,10 @@ def _ran(st: Stack, sent: Sent) -> bool:
 
 
 def _refused(st: Stack, sent: Sent) -> None:
+    """The call never ran, and the gateway said why: a raw call (Envoy's) carries Envoy's own hook-failure status,
+    so a slow or failed upstream (a 5xx) does not pass for a refusal; any other carries the gateway's text."""
     assert not _ran(st, sent), sent
-    assert sent.outcome.text, sent
+    if sent.status is not None:
+        assert sent.status == envoy.HOOK_FAILED_STATUS, sent
+    else:
+        assert sent.outcome.text, sent

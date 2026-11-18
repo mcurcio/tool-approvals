@@ -29,6 +29,9 @@ EXT_AUTHZ_FILTER: Final = "envoy.filters.http.ext_authz"
 JWT_PAYLOAD_KEY: Final = "payload"
 MAX_REQUEST_BYTES: Final = 2 * MAX_PARAMS_BYTES  # room for the JSON-RPC envelope around the largest params
 HIDDEN_FROM_GUARDRAIL: Final = ("authorization", "cookie")  # request headers the gate's ext_authz is never sent
+# What Envoy answers itself when the ext_authz hook errs or times out (failure_mode_allow false): its
+# status_on_error, left at the default, 403. The gate gave no answer, so the body is not its JSON-RPC error.
+HOOK_FAILED_STATUS: Final = 403
 _TYPES: Final = "type.googleapis.com/envoy.extensions"
 
 
