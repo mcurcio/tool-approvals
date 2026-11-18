@@ -126,12 +126,18 @@ def meets_floor(r: Requirement, floor: Floor, scale: AssuranceScale) -> bool:
     return rank >= floor_rank and r.max_sign_in_age <= floor.max_sign_in_age
 
 
+def sign_in_fresh(sign_in_moment: datetime, r: Requirement, at: datetime) -> bool:
+    """R1's sign-in rule, its one home: the sign-in moment is not after `at` and at most r's max_sign_in_age
+    before it."""
+    return sign_in_moment <= at and at - sign_in_moment <= r.max_sign_in_age
+
+
 def qualify(
     facts: AnswerFacts, r: Requirement, surface: SurfaceRule, scale: AssuranceScale, at: datetime
 ) -> GroupRef | AnswerError:
     """The group through which `facts` may answer under `r` on `surface` at `at`, or the first failure, in order:
     surface allowed (SURFACE_NOT_ALLOWED); vouched level at most the surface's cap (ABOVE_CAP); at least r's
-    minimum (ASSURANCE_TOO_LOW); sign-in moment not after `at` and at most max_sign_in_age before it
+    minimum (ASSURANCE_TOO_LOW); sign_in_fresh at `at`
     (SIGN_IN_TOO_OLD); a group in both the approver's and r's (NOT_AN_APPROVER), the least of that intersection.
     A level the scale does not hold refuses (ASSURANCE_TOO_LOW), as do facts from another surface than `surface`
     (SURFACE_NOT_ALLOWED)."""
@@ -142,7 +148,7 @@ def qualify(
         return AnswerError.ABOVE_CAP
     if vouched is None or cap is None or minimum is None or vouched < minimum:
         return AnswerError.ASSURANCE_TOO_LOW
-    if facts.sign_in_moment > at or at - facts.sign_in_moment > r.max_sign_in_age:
+    if not sign_in_fresh(facts.sign_in_moment, r, at):
         return AnswerError.SIGN_IN_TOO_OLD
     groups = facts.approver_groups & r.approver_groups
     if not groups:

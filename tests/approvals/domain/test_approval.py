@@ -306,6 +306,23 @@ def test_a_sign_in_exactly_the_max_age_old_when_answered_is_still_spent() -> Non
     assert approval.state is State.USED
 
 
+def test_a_yes_whose_sign_in_moment_is_after_its_answer_is_not_spent() -> None:
+    """A row qualify never saw (another writer, a restore): the sign-in after the answer is a negative age, which
+    R1 refuses at claim by itself."""
+    approval = opened()
+    answer(approval)
+    assert approval.answer is not None
+    assert approval.answer.answered_at is not None
+    fields = {field.name: getattr(approval.answer, field.name) for field in dataclasses.fields(Answer)}
+    late = approval.answer.answered_at + timedelta(seconds=1)
+    approval.answer = issuer.rebuild(**fields | {"sign_in_moment": late})
+    assert not _still_meets(approval.answer, HUMAN, SCALE)
+    approval.events.clear()
+    assert approval.claim(HUMAN, SCALE, BY_AGENT, NOW, RETENTION) == NotApproved()
+    assert approval.state is State.EXPIRED
+    assert kinds(approval) == [(EventKind.EXPIRED, str(REQUIREMENT_ACTOR))]
+
+
 def test_a_use_window_shortened_since_the_answer_ends_the_yes_early() -> None:
     """Answered 10 minutes ago with a 15-minute use window stored; the current window is 5 minutes."""
     snapshot = replace(HUMAN, use_window=timedelta(minutes=15))

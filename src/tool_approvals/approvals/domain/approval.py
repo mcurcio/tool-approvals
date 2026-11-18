@@ -21,6 +21,7 @@ from tool_approvals.kernel.requirements import (
     Requirement,
     SurfaceRule,
     qualify,
+    sign_in_fresh,
     stricter,
 )
 from tool_approvals.kernel.words import AgentWords
@@ -293,11 +294,12 @@ _ENDED_EVENT: Final = {State.REFUSED: EventKind.REFUSED, State.USED: EventKind.U
 def _still_meets(answer: Answer, requirement: Requirement, scale: AssuranceScale) -> bool:
     """Whether a recorded yes still meets `requirement`: its surface allowed, its qualifying group an approver
     group, its vouched level at least the minimum (a level the scale does not hold meets nothing), and its sign-in
-    at most max_sign_in_age old when it was answered (a yes with no answered_at meets nothing)."""
+    fresh (kernel.requirements.sign_in_fresh) at the moment it was answered (a yes with no answered_at meets
+    nothing)."""
     vouched, minimum = scale.rank(answer.vouched_assurance), scale.rank(requirement.min_assurance)
     return (
         answer.answered_at is not None
-        and answer.answered_at - answer.sign_in_moment <= requirement.max_sign_in_age
+        and sign_in_fresh(answer.sign_in_moment, requirement, answer.answered_at)
         and answer.surface in requirement.allowed_surfaces
         and answer.qualifying_group in requirement.approver_groups
         and vouched is not None
