@@ -1,6 +1,6 @@
 [project]
 name = "tool-approvals"
-# The released version lives only in the git tag that semantic-release makes (.releaserc.json);
+# The released version lives in the git tag that semantic-release makes (.releaserc.json), never in this file;
 # a build that needs it is handed the tag. This placeholder is never edited by hand.
 version = "0.0.0"
 description = "A human-approval guardrail for agent tool calls behind an MCP or HTTP gateway"

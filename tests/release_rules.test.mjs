@@ -26,13 +26,22 @@ const cases = [
   ["docs: explain the gate", null],
 ];
 
-// The version lives only in the tag: nothing is committed back to the branch (no CHANGELOG commit), and the release
-// notes are published on the GitHub Release.
-test("a release commits nothing and publishes its notes on the GitHub Release", () => {
+// The version lives only in the tag: the release commits CHANGELOG.md and nothing else back to the branch (no
+// manifest carries a version), marks that commit [skip ci], and publishes its notes on the GitHub Release too.
+test("a release commits only CHANGELOG.md and publishes its notes on the GitHub Release", () => {
   const names = config.plugins.map((plugin) => (Array.isArray(plugin) ? plugin[0] : plugin));
-  for (const committing of ["@semantic-release/git", "@semantic-release/changelog"]) {
-    assert.ok(!names.includes(committing), `${committing} would commit to the branch`);
-  }
+  const options = (name) => {
+    const plugin = config.plugins.find((entry) => Array.isArray(entry) && entry[0] === name);
+    assert.ok(plugin, `${name} is configured with options`);
+    return plugin[1];
+  };
+  assert.ok(!names.includes("@semantic-release/npm"), "@semantic-release/npm would commit a version to package.json");
+  assert.equal(options("@semantic-release/changelog").changelogFile, "CHANGELOG.md");
+  const git = options("@semantic-release/git");
+  assert.deepEqual(git.assets, ["CHANGELOG.md"]);
+  assert.match(git.message, /^chore\(release\): \$\{nextRelease\.version\} \[skip ci\]/);
+  // The changelog is written (prepare) before the git plugin commits it (prepare, in plugin order).
+  assert.ok(names.indexOf("@semantic-release/changelog") < names.indexOf("@semantic-release/git"));
   assert.ok(names.includes("@semantic-release/release-notes-generator"));
   assert.ok(names.includes("@semantic-release/github"));
 });
