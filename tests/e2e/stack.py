@@ -3,11 +3,11 @@ Envoy and the echo tool; the scripted IdP on the host. What the tracer and the c
 gateway, and a plain Check API caller over JSON and over gRPC (`CheckApiGateway`).
 
 `stack(tmp)` renders every file the containers read into `tmp` (one service configuration, a test CA and its
-certificate, the registry's bearers, the agents' key set, both gateway configurations), runs compose.yaml as its
-own project and tears it down. The gateways reach the gate's hooks through host relays (`SlowRelay`), so
-`GateControl.slow` can hold the gate's answers back; each gateway's hop passes a recorder first (`HookRecorder`:
-agentgateway's ext_mcp, Envoy's ext_authz), so a case can read what the gate is sent. The image is
-$TOOL_APPROVALS_E2E_IMAGE, never pulled.
+certificate, the registry's bearers, the agents' key set, both gateway configurations, the ports compose
+publishes), runs compose.yaml as its own project and tears it down. The gateways reach the gate's hooks through
+host relays (`SlowRelay`), so `GateControl.slow` can hold the gate's answers back; each gateway's hop passes a
+recorder first (`HookRecorder`: agentgateway's ext_mcp, Envoy's ext_authz), so a case can read what the gate is
+sent. The image is $TOOL_APPROVALS_E2E_IMAGE, never pulled.
 """
 
 import asyncio
@@ -48,6 +48,7 @@ from tool_approvals.kernel.methods import Method
 
 IMAGE_ENV: Final = "TOOL_APPROVALS_E2E_IMAGE"
 COMPOSE_FILE: Final = Path(__file__).with_name("compose.yaml")
+PORTS_FILE: Final = "ports.yaml"  # under E2E_DIR: the compose file over COMPOSE_FILE that publishes PUBLISHED
 TOOL_SERVERS: Final = ("files", "notes")  # echo tool routes behind both gateways
 WAIT_SERVER: Final = "approvals-wait"  # wait_route.server
 PRINCIPAL_HEADER: Final = "x-approvals-principal"
@@ -82,6 +83,16 @@ APPROVALS_DESK_PORT: Final = 8080
 HEALTH_PORT: Final = 8081
 ECHO_PORT: Final = 8080
 POSTGRES_PORT: Final = 5432
+# Every container port the host reaches, by compose service, each on 127.0.0.1 at a port Docker picks: the one list
+# compose publishes (render writes it as PORTS_FILE; compose.yaml publishes nothing itself) and Compose.port answers
+# from, so a port the harness dials cannot go unpublished. The desk is published apart, on its fixed public port.
+PUBLISHED: Final[Mapping[str, tuple[int, ...]]] = {
+    "postgres": (POSTGRES_PORT,),
+    "gate": (GATE_CHECK_JSON_PORT, GATE_CHECK_GRPC_PORT, GATE_EXT_MCP_PORT, GATE_EXT_AUTHZ_PORT),
+    "echo": (ECHO_PORT,),
+    "agentgateway": (agentgateway.PORT, agentgateway.READINESS_PORT),
+    "envoy": (envoy.PORT, envoy.ADMIN_PORT),
+}
 _HOST: Final = "host.docker.internal"  # the host, as the containers reach it: the relays and the recorder
 _HOSTS: Final = ("gate", "wait", "approvals", _HOST, "localhost", "127.0.0.1")
 _READY_TIMEOUT_S: Final = 60.0
@@ -151,15 +162,17 @@ class ComposeError(RuntimeError):
 
 
 class Compose:
-    """compose.yaml as one project of its own."""
+    """compose.yaml, with the rendered PORTS_FILE over it, as one project of its own."""
 
-    def __init__(self, directory: Path, image: str, desk_port: int) -> None:
+    def __init__(self, directory: Path, image: str) -> None:
         self.project = f"ta-e2e-{secrets.token_hex(4)}"
-        self._env = {**os.environ, IMAGE_ENV: image, "E2E_DIR": str(directory), "DESK_PORT": str(desk_port)}
+        self._files = (str(COMPOSE_FILE), str(directory / PORTS_FILE))
+        self._env = {**os.environ, IMAGE_ENV: image, "E2E_DIR": str(directory)}
 
     async def run(self, *args: str) -> str:
         """`docker compose <args>`'s output; ComposeError (with the output) on a non-zero exit."""
-        command = ("docker", "compose", "--project-name", self.project, "--file", str(COMPOSE_FILE), *args)
+        files = [option for file in self._files for option in ("--file", file)]
+        command = ("docker", "compose", "--project-name", self.project, *files, *args)
         process = await asyncio.create_subprocess_exec(
             *command, env=self._env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
         )
@@ -174,6 +187,9 @@ class Compose:
         await self.run("up", "--detach", "--wait", "--wait-timeout", str(int(_READY_TIMEOUT_S)), *services)
 
     async def port(self, service: str, container_port: int) -> int:
+        """The host port `service`'s `container_port` is published on; ComposeError for a port PUBLISHED lacks."""
+        if container_port not in PUBLISHED.get(service, ()):
+            raise ComposeError(f"{service}:{container_port} is not in PUBLISHED, so compose does not publish it")
         published = (await self.run("port", service, str(container_port))).strip()
         return int(published.rpartition(":")[2])
 
@@ -290,6 +306,7 @@ def render(  # noqa: PLR0913 (every setting a case varies)
         else None,
     )
     (mounted / "envoy.json").write_text(json.dumps(env, indent=2))
+    (directory / PORTS_FILE).write_text(json.dumps(_ports(desk_port), indent=2))
 
     # The containers run as other users: everything readable, the record directory writable.
     for path in mounted.rglob("*"):
@@ -311,6 +328,15 @@ def render(  # noqa: PLR0913 (every setting a case varies)
         cert=tls.cert,
         key=tls.key,
     )
+
+
+def _ports(desk_port: int) -> dict[str, object]:
+    """PORTS_FILE: PUBLISHED, and the desk on `desk_port` (the host port its public URL names)."""
+    services: dict[str, object] = {
+        name: {"ports": [f"127.0.0.1::{port}" for port in ports]} for name, ports in PUBLISHED.items()
+    }
+    services["approvals"] = {"ports": [f"127.0.0.1:{desk_port}:{APPROVALS_DESK_PORT}"]}
+    return {"services": services}
 
 
 def _service_config(
@@ -450,7 +476,7 @@ def image() -> str:
 @asynccontextmanager
 async def project(rendered: Rendered) -> AsyncIterator[Compose]:
     """compose.yaml over `rendered`, torn down on exit; its logs on stderr when the block fails."""
-    compose = Compose(rendered.directory, image(), rendered.desk_port)
+    compose = Compose(rendered.directory, image())
     try:
         yield compose
     except BaseException:
