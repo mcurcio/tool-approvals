@@ -99,7 +99,7 @@ timeout = 60
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 
-# Import contracts C1-C9: the module map's layering, enforced in CI by `lint-imports`.
+# Import contracts C1-C10: the module map's layering, enforced in CI by `lint-imports`.
 # IO (the I/O and wire libraries no core may import: every runtime dependency's top-level modules, the async
 # runtimes asyncio and anyio, and the standard library's network, process and database modules) is spelled out in
 # C1 and C5-cores; TOML cannot share a list, so tests/test_import_contracts.py keeps the two identical. A core
@@ -333,6 +333,43 @@ forbidden_modules = [
     "udpa",
     "validate",
 ]
+
+[[tool.importlinter.contracts]]
+id = "C10-independent"
+name = "the gateway adapters import none of each other"
+type = "independence"
+# Each adapter shares only the neutral helpers beside it (attributes, errors, grants).
+modules = [
+    "tool_approvals.gate.mappings.check_api",
+    "tool_approvals.gate.mappings.ext_mcp",
+    "tool_approvals.gate.mappings.ext_authz",
+]
+
+[[tool.importlinter.contracts]]
+id = "C10-envoy"
+name = "only the ext_authz adapter imports Envoy's types"
+type = "forbidden"
+source_modules = [
+    "tool_approvals.gate.mappings.check_api",
+    "tool_approvals.gate.mappings.ext_mcp",
+    "tool_approvals.gate.mappings.attributes",
+    "tool_approvals.gate.mappings.errors",
+    "tool_approvals.gate.mappings.grants",
+]
+forbidden_modules = ["envoy", "xds", "udpa", "validate"]
+
+[[tool.importlinter.contracts]]
+id = "C10-agentgateway"
+name = "only the ext_mcp adapter (and gate.main) imports agentgateway's types"
+type = "forbidden"
+source_modules = [
+    "tool_approvals.gate.mappings.check_api",
+    "tool_approvals.gate.mappings.ext_authz",
+    "tool_approvals.gate.mappings.attributes",
+    "tool_approvals.gate.mappings.errors",
+    "tool_approvals.gate.mappings.grants",
+]
+forbidden_modules = ["tool_approvals.contract.agentgateway"]
 
 [[tool.importlinter.contracts]]
 id = "C8"

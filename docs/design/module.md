@@ -91,6 +91,7 @@ standard library's network, process and database modules):
 | C7 | `approvals.app.answers` is importable only by `edges.desk`, `edges.answers` and `main`; `edges.requests`, `app.requests`, `app.waits` and `infra.channels` import none of `app.answers`, `edges.desk`, `edges.answers`, `domain.issuer` | protected + forbidden |
 | C8 | `requests_client` is importable only by `gate.main` and `wait.main` | protected |
 | C9 | `gate.core` and `gate.policy` import no `gate.mappings`, no `contract.agentgateway` and no Envoy types (`envoy`, `xds`, `udpa`, `validate`): each gateway is an optional adapter at the edge, reaching the core only through the gateway port | forbidden |
+| C10 | The adapters `gate.mappings.check_api`, `ext_mcp` and `ext_authz` import none of each other; only `ext_authz` imports Envoy's types and only `ext_mcp` imports `contract.agentgateway` (the shared `attributes`, `errors` and `grants` import neither) | independence, forbidden |
 
 `pyproject.toml` holds the exact contracts.
 
