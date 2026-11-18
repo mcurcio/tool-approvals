@@ -11,9 +11,9 @@ Policy, approval routing and the surfaces people answer on are yours to choose.
 > the rules-file policy, Approvals on Postgres, the wait tool with MCP Tasks, and a minimal desk with step-up
 > sign-in. What is still planned is marked so on this page and in the [roadmap](#roadmap); the first release meant
 > for deployment is milestone 3. Releases stay on `0.x` until the project is declared
-> stable. The `0.x` line starts from a seed tag, `v0.1.0`, that a maintainer pushes once before the first
-> release; on `0.x` a breaking change raises the minor version, a rule deleted from the release configuration
-> when the project goes 1.0.
+> stable. The `0.x` line starts from a seed tag, `v0.1.0`, that the release job puts on the root commit
+> before the first release; on `0.x` a breaking change raises the minor version, a rule deleted from the release
+> configuration when the project goes 1.0.
 
 ## Why
 
