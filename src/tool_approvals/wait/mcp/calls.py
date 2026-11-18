@@ -11,6 +11,7 @@ from starlette.requests import Request
 
 from tool_approvals.auth.asgi import authenticate
 from tool_approvals.auth.registry import Registry
+from tool_approvals.kernel.calls import TASKS_PREFIX, TOOLS_CALL
 from tool_approvals.kernel.methods import Method
 from tool_approvals.kernel.names import Principal, Ticket
 from tool_approvals.kernel.requests import WaitReport
@@ -43,7 +44,7 @@ class WaitCallGuard:
         self._registry: Final = registry
 
     async def __call__(self, ctx: ServerRequestContext[Any, Any], call_next: CallNext) -> HandlerResult:
-        if ctx.method == "tools/call" or ctx.method.startswith("tasks/"):
+        if ctx.method == TOOLS_CALL or ctx.method.startswith(TASKS_PREFIX):
             require_wait_call(ctx, self._registry)
         return await call_next(ctx)
 

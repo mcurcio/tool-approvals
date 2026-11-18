@@ -5,7 +5,6 @@ AttributeContext into HttpFacts and the classification (or the checker's verdict
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
-from types import MappingProxyType
 from typing import Any, Final
 
 import grpc
@@ -16,16 +15,21 @@ from tool_approvals.config.views import ExtAuthzAttributeView, ExtAuthzView, Wai
 from tool_approvals.gate.core.check import Checker, Pass, Pending, Unavailable
 from tool_approvals.gate.core.ports import GatewayContext
 from tool_approvals.gate.core.wording import agent_text
-from tool_approvals.gate.mappings.attributes import struct_string
+from tool_approvals.gate.mappings.attributes import present, struct_string
 from tool_approvals.gate.mappings.errors import Refusal, error_code, verdict_name
 from tool_approvals.gate.mappings.grants import check_grants
-from tool_approvals.kernel.calls import CallRejected, RejectReason, RpcRequest, read_rpc_request
+from tool_approvals.kernel.calls import (
+    TASKS_PREFIX,
+    TOOLS_CALL,
+    CallRejected,
+    RejectReason,
+    RpcRequest,
+    read_rpc_request,
+)
 from tool_approvals.kernel.names import Principal, ServerName
 from tool_approvals.kernel.requests import Rejected
 from tool_approvals.serving.grpc_server import inbound_deadline
 
-TOOLS_CALL: Final = "tools/call"
-TASKS_PREFIX: Final = "tasks/"
 POST: Final = "POST"
 # Envoy marks a body it cut at max_request_bytes (allow_partial_message) with this header.
 PARTIAL_BODY_HEADER: Final = "x-envoy-auth-partial-body"
@@ -72,12 +76,13 @@ EXT_AUTHZ_PASS_METHODS: Final[frozenset[str]] = frozenset(
 )
 
 
-def classify(facts: HttpFacts, pass_methods: frozenset[str], wait_server: ServerName) -> Classification:
+def classify(facts: HttpFacts, pass_methods: frozenset[str]) -> Classification:
     """What the gate does with one HTTP request on an MCP route. A route naming no server is Unavailable; anything
     but a POST, MALFORMED; a body Envoy cut, TOO_LARGE; a body that is not one JSON-RPC request (a batch, duplicate
     keys, trailing data, no method, a client's JSON-RPC response), MALFORMED. Then by method: tools/call is
     checked on its params span's exact bytes; `pass_methods` pass on; tasks/* is TASK_REQUESTED; any other method
-    MALFORMED, answering the request's id. `wait_server`'s route is checked as any server's (question 7)."""
+    MALFORMED, answering the request's id. The wait server's route is checked as any server's: whether it should
+    pass unchecked behind Envoy, as it does behind agentgateway, waits on question 7."""
     read = _read_request(facts)
     if isinstance(read, Deny):
         return read
@@ -132,7 +137,7 @@ class ExtAuthzServicer(external_auth_pb2_grpc.AuthorizationServicer):  # type: i
         http = attributes.request.http
         server: str = attributes.context_extensions.get(self._view.server_key, "")
         facts = HttpFacts(method=http.method, partial_body=_partial(http), body=http.raw_body, server=server)
-        match classify(facts, EXT_AUTHZ_PASS_METHODS, self._route.server):
+        match classify(facts, EXT_AUTHZ_PASS_METHODS):
             case PassOn():
                 return _allow(self._route.principal_header)
             case Deny(verdict, id_json):
@@ -154,8 +159,7 @@ class ExtAuthzServicer(external_auth_pb2_grpc.AuthorizationServicer):  # type: i
 
     def _attributes(self, attributes: Any) -> Mapping[str, str]:
         """Each attribute `view.attributes` names, from its one source; a missing or non-string one is left out."""
-        found = {name: _attribute(attributes, source) for name, source in self._view.attributes.items()}
-        return MappingProxyType({name: value for name, value in found.items() if value is not None})
+        return present({name: _attribute(attributes, source) for name, source in self._view.attributes.items()})
 
 
 def add_servicer(servicer: ExtAuthzServicer, server: grpc.aio.Server) -> None:

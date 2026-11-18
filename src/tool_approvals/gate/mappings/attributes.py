@@ -1,8 +1,11 @@
 """Reading gateway attributes out of a gateway's metadata, for the mappings that copy them into a GatewayContext.
 
 The rule every mapping follows: an attribute whose source is missing, or is not a string, is left out of
-`GatewayContext.attributes`; nothing a mapping was not told to copy is copied.
+`GatewayContext.attributes` (`present`); nothing a mapping was not told to copy is copied.
 """
+
+from collections.abc import Mapping
+from types import MappingProxyType
 
 from google.protobuf import struct_pb2
 
@@ -20,3 +23,9 @@ def struct_string(struct: struct_pb2.Struct, path: tuple[str, ...]) -> str | Non
     if value is None or value.WhichOneof("kind") != "string_value":
         return None
     return value.string_value
+
+
+def present(found: Mapping[str, str | None]) -> Mapping[str, str]:
+    """The attributes a mapping found, by name, without the ones it did not find (None): a read-only copy, ready
+    for `GatewayContext.attributes`."""
+    return MappingProxyType({name: value for name, value in found.items() if value is not None})

@@ -2,7 +2,6 @@
 phase, as the last processor, failing closed."""
 
 from collections.abc import Mapping
-from types import MappingProxyType
 from typing import Final
 
 import grpc.aio
@@ -13,7 +12,7 @@ from tool_approvals.contract.agentgateway import ext_mcp_pb2, ext_mcp_pb2_grpc
 from tool_approvals.gate.core.check import Checker, Pass
 from tool_approvals.gate.core.ports import GatewayContext
 from tool_approvals.gate.core.wording import agent_text
-from tool_approvals.gate.mappings.attributes import struct_string
+from tool_approvals.gate.mappings.attributes import present, struct_string
 from tool_approvals.gate.mappings.errors import (
     PERMISSION_DENIED_CODE,
     RESOURCE_EXHAUSTED_CODE,
@@ -21,10 +20,10 @@ from tool_approvals.gate.mappings.errors import (
     error_code,
 )
 from tool_approvals.gate.mappings.grants import check_grants
+from tool_approvals.kernel.calls import TOOLS_CALL
 from tool_approvals.kernel.names import Principal, ServerName
 from tool_approvals.serving.grpc_server import inbound_deadline
 
-TOOLS_CALL: Final = "tools/call"
 MISCONFIGURED: Final = "misconfigured"
 EXT_MCP_METHODS: Final = check_grants(ext_mcp_pb2.DESCRIPTOR, "ExtMcp")
 
@@ -75,8 +74,7 @@ class ExtMcpServicer(ext_mcp_pb2_grpc.ExtMcpServicer):
 
     def _attributes(self, metadata: struct_pb2.Struct) -> Mapping[str, str]:
         """Each attribute `view.attributes` names, read at its key path; a missing or non-string one is left out."""
-        found = {name: struct_string(metadata, path) for name, path in self._view.attributes.items()}
-        return MappingProxyType({name: value for name, value in found.items() if value is not None})
+        return present({name: struct_string(metadata, path) for name, path in self._view.attributes.items()})
 
     async def CheckResponse(
         self,

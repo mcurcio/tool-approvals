@@ -22,6 +22,8 @@ from typing import Final
 from tool_approvals.kernel.names import Digest, Fingerprint, Principal, RequirementName, ServerName, ToolName
 from tool_approvals.kernel.words import AgentWords
 
+TOOLS_CALL: Final = "tools/call"  # the JSON-RPC method of an MCP tool call
+TASKS_PREFIX: Final = "tasks/"  # the MCP Tasks methods
 MAX_PARAMS_BYTES: Final = 16_384
 ALLOWED_PARAMS_KEYS: Final = frozenset({"name", "arguments", "_meta"})
 CLIENT_CAPABILITIES_META_KEY: Final = "io.modelcontextprotocol/clientCapabilities"

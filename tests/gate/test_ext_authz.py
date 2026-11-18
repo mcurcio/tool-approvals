@@ -106,7 +106,7 @@ def test_the_pass_methods_wait_on_question_6() -> None:
 @pytest.mark.parametrize("row", ROWS, ids=[row.name for row in ROWS])
 def test_classify_follows_the_table(row: Row) -> None:
     facts = HttpFacts(method=row.method, partial_body=row.partial, body=row.body, server=row.server)
-    assert classify(facts, EXT_AUTHZ_PASS_METHODS, ROUTE.server) == row.expected
+    assert classify(facts, EXT_AUTHZ_PASS_METHODS) == row.expected
 
 
 @pytest.mark.parametrize("row", ROWS, ids=[row.name for row in ROWS])
@@ -181,7 +181,7 @@ async def test_the_id_is_echoed_byte_for_byte(tls: TlsFiles) -> None:
 def test_a_checked_call_carries_the_params_span_not_a_re_encoding() -> None:
     body = b'{ "method" : "tools/call", "params" :' + GATED + b' , "id": 1.50e1, "jsonrpc": "2.0" }'
     facts = HttpFacts(method="POST", partial_body=False, body=body, server=SERVER)
-    assert classify(facts, EXT_AUTHZ_PASS_METHODS, ROUTE.server) == ToCheck(GATED, b"1.50e1")
+    assert classify(facts, EXT_AUTHZ_PASS_METHODS) == ToCheck(GATED, b"1.50e1")
 
 
 @settings(max_examples=250)
@@ -190,4 +190,4 @@ def test_classify_hands_on_the_exact_params_bytes(params: str) -> None:
     """The kernel's span property, through the mapping: what is checked is the params as sent, never re-encoded."""
     body = b'{"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": ' + params.encode() + b"}"
     facts = HttpFacts(method="POST", partial_body=False, body=body, server=SERVER)
-    assert classify(facts, EXT_AUTHZ_PASS_METHODS, ROUTE.server) == ToCheck(params.encode(), b"7")
+    assert classify(facts, EXT_AUTHZ_PASS_METHODS) == ToCheck(params.encode(), b"7")
