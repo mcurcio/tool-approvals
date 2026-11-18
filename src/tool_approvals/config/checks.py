@@ -145,6 +145,28 @@ def _gate(cfg: "ConfigFile") -> Iterator[str]:
     for where, name in [*named, ("gate.policy.default", gate.policy.default)]:
         if name != NO_APPROVAL and name not in known:
             yield f"{where}: unknown requirement {name!r}"
+    yield from _rule_attributes(cfg)
+
+
+def _rule_attributes(cfg: "ConfigFile") -> Iterator[str]:
+    """Every attribute a policy rule reads is supplied by every enabled gateway mapping that maps attributes
+    (ext_mcp, ext_authz), and by at least one enabled mapping (the Check API's caller sends its own)."""
+    gate = cfg.gate
+    if gate is None:
+        return
+    mapped: dict[str, set[str]] = {}
+    if gate.ext_mcp is not None:
+        mapped["ext_mcp"] = set(gate.ext_mcp.attributes)
+    if gate.ext_authz is not None:
+        mapped["ext_authz"] = set(gate.ext_authz.attributes)
+    for index, rule in enumerate(gate.policy.rules):
+        for name in rule.attributes:
+            where = f"gate.policy.rules[{index}].attributes.{name}"
+            for mapping, names in mapped.items():
+                if name not in names:
+                    yield f"{where}: not mapped by gate.{mapping}.attributes"
+            if gate.check_api is None and not any(name in names for names in mapped.values()):
+                yield f"{where}: no enabled mapping supplies it"
 
 
 def _approvals(cfg: "ConfigFile") -> Iterator[str]:

@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import timedelta
+from types import MappingProxyType
 from typing import Any, Final
 
 import grpc
@@ -23,6 +24,7 @@ from tests.fixtures.scripted_requests import Script, scripted_requests
 from tool_approvals.auth.registry import issue_bearer
 from tool_approvals.config.views import (
     CheckApiView,
+    ExtAuthzAttributeView,
     ExtAuthzView,
     ExtMcpView,
     GateView,
@@ -46,11 +48,25 @@ GHOST: Final = RequirementName("ghost")  # named by the policy, unknown to the d
 WAIT_TOOL: Final = "approvals-wait_approval_wait"
 ROUTE: Final = WaitRouteView(ServerName("approvals-wait"), "x-approvals-principal")
 PRINCIPAL_KEY: Final = "principal"
-PRINCIPAL_PATH: Final = ("envoy.filters.http.jwt_authn", "payload", "sub")
+JWT_FILTER: Final = "envoy.filters.http.jwt_authn"
+PRINCIPAL_PATH: Final = (JWT_FILTER, "payload", "sub")
 SERVER_KEY: Final = "server"
+TENANT: Final = "blue"  # one tenant claim, as each gateway carries it
+# The one gateway attribute, `tenant`, as each mapping is told where to find it.
+MCP_ATTRIBUTES: Final = MappingProxyType({"tenant": ("jwt", "tenant")})
+AUTHZ_ATTRIBUTES: Final = MappingProxyType({"tenant": ExtAuthzAttributeView((JWT_FILTER, "payload", "tenant"), None)})
+ZONE_KEY: Final = "zone"  # a context_extensions entry every ext_authz request carries
+ZONE: Final = "eu-1"
+
+
+def rule(principal: str, server: str, tool: str, require: RequirementName | None, **attributes: str) -> RuleView:
+    """A policy rule; `attributes`: gateway attribute name → pattern."""
+    return RuleView(principal, server, tool, require, MappingProxyType(attributes))
+
+
 # read_* runs without a yes; ghost_* names a requirement nobody configured; everything else needs `reviewed`.
 POLICY: Final = RulesView(
-    rules=(RuleView("*", "*", "read_*", None), RuleView("*", "*", "ghost_*", GHOST)),
+    rules=(rule("*", "*", "read_*", None), rule("*", "*", "ghost_*", GHOST)),
     default=REVIEWED,
 )
 
@@ -92,6 +108,7 @@ def gate_view(approvals: Any, tls: TlsFiles, budget: timedelta, entries: Sequenc
             hook_timeout=timedelta(seconds=10),
             principal_key=PRINCIPAL_KEY,
             exposed_wait_tool=WAIT_TOOL,
+            attributes=MCP_ATTRIBUTES,
         ),
         ext_authz=ExtAuthzView(
             listener=_listener(tls),
@@ -99,6 +116,7 @@ def gate_view(approvals: Any, tls: TlsFiles, budget: timedelta, entries: Sequenc
             principal_path=PRINCIPAL_PATH,
             server_key=SERVER_KEY,
             exposed_wait_tool=WAIT_TOOL,
+            attributes=AUTHZ_ATTRIBUTES,
         ),
         policy=POLICY,
         requirements=frozenset({REVIEWED}),
@@ -189,7 +207,7 @@ def mcp_request(
     context = struct_pb2.Struct()
     if principal is not None:
         context.update({PRINCIPAL_KEY: principal})
-    context.update({"tenant": "blue", "weight": 3})
+    context.update({"jwt": {"tenant": TENANT}, "weight": 3})
     request = ext_mcp_pb2.McpRequest(
         service_names=[server] if service_names is None else list(service_names),
         method=method,
@@ -231,10 +249,10 @@ def authz_request(
         http.headers[key] = value
     if server is not None:
         attributes.context_extensions[SERVER_KEY] = server
-    attributes.context_extensions["tenant"] = "blue"
+    attributes.context_extensions[ZONE_KEY] = ZONE
     if principal is not None:
         filter_name, outer, inner = PRINCIPAL_PATH
-        attributes.metadata_context.filter_metadata[filter_name].update({outer: {inner: principal}})
+        attributes.metadata_context.filter_metadata[filter_name].update({outer: {inner: principal, "tenant": TENANT}})
     return request
 
 

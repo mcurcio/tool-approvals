@@ -10,8 +10,10 @@ from google.protobuf import struct_pb2
 
 from tool_approvals.config.views import ExtMcpView, WaitRouteView
 from tool_approvals.contract.agentgateway import ext_mcp_pb2, ext_mcp_pb2_grpc
-from tool_approvals.gate.core.check import Call, CheckCore, Pass
+from tool_approvals.gate.core.check import Checker, Pass
+from tool_approvals.gate.core.ports import GatewayContext
 from tool_approvals.gate.core.wording import agent_text
+from tool_approvals.gate.mappings.attributes import struct_string
 from tool_approvals.gate.mappings.errors import (
     PERMISSION_DENIED_CODE,
     RESOURCE_EXHAUSTED_CODE,
@@ -19,6 +21,7 @@ from tool_approvals.gate.mappings.errors import (
     error_code,
 )
 from tool_approvals.kernel.names import Principal, ServerName
+from tool_approvals.serving.grpc_server import inbound_deadline
 
 TOOLS_CALL: Final = "tools/call"
 MISCONFIGURED: Final = "misconfigured"
@@ -34,11 +37,12 @@ class ExtMcpServicer(ext_mcp_pb2_grpc.ExtMcpServicer):
     """Behind GrpcAuth. A method other than tools/call, or service_names not exactly one: PERMISSION_DENIED
     "misconfigured". The principal is metadata_context[principal_key], a non-empty string, else refused. The wait
     route (`route.server`): pass, setting `route.principal_header` to the principal, no policy. Any other server:
-    the core decides; a pass removes `route.principal_header` so no tool sees a client-sent one. A refusal is an
+    the checker decides, given only the attributes `view.attributes` maps out of metadata_context and the RPC's
+    deadline; a pass removes `route.principal_header` so no tool sees a client-sent one. A refusal is an
     AuthorizationError (PERMISSION_DENIED or RESOURCE_EXHAUSTED, mappings.errors) with agent_text as its reason."""
 
-    def __init__(self, core: CheckCore, view: ExtMcpView, route: WaitRouteView) -> None:
-        self._core: Final = core
+    def __init__(self, checker: Checker, view: ExtMcpView, route: WaitRouteView) -> None:
+        self._checker: Final = checker
         self._view: Final = view
         self._route: Final = route
 
@@ -47,7 +51,7 @@ class ExtMcpServicer(ext_mcp_pb2_grpc.ExtMcpServicer):
         request: ext_mcp_pb2.McpRequest,
         context: grpc.aio.ServicerContext[ext_mcp_pb2.McpRequest, ext_mcp_pb2.McpRequestResult],
     ) -> ext_mcp_pb2.McpRequestResult:
-        principal = _string_field(request.metadata_context, self._view.principal_key)
+        principal = struct_string(request.metadata_context, (self._view.principal_key,))
         if request.method != TOOLS_CALL or len(request.service_names) != 1 or not principal:
             return _misconfigured()
         server = ServerName(request.service_names[0])
@@ -55,8 +59,10 @@ class ExtMcpServicer(ext_mcp_pb2_grpc.ExtMcpServicer):
             # The wait server's route: no policy; the attested principal replaces any header the client sent.
             header = ext_mcp_pb2.McpHeader(key=self._route.principal_header, value=principal.encode())
             return _passing(ext_mcp_pb2.HeaderMutation(set=[header]))
-        call = Call(Principal(principal), server, request.mcp_request, _attributes(request.metadata_context))
-        verdict = await self._core.check(call)
+        gateway = GatewayContext(
+            Principal(principal), server, self._attributes(request.metadata_context), inbound_deadline(context)
+        )
+        verdict = await self._checker.check(gateway, request.mcp_request)
         match verdict:
             case Pass():
                 # No tool ever sees a principal header a client sent: only the wait route carries the gateway's.
@@ -64,6 +70,11 @@ class ExtMcpServicer(ext_mcp_pb2_grpc.ExtMcpServicer):
                 return _passing(strip)
             case _:
                 return _refused(verdict, agent_text(verdict, self._view.exposed_wait_tool))
+
+    def _attributes(self, metadata: struct_pb2.Struct) -> Mapping[str, str]:
+        """Each attribute `view.attributes` names, read at its key path; a missing or non-string one is left out."""
+        found = {name: struct_string(metadata, path) for name, path in self._view.attributes.items()}
+        return MappingProxyType({name: value for name, value in found.items() if value is not None})
 
     async def CheckResponse(
         self,
@@ -90,18 +101,3 @@ def _refused(refusal: Refusal, reason: str) -> ext_mcp_pb2.McpRequestResult:
 def _misconfigured() -> ext_mcp_pb2.McpRequestResult:
     error = ext_mcp_pb2.AuthorizationError(code=_Code.PERMISSION_DENIED, reason=MISCONFIGURED)
     return ext_mcp_pb2.McpRequestResult(error=error)
-
-
-def _string_field(struct: struct_pb2.Struct, key: str) -> str:
-    """The string at `key`, or "" when it is absent or not a string."""
-    value = struct.fields.get(key)
-    if value is None or value.WhichOneof("kind") != "string_value":
-        return ""
-    return value.string_value
-
-
-def _attributes(struct: struct_pb2.Struct) -> Mapping[str, str]:
-    """The gateway's metadata context as policy attributes: every string-valued field."""
-    return MappingProxyType(
-        {key: value.string_value for key, value in struct.fields.items() if value.WhichOneof("kind") == "string_value"}
-    )

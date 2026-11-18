@@ -40,7 +40,8 @@ The Python packages, what each may import, what each module promises, and how Ap
 | Term | Meaning |
 |---|---|
 | Kernel | The pure package the three services share ([Shared Kernel](https://www.domainlanguage.com/ddd/reference/)) |
-| Gateway attributes | Opaque name/value pairs a mapping copies from the gateway's own metadata |
+| Gateway attributes | Operator-named string values a mapping copies from the gateway's own metadata, only the names its `attributes` lists |
+| Gateway port | `GatewayContext` (principal, server, gateway attributes, the hook's deadline) and `Checker`: all the gate's core and policy know of any gateway |
 | Span | The exact byte range of one JSON value inside a larger text |
 | Form token | The desk's signed proof that an answer comes from the page that showed this digest |
 | Cursor | One channel's delivery position (the last delivered event id) |
@@ -57,13 +58,15 @@ The Python packages, what each may import, what each module promises, and how Ap
  │ mappings/ ext_mcp      │ │ mcp/  server (tool)  │ │ edges/ requests (gRPC)  desk/  answers* admin*      │
  │           ext_authz    │ │       tasks, calls   │ │ infra/ store/ (repositories, UoW, locks, clock,     │
  │           check_api    │ │ core/ hold (use case)│ │        migrations)  feed (LISTEN)  sources          │
- │           errors       │ │   wording            │ │        channels/*                                   │
- │ policy/ rules_file     │ │   port WaitRequests  │ │ app/   requests waits answers deadlines rules       │
- │   gateway_context*     │ └──────────────────────┘ │        attempts ports  delivery* audit*             │
+ │           attributes   │ │   wording            │ │        channels/*                                   │
+ │           errors       │ │   port WaitRequests  │ │ app/   requests waits answers deadlines rules       │
+ │ policy/ rules_file     │ └──────────────────────┘ │        attempts ports  delivery* audit*             │
  │   authzen* opa*        │                          │ domain/ approval (Approval, Wait)  answer  issuer   │
  │ core/ check use case,  │                          └─────────────────────────────────────────────────────┘
  │   wording, ports       │
- │   Policy, GateRequests │                                                          * planned
+ │   Policy, GateRequests │
+ │   GatewayContext,      │
+ │   Checker              │                                                          * planned
  └────────────────────────┘
  requests_client/ ApprovalRequests over gRPC (satisfies GateRequests and WaitRequests structurally)
  contract_mapping/ the one translation between the ApprovalRequests wire and the kernel
@@ -87,6 +90,7 @@ standard library's network, process and database modules):
 | C6 | `approvals.domain.issuer` (the only holder of the `Answer` constructor key) is importable only by `approvals.app.answers` and `approvals.infra.store` (which rebuilds stored answers through it) | protected |
 | C7 | `approvals.app.answers` is importable only by `edges.desk`, `edges.answers` and `main`; `edges.requests`, `app.requests`, `app.waits` and `infra.channels` import none of `app.answers`, `edges.desk`, `edges.answers`, `domain.issuer` | protected + forbidden |
 | C8 | `requests_client` is importable only by `gate.main` and `wait.main` | protected |
+| C9 | `gate.core` and `gate.policy` import no `gate.mappings`, no `contract.agentgateway` and no Envoy types (`envoy`, `xds`, `udpa`, `validate`): each gateway is an optional adapter at the edge, reaching the core only through the gateway port | forbidden |
 
 `pyproject.toml` holds the exact contracts.
 
@@ -97,9 +101,9 @@ standard library's network, process and database modules):
 | `kernel.calls` | principal, server, params bytes; a JSON-RPC body | `CallIdentity` or `CallRejected`; the params span (`read_rpc_request`); the shown digest (computed only here) | Re-encode; accept duplicate or escaped-duplicate keys, trailing data, extra top-level keys, a task request (a `task` member or a Tasks declaration in `_meta`), nesting past 32 levels, a number that overflows a float, an empty name, a NUL or lone surrogate in a name or an argument key or string; a batch, or a duplicate `method` or `params` |
 | `kernel.requirements` | assurance scale, requirements | `stricter`, `meets_floor`, `qualify` | Read an identity provider or a clock |
 | `contract_mapping` | kernel results; ApprovalRequests replies | the one wire form of each value, both directions; the method paths; the `Refused` and `Rejected` messages the Check API writes too | Know a grant, a configuration or a service; read a reply of a kind it does not know as anything but `UnknownReply` |
-| `gate.core` | a call (principal, server, params, gateway attributes), a deadline | the verdict | Know a wire, a gateway or the wait server |
-| `gate.mappings.*` | one gateway's hook message | a call; the verdict in the gateway's encoding; `ext_mcp` sets the principal header on the wait route | Read caller or server from the body; send the wait route to policy |
-| `gate.policy.*` | principal, server, tool, arguments, gateway attributes | `none` or `require(name)`; anything else refuses | Cache; decide reach |
+| `gate.core` | a `GatewayContext` (principal, server, gateway attributes, the hook's deadline) and the params bytes | the verdict, within the sooner of `check_budget` and the deadline less a 250 ms reply reserve | Know a wire, a gateway or the wait server |
+| `gate.mappings.*` | one gateway's hook message | a `GatewayContext` holding only the attributes its configuration maps, and the RPC's inbound deadline; the verdict in the gateway's encoding; `ext_mcp` sets the principal header on the wait route | Depend on `CheckCore` (only on `Checker`); read caller or server from the body; send the wait route to policy; copy metadata it was not told to |
+| `gate.policy.*` | principal, server, tool, arguments, gateway attributes | `none` or `require(name)`; anything else refuses (the rules file raises when a rule whose principal, server and tool match names an attribute the call lacks) | Cache; decide reach; know a gateway's metadata keys |
 | `wait.core`, `wait.mcp` | principal, ticket, words; a wait id | the held outcome; a task only to a client that declared Tasks, authorised by its id alone (no principal is attested on `tasks/*`), and none with `wait.tasks: disabled` | Keep wait state; answer `tasks/update`; put wait ids in spans or logs; import `asyncio` in the core (it waits through the kernel's `Timeouts` port, which `serving.timeouts` implements) |
 | `approvals.app.requests` | a call reference, a requirement name | `request`; `claim`, the only spend | List, show or answer |
 | `approvals.app.waits` | open, await (and later cancel) a wait | wait ids, status streams | Open a wait on another principal's ticket |

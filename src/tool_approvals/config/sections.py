@@ -181,11 +181,31 @@ class CheckApi(Section):
     exposed_wait_tool: Text
 
 
+# A key path into a gateway's metadata: one or more keys, each descending into the struct the one before names.
+KeyPath = Annotated[tuple[Text, ...], Field(min_length=1)]
+
+
 class ExtMcp(Section):
     listener: Listener
     hook_timeout: Duration = timedelta(seconds=10)
     principal_key: Text
     exposed_wait_tool: Text
+    # Each gateway attribute policy may read, by name: its key path into the processor's metadata_context.
+    attributes: dict[Text, KeyPath] = {}
+
+
+class ExtAuthzAttribute(Section):
+    """Where one gateway attribute is read from in Envoy's CheckRequest: a string in the dynamic metadata, or a
+    route's context_extensions entry."""
+
+    metadata: Annotated[tuple[Text, ...], Field(min_length=2)] | None = None  # the filter name, then keys
+    context_extension: Text | None = None
+
+    @model_validator(mode="after")
+    def _exactly_one(self) -> Self:
+        if (self.metadata is None) == (self.context_extension is None):
+            raise ValueError("an ext_authz attribute names exactly one of metadata or context_extension")
+        return self
 
 
 class ExtAuthz(Section):
@@ -194,12 +214,14 @@ class ExtAuthz(Section):
     principal_path: Annotated[tuple[Text, ...], Field(min_length=2)]  # the filter name, then one or more keys
     server_key: Text = "server"
     exposed_wait_tool: Text
+    attributes: dict[Text, ExtAuthzAttribute] = {}  # each gateway attribute policy may read, by name
 
 
 class Rule(Section):
     principal: Text = DEFAULT_PATTERN
     server: Text = DEFAULT_PATTERN
     tool: Text = DEFAULT_PATTERN
+    attributes: dict[Text, Text] = {}  # gateway attribute name → case-sensitive pattern; every one must match
     require: Text  # a requirement's name, or NO_APPROVAL
 
 

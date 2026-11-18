@@ -73,6 +73,7 @@ class RuleView:
     server: str
     tool: str
     require: RequirementName | None  # None: no approval needed
+    attributes: Mapping[str, str]  # gateway attribute name → fnmatch pattern, matched case-sensitively
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +95,15 @@ class ExtMcpView:
     hook_timeout: timedelta  # the gateway's own timeout on the hook; check_budget is below it
     principal_key: str  # the metadata_context key holding the attested principal
     exposed_wait_tool: str
+    attributes: Mapping[str, tuple[str, ...]]  # gateway attribute name → key path into metadata_context
+
+
+@dataclass(frozen=True, slots=True)
+class ExtAuthzAttributeView:
+    """Exactly one source is set."""
+
+    metadata: tuple[str, ...] | None  # filter name, then keys, into the request's dynamic metadata
+    context_extension: str | None  # a context_extensions key
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +113,7 @@ class ExtAuthzView:
     principal_path: tuple[str, ...]  # filter name, then keys, into the request's dynamic metadata
     server_key: str  # the context_extensions key naming the route's server
     exposed_wait_tool: str
+    attributes: Mapping[str, ExtAuthzAttributeView]  # gateway attribute name → its source
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,6 +231,7 @@ def gate_view(cfg: ConfigFile, env: Mapping[str, str]) -> GateView:
             hook_timeout=gate.ext_mcp.hook_timeout,
             principal_key=gate.ext_mcp.principal_key,
             exposed_wait_tool=gate.ext_mcp.exposed_wait_tool,
+            attributes=MappingProxyType(dict(gate.ext_mcp.attributes)),
         ),
         ext_authz=None
         if gate.ext_authz is None
@@ -229,10 +241,23 @@ def gate_view(cfg: ConfigFile, env: Mapping[str, str]) -> GateView:
             principal_path=gate.ext_authz.principal_path,
             server_key=gate.ext_authz.server_key,
             exposed_wait_tool=gate.ext_authz.exposed_wait_tool,
+            attributes=MappingProxyType(
+                {
+                    name: ExtAuthzAttributeView(source.metadata, source.context_extension)
+                    for name, source in gate.ext_authz.attributes.items()
+                }
+            ),
         ),
         policy=RulesView(
             rules=tuple(
-                RuleView(rule.principal, rule.server, rule.tool, _required(rule.require)) for rule in gate.policy.rules
+                RuleView(
+                    rule.principal,
+                    rule.server,
+                    rule.tool,
+                    _required(rule.require),
+                    MappingProxyType(dict(rule.attributes)),
+                )
+                for rule in gate.policy.rules
             ),
             default=_required(gate.policy.default),
         ),

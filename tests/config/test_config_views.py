@@ -8,6 +8,7 @@ from ruamel.yaml import YAML
 
 from tool_approvals.config.file import load
 from tool_approvals.config.views import (
+    ExtAuthzAttributeView,
     ListenerView,
     RuleView,
     TlsView,
@@ -58,9 +59,15 @@ def test_the_gate_view_mirrors_its_sections() -> None:
     assert view.ext_authz is not None
     assert view.ext_authz.principal_path == ("envoy.filters.http.jwt_authn", "payload", "sub")
     assert view.ext_authz.server_key == "server"
+    assert view.ext_mcp.attributes == {"tenant": ("jwt", "tenant")}
+    assert view.ext_authz.attributes == {
+        "tenant": ExtAuthzAttributeView(("envoy.filters.http.jwt_authn", "payload", "tenant"), None),
+        "zone": ExtAuthzAttributeView(None, "zone"),
+    }
     assert view.policy.rules == (
-        RuleView("*", "files", "delete_*", RequirementName("reviewed")),
-        RuleView("ci-*", "*", "*", None),
+        RuleView("*", "files", "delete_*", RequirementName("reviewed"), {}),
+        RuleView("*", "billing", "*", RequirementName("reviewed"), {"tenant": "blue"}),
+        RuleView("ci-*", "*", "*", None, {}),
     )
     assert view.policy.default is None
     assert view.requirements == {RequirementName("reviewed")}
@@ -155,6 +162,7 @@ def test_defaults_fill_what_the_file_leaves_out(tmp_path: Path) -> None:
     del document["gate"]["check_budget"]
     del document["gate"]["ext_mcp"]["hook_timeout"]
     del document["gate"]["ext_authz"]["server_key"]
+    del document["gate"]["ext_mcp"]["attributes"]
     document["gate"]["policy"]["rules"] = [{"require": "reviewed"}]
     view = gate_view(load(_write(tmp_path, document)), {"GATE_APPROVALS_BEARER": "b"})
     assert view.check_budget == timedelta(seconds=5)
@@ -162,4 +170,5 @@ def test_defaults_fill_what_the_file_leaves_out(tmp_path: Path) -> None:
     assert view.ext_mcp.hook_timeout == timedelta(seconds=10)
     assert view.ext_authz is not None
     assert view.ext_authz.server_key == "server"
-    assert view.policy.rules == (RuleView("*", "*", "*", RequirementName("reviewed")),)
+    assert view.policy.rules == (RuleView("*", "*", "*", RequirementName("reviewed"), {}),)
+    assert view.ext_mcp.attributes == {}

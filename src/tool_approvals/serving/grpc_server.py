@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Final
+from typing import Any, Final
 
 import grpc
 import grpc.aio
@@ -94,3 +94,10 @@ async def serve_grpc(server: grpc.aio.Server, stop: asyncio.Event, grace: timede
         await stop.wait()
     finally:
         await server.stop(grace.total_seconds())
+
+
+def inbound_deadline(context: grpc.aio.ServicerContext[Any, Any]) -> timedelta | None:
+    """How long the caller still waits for this RPC's reply (its gRPC deadline, less the time already spent; zero
+    or less once it has passed), or None when it sent no deadline."""
+    remaining = context.time_remaining()
+    return None if remaining is None else timedelta(seconds=remaining)

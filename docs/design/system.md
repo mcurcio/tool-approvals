@@ -45,8 +45,8 @@ failure); the [module design](module.md) goes one further (packages, import rule
 | Approval | One request for a person's yes or no on one exact call |
 | Ticket | The unguessable handle of an Approval that the agent is given |
 | Check API | The gate's public contract: check a call |
-| Mapping | Thin code turning one gateway's hook into a Check API call |
-| Gateway attributes | Opaque name/value pairs a mapping copies from the gateway's own metadata, for policy |
+| Mapping | Thin code turning one gateway's hook into the gateway port the gate decides on; each is optional |
+| Gateway attributes | Operator-named string values a mapping copies from the gateway's own metadata, for policy; never a gateway's own key names |
 | Policy port | Says "no approval needed" or "requires X" for a call; what an agent may reach at all stays the gateway's job |
 | Approval requirement | A named rule: approver groups, allowed surfaces, minimum assurance, sign-in age, deadlines |
 | Assurance level | An operator-named strength of a sign-in (for example password, MFA, passkey), read from the identity provider's `acr` claim |
@@ -70,7 +70,7 @@ failure); the [module design](module.md) goes one further (packages, import rule
 
 | Part | Does | Never does |
 |---|---|---|
-| Mapping | Builds a call from the gateway's attested caller and route; renders the verdict in the gateway's encoding | Re-serialise the call; read the caller or server from the call body |
+| Mapping | Builds the gateway port's context (attested caller, route, the configured attributes, the hook's deadline) and hands it with the params to the gate; renders the verdict in the gateway's encoding | Re-serialise the call; read the caller or server from the call body; let the gate's core depend on a gateway's types |
 | Gate | Asks policy; spends or requests an Approval; stateless | List, show or answer Approvals; carry tool traffic |
 | Wait server | Serves the `approval_wait` tool; returns a Wait Task where declared | Answer, or wait on another caller's ticket |
 | Approvals | Owns Approvals, requirements, waits, answers, the audit report, events | Run a tool; decide what needs approval |

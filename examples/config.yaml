@@ -81,16 +81,22 @@ gate:
     hook_timeout: 10s # default; the gateway's own timeout on the hook
     principal_key: principal
     exposed_wait_tool: approvals-wait_approval_wait
+    attributes: # leave out to give policy no attributes; name: its key path into the processor's metadata
+      tenant: [jwt, tenant]
   ext_authz:
     listener: { host: 0.0.0.0, port: 9445, tls: { cert: /etc/tool-approvals/gate.pem, key: /etc/tool-approvals/gate-key.pem } }
     hook_timeout: 70s # no default: raise Envoy's ext_authz timeout to match
     principal_path: [envoy.filters.http.jwt_authn, payload, sub] # filter name, then keys
     server_key: server # default; the route's context_extensions key naming its server
     exposed_wait_tool: approvals-wait_approval_wait
+    attributes: # name: exactly one of metadata (filter name, then keys) or context_extension (a key)
+      tenant: { metadata: [envoy.filters.http.jwt_authn, payload, tenant] }
+      zone: { context_extension: zone }
   policy:
     kind: rules
-    rules: # first match wins; principal, server and tool are case-sensitive patterns (default "*")
+    rules: # first match wins; principal, server, tool and attributes are case-sensitive patterns (default "*")
       - { server: files, tool: "delete_*", require: reviewed }
+      - { server: billing, attributes: { tenant: "blue" }, require: reviewed } # every mapping must map tenant
       - { principal: "ci-*", server: "*", tool: "*", require: none }
     default: none
 

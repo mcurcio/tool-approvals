@@ -1,14 +1,13 @@
 """The gate's one use case: should this call run now?"""
 
 import logging
-from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Final, Protocol, assert_never
 
 from tool_approvals.gate.core.ports import GateRequests, GatewayContext, NoApproval, Policy, PolicyInput, Require
 from tool_approvals.kernel.calls import CallRejected, ParsedCall, parse_call
-from tool_approvals.kernel.names import Principal, RequirementName, ServerName, Ticket
+from tool_approvals.kernel.names import RequirementName, Ticket
 from tool_approvals.kernel.requests import (
     CallRef,
     Claimed,
@@ -23,13 +22,8 @@ from tool_approvals.kernel.timeouts import Stopped, TimedOut, Timeouts
 
 _log: Final = logging.getLogger(__name__)
 
-
-@dataclass(frozen=True, slots=True)
-class Call:
-    principal: Principal  # attested by the gateway, never read from the body
-    server: ServerName  # the gateway's route, never read from the body
-    params: bytes  # the exact params bytes the gateway forwards
-    attributes: Mapping[str, str]
+# Kept back from the gateway's deadline so the verdict still reaches the gateway before its hook gives up.
+REPLY_RESERVE: Final = timedelta(milliseconds=250)
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,34 +68,43 @@ class CheckCore:
         self._budget: Final = budget
         self._timeouts: Final = timeouts
 
-    async def check(self, call: Call) -> CheckVerdict:
+    async def check(self, context: GatewayContext, params: bytes) -> CheckVerdict:
         """parse_call refusing → Rejected; policy NoApproval → Pass; policy naming a requirement outside `known`,
         or raising → Unavailable; else claim (Claimed → Pass), then request (Ticketed → Pending). Approvals
-        answering UnknownRequirement (configuration drift), RequestsUnavailable, or the budget passing →
-        Unavailable. The whole check runs within `budget`."""
-        parsed = parse_call(call.principal, call.server, call.params)
+        answering UnknownRequirement (configuration drift), RequestsUnavailable, or the limit passing →
+        Unavailable. The whole check runs within `budget`, or within the gateway's deadline less REPLY_RESERVE
+        when that is sooner; no time left at all → Unavailable without asking policy or Approvals."""
+        parsed = parse_call(context.principal, context.server, params)
         if isinstance(parsed, CallRejected):
             return Rejected(parsed.reason)
+        limit = self._limit(context.deadline)
+        if limit <= timedelta(0):
+            _log.warning("check refused: the gateway's deadline leaves no time")
+            return Unavailable()
         try:
-            outcome = await self._timeouts.run(self._budget, lambda: self._decide(call, parsed))
+            outcome = await self._timeouts.run(limit, lambda: self._decide(context, params, parsed))
         except Exception:
             # Fail closed: a policy that raised, Approvals unreachable (RequestsUnavailable), or any other fault.
             _log.warning("check refused: the gate could not decide", exc_info=True)
             return Unavailable()
         if isinstance(outcome, TimedOut | Stopped):
-            _log.warning("check refused: the check budget of %s passed", self._budget)
+            _log.warning("check refused: the check's limit of %s passed", limit)
             return Unavailable()
         return outcome
 
-    async def _decide(self, call: Call, parsed: ParsedCall) -> CheckVerdict:
+    def _limit(self, deadline: timedelta | None) -> timedelta:
+        """check_budget, or the gateway's deadline less REPLY_RESERVE when that is sooner."""
+        return self._budget if deadline is None else min(self._budget, deadline - REPLY_RESERVE)
+
+    async def _decide(self, context: GatewayContext, params: bytes, parsed: ParsedCall) -> CheckVerdict:
         verdict = await self._policy.decide(
-            PolicyInput(call.principal, call.server, parsed.identity.tool, parsed.arguments, call.attributes)
+            PolicyInput(context.principal, context.server, parsed.identity.tool, parsed.arguments, context.attributes)
         )
         match verdict:
             case NoApproval():
                 return Pass()
             case Require(requirement) if requirement in self._known:
-                return await self._claim_or_request(CallRef(call.principal, call.server, call.params), requirement)
+                return await self._claim_or_request(CallRef(context.principal, context.server, params), requirement)
             case Require(requirement):
                 _log.warning("check refused: the policy named the unknown requirement %r", requirement)
                 return Unavailable()

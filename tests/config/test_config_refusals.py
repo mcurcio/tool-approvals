@@ -102,6 +102,14 @@ def test_a_lock_timeout_of_a_quarter_of_the_check_budget_passes(tmp_path: Path) 
     load(_write(tmp_path, _edit(_yaml().load(EXAMPLE), case)))
 
 
+def test_a_rule_attribute_with_only_the_check_api_enabled_passes(tmp_path: Path) -> None:
+    # The Check API's caller sends its own gateway_attributes, so no mapping needs to map the rule's tenant.
+    case = {"delete": ["gate.ext_mcp", "gate.ext_authz"]}
+    cfg = load(_write(tmp_path, _edit(_yaml().load(EXAMPLE), case)))
+    assert cfg.gate is not None
+    assert cfg.gate.policy.rules[1].attributes == {"tenant": "blue"}
+
+
 def test_a_duplicate_key_is_refused_with_its_line(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
     path.write_text(EXAMPLE.read_text().replace("version: 1\n", "version: 1\nversion: 1\n", 1))

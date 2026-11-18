@@ -38,8 +38,12 @@ message CheckRequest {
   agent, its route), never from the call. Empty values are refused.
 - **`params`** must be the exact bytes of the JSON-RPC `params` the gateway will forward, not a re-encoding, and
   nothing after the gate may change them: the approval covers these bytes. In proto3 JSON, `bytes` are base64.
-- **`gateway_attributes`** are passed to policy. The built-in rules-file policy does not read them yet (planned,
-  milestone 2).
+- **`gateway_attributes`** are passed to policy as sent: the rules-file policy matches a rule's `attributes`
+  against them ([configuration](configuration.md#gate)). A rule whose principal, server and tool match and
+  that names an attribute the request leaves out answers `unavailable`.
+- **The deadline:** over gRPC, the call's own deadline bounds the check: it finishes 250 ms before it (or within
+  `gate.check_budget`, if that is sooner), and a deadline with less than 250 ms left answers `unavailable` at
+  once. The JSON binding reads no deadline header; a JSON check runs within `gate.check_budget`.
 
 ```json
 {"principal": "agent-7", "server": "files", "params": "eyJuYW1lIjoiZGVsZXRlX2ZpbGUiLCJhcmd1bWVudHMiOnsicGF0aCI6Ii90bXAvcmVwb3J0LnR4dCJ9fQ==", "gatewayAttributes": {"tenant": "blue"}}

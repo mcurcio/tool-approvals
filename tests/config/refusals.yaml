@@ -241,3 +241,45 @@
   command: gate
   env: {}
   expect: ["gate.approvals.credential: the environment variable GATE_APPROVALS_BEARER is unset or empty"]
+
+# ---- gateway attributes: every attribute a rule reads, mapped by every enabled mapping that maps attributes ----
+
+- name: a rule attribute neither gateway mapping maps
+  set: { gate.policy.rules.0.attributes: { region: "north" } }
+  expect:
+    - "gate.policy.rules[0].attributes.region: not mapped by gate.ext_mcp.attributes"
+    - "gate.policy.rules[0].attributes.region: not mapped by gate.ext_authz.attributes"
+
+- name: a rule attribute ext_mcp does not map
+  delete: [gate.ext_mcp.attributes.tenant]
+  expect: ["gate.policy.rules[1].attributes.tenant: not mapped by gate.ext_mcp.attributes"]
+
+- name: a rule attribute ext_authz does not map
+  delete: [gate.ext_authz.attributes.tenant]
+  expect: ["gate.policy.rules[1].attributes.tenant: not mapped by gate.ext_authz.attributes"]
+
+- name: a rule attribute no enabled mapping supplies
+  delete: [gate.check_api, gate.ext_mcp, gate.ext_authz]
+  expect: ["gate.policy.rules[1].attributes.tenant: no enabled mapping supplies it"]
+
+- name: a rule attribute only an unenabled check_api could supply, with ext_mcp not mapping it
+  delete: [gate.check_api, gate.ext_authz, gate.ext_mcp.attributes]
+  expect:
+    - "gate.policy.rules[1].attributes.tenant: not mapped by gate.ext_mcp.attributes"
+    - "gate.policy.rules[1].attributes.tenant: no enabled mapping supplies it"
+
+- name: an ext_authz attribute naming both sources
+  set: { gate.ext_authz.attributes.zone: { metadata: [envoy.filters.http.jwt_authn, zone], context_extension: zone } }
+  expect: ["gate.ext_authz.attributes.zone: an ext_authz attribute names exactly one of metadata or context_extension"]
+
+- name: an ext_authz attribute naming neither source
+  set: { gate.ext_authz.attributes.zone: {} }
+  expect: ["gate.ext_authz.attributes.zone: an ext_authz attribute names exactly one of metadata or context_extension"]
+
+- name: an ext_authz metadata source without a key after the filter name
+  set: { gate.ext_authz.attributes.zone: { metadata: [envoy.filters.http.jwt_authn] } }
+  expect: ["gate.ext_authz.attributes.zone.metadata: Tuple should have at least 2 items"]
+
+- name: an ext_mcp attribute with an empty key path
+  set: { gate.ext_mcp.attributes.tenant: [] }
+  expect: ["gate.ext_mcp.attributes.tenant: Tuple should have at least 1 item"]

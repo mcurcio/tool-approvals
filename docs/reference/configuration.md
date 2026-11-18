@@ -169,16 +169,22 @@ gate:
     hook_timeout: 10s # default; the gateway's own timeout on the hook
     principal_key: principal
     exposed_wait_tool: approvals-wait_approval_wait
+    attributes: # leave out to give policy no attributes; name: its key path into the processor's metadata
+      tenant: [jwt, tenant]
   ext_authz:
     listener: { host: 0.0.0.0, port: 9445, tls: { cert: /etc/tool-approvals/gate.pem, key: /etc/tool-approvals/gate-key.pem } }
     hook_timeout: 70s # no default: raise Envoy's ext_authz timeout to match
     principal_path: [envoy.filters.http.jwt_authn, payload, sub] # filter name, then keys
     server_key: server # default; the route's context_extensions key naming its server
     exposed_wait_tool: approvals-wait_approval_wait
+    attributes: # name: exactly one of metadata (filter name, then keys) or context_extension (a key)
+      tenant: { metadata: [envoy.filters.http.jwt_authn, payload, tenant] }
+      zone: { context_extension: zone }
   policy:
     kind: rules
-    rules: # first match wins; principal, server and tool are case-sensitive patterns (default "*")
+    rules: # first match wins; principal, server, tool and attributes are case-sensitive patterns (default "*")
       - { server: files, tool: "delete_*", require: reviewed }
+      - { server: billing, attributes: { tenant: "blue" }, require: reviewed } # every mapping must map tenant
       - { principal: "ci-*", server: "*", tool: "*", require: none }
     default: none
 ```
@@ -187,17 +193,19 @@ gate:
 |---|---|
 | `listeners.health` | `/healthz` and `/readyz` over plain HTTP ([operations](../operations.md#health-endpoints)) |
 | `drain` | On `SIGTERM` or `SIGINT`, `/readyz` answers 503 for this long while every listener still serves; then the listeners close ([operations](../operations.md#stopping)). The wait server and Approvals have the same key. Default `5s` |
-| `check_budget` | The whole check (policy, claim, request) must finish within it, or the call is refused as `unavailable`. Must be below every `hook_timeout`. What is left of it is sent to Approvals as each call's gRPC deadline, and Approvals commits nothing (no yes is spent) once too little of it is left to answer in time. Default `5s` |
+| `check_budget` | The whole check (policy, claim, request) must finish within it, or the call is refused as `unavailable`. Must be below every `hook_timeout`. When the gateway's hook sends a gRPC deadline, the check finishes 250 ms before it instead, if that is sooner, so the verdict still reaches the gateway; a deadline with less than 250 ms left is refused as `unavailable` at once. What is left of it is sent to Approvals as each call's gRPC deadline, and Approvals commits nothing (no yes is spent) once too little of it is left to answer in time. Default `5s` |
 | `approvals` | Approvals' requests listener as a gRPC target (`dns:///host:port`: every address the name resolves to is used in turn), the CA that signed its certificate (system roots when left out), and the gate's bearer |
 | `check_api` | The [Check API](check-api.md): `grpc`, `json`, or both. `exposed_wait_tool` is named in the refusal's words |
-| `ext_mcp` | The [agentgateway](agentgateway.md) hook. `principal_key`: the key in the processor's `metadata` that carries the principal. `hook_timeout`: the gateway's own timeout on the hook (agentgateway's default is 10 s) |
-| `ext_authz` | The [Envoy](envoy.md) hook. `hook_timeout` has no default: set Envoy's `ext_authz` timeout to it. `principal_path`: the filter's dynamic-metadata namespace, then the keys down to the principal string. `server_key`: the `context_extensions` key naming the route's server |
-| `policy` | `kind: rules` is the built-in policy; AuthZEN and OPA adapters are planned (milestone 5). The first rule whose three patterns all match decides; with none matching, `default` does. `require` names a requirement, or `none` for no approval |
+| `ext_mcp` | The [agentgateway](agentgateway.md) hook. `principal_key`: the key in the processor's `metadata` that carries the principal. `hook_timeout`: the gateway's own timeout on the hook (agentgateway's default is 10 s). `attributes`: each gateway attribute policy may read, by name, with its key path (one or more keys) into the processor's `metadata`. Default none |
+| `ext_authz` | The [Envoy](envoy.md) hook. `hook_timeout` has no default: set Envoy's `ext_authz` timeout to it. `principal_path`: the filter's dynamic-metadata namespace, then the keys down to the principal string. `server_key`: the `context_extensions` key naming the route's server. `attributes`: each gateway attribute policy may read, by name, from exactly one source: `metadata` (a filter's namespace, then keys) or `context_extension` (a key of the route's `context_extensions`). Default none |
+| `policy` | `kind: rules` is the built-in policy; AuthZEN and OPA adapters are planned (milestone 5). A rule is considered when its principal, server and tool patterns all match; it then matches when each of its `attributes` patterns matches the gateway attribute of that name. The first matching rule decides; with none matching, `default` does. A considered rule naming an attribute the call does not carry refuses the call as `unavailable`. `require` names a requirement, or `none` for no approval |
 
 Each mapping listener is optional; a gate serves the ones present. `exposed_wait_tool` is the wait tool's name as
 agents see it through that gateway: with agentgateway's `prefixMode: always` it is `<wait_route.server>_<tool>`.
-The rules-file policy matches principal, server and tool only; policy over gateway attributes is planned
-(milestone 2).
+Gateway attributes are the gate's own names for values a gateway attested: each mapping copies only the
+attributes its `attributes` lists, and a source that is missing or not a string leaves that attribute out. A
+Check API caller sends its own `gateway_attributes`. Every attribute a rule reads must be mapped by every enabled
+`ext_mcp` and `ext_authz` mapping, so a rule means the same behind each gateway.
 
 ## `wait`
 
@@ -290,7 +298,9 @@ Besides each value's grammar and the unknown-key and duplicate-key refusals:
 - Every listener that accepts registry bearers (`gate.check_api.*`, `gate.ext_mcp.listener`,
   `gate.ext_authz.listener`, `wait.listeners.mcp`, `approvals.listeners.requests`) has `tls`.
 - `gate.check_budget` below every configured `hook_timeout`; every policy `require` and `default` a known
-  requirement or `none`.
+  requirement or `none`; every attribute a policy rule reads mapped by each enabled `gate.ext_mcp` and
+  `gate.ext_authz`, and supplied by at least one enabled mapping (the Check API counts: its caller sends them);
+  each `gate.ext_authz.attributes` entry names exactly one of `metadata` or `context_extension`.
 - `approvals.desk.surface` a known surface; `approvals.retention` at least the longest `answer_deadline` +
   `use_window` of a requirement (how long a Wait Task may be followed).
 - `approvals.database.lock_timeout` at most a quarter of `gate.check_budget`, when the file has both sections.

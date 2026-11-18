@@ -40,9 +40,9 @@ EXT_AUTHZ_METHODS: Final = _paths(external_auth_pb2.DESCRIPTOR, "Authorization")
 
 
 async def run(view: GateView) -> int:
-    """Serve every enabled mapping (Check API gRPC and JSON, ext_mcp, ext_authz) and health over one CheckCore
-    (rules-file policy, the requests client, `view.requirements`, `view.check_budget`) until a stop signal.
-    Exit 0 on a clean stop."""
+    """Serve every enabled mapping (Check API gRPC and JSON, ext_mcp, ext_authz) and health over one CheckCore,
+    the Checker each mapping is given (rules-file policy, the requests client, `view.requirements`,
+    `view.check_budget`) until a stop signal. Exit 0 on a clean stop."""
     return await serve(view, stop_on_signals())
 
 

@@ -2,6 +2,8 @@
 route."""
 
 import json
+from collections.abc import Mapping
+from datetime import timedelta
 from types import MappingProxyType
 from typing import Any, Final
 
@@ -9,13 +11,16 @@ import grpc
 import grpc.aio
 from envoy.service.auth.v3 import external_auth_pb2, external_auth_pb2_grpc
 
-from tool_approvals.config.views import ExtAuthzView, WaitRouteView
-from tool_approvals.gate.core.check import Call, CheckCore, CheckVerdict, Pass, Pending, Unavailable
+from tool_approvals.config.views import ExtAuthzAttributeView, ExtAuthzView, WaitRouteView
+from tool_approvals.gate.core.check import Checker, CheckVerdict, Pass, Pending, Unavailable
+from tool_approvals.gate.core.ports import GatewayContext
 from tool_approvals.gate.core.wording import agent_text
+from tool_approvals.gate.mappings.attributes import struct_string
 from tool_approvals.gate.mappings.errors import Refusal, error_code, verdict_name
 from tool_approvals.kernel.calls import CallRejected, RejectReason, read_rpc_request
 from tool_approvals.kernel.names import Principal, ServerName
 from tool_approvals.kernel.requests import Rejected
+from tool_approvals.serving.grpc_server import inbound_deadline
 
 TOOLS_CALL: Final = "tools/call"
 POST: Final = "POST"
@@ -29,17 +34,18 @@ _OK: Final = grpc.StatusCode.OK.value[0]
 # xds-protos ships no type stubs (its modules are Any to mypy), so the base class is untyped.
 class ExtAuthzServicer(external_auth_pb2_grpc.AuthorizationServicer):  # type: ignore[misc]
     """Behind GrpcAuth. A POST with a complete raw_body only. `kernel.calls.read_rpc_request`: tools/call goes to
-    the core on the params span's exact bytes; PASS_METHODS are OK; anything else (GET, DELETE, a batch,
-    resources/*, tasks/*, other methods) is denied. The principal at `principal_path` in the dynamic metadata and
-    the server at context_extensions[server_key] must both be non-empty strings, else denied. An OK removes
-    `route.principal_header` (headers_to_remove), so no tool sees a principal header a client sent. A denial is
-    HTTP 200 application/json {"jsonrpc": "2.0", "id": <id bytes>, "error": {"code", "message": agent_text,
-    "data": {"verdict", "ticket"?}}}, code from mappings.errors."""
+    the checker on the params span's exact bytes, with only the attributes `view.attributes` maps (each from the
+    dynamic metadata or a context_extensions key) and the RPC's deadline; PASS_METHODS are OK; anything else
+    (GET, DELETE, a batch, resources/*, tasks/*, other methods) is denied. The principal at `principal_path` in the
+    dynamic metadata and the server at context_extensions[server_key] must both be non-empty strings, else denied.
+    An OK removes `route.principal_header` (headers_to_remove), so no tool sees a principal header a client sent.
+    A denial is HTTP 200 application/json {"jsonrpc": "2.0", "id": <id bytes>, "error": {"code", "message":
+    agent_text, "data": {"verdict", "ticket"?}}}, code from mappings.errors."""
 
     PASS_METHODS: Final = frozenset({"initialize", "notifications/initialized", "tools/list", "ping"})
 
-    def __init__(self, core: CheckCore, view: ExtAuthzView, route: WaitRouteView) -> None:
-        self._core: Final = core
+    def __init__(self, checker: Checker, view: ExtAuthzView, route: WaitRouteView) -> None:
+        self._checker: Final = checker
         self._view: Final = view
         self._route: Final = route
 
@@ -48,14 +54,17 @@ class ExtAuthzServicer(external_auth_pb2_grpc.AuthorizationServicer):  # type: i
         request: external_auth_pb2.CheckRequest,
         context: grpc.aio.ServicerContext[external_auth_pb2.CheckRequest, external_auth_pb2.CheckResponse],
     ) -> external_auth_pb2.CheckResponse:
-        subject, id_json = self._read(request.attributes)
-        verdict = await self._core.check(subject) if isinstance(subject, Call) else subject
+        subject, id_json = self._read(request.attributes, inbound_deadline(context))
+        verdict = await self._checker.check(*subject) if isinstance(subject, tuple) else subject
         if isinstance(verdict, Pass):
             return _allow(self._route.principal_header)
         return deny_response(verdict, agent_text(verdict, self._view.exposed_wait_tool), id_json)
 
-    def _read(self, attributes: Any) -> tuple[Call | CheckVerdict, bytes]:
-        """The call to check, or the verdict without one; and the request's id bytes (b"" when unknown)."""
+    def _read(
+        self, attributes: Any, deadline: timedelta | None
+    ) -> tuple[tuple[GatewayContext, bytes] | CheckVerdict, bytes]:
+        """The gateway context and params to check, or the verdict without one; and the request's id bytes (b""
+        when unknown)."""
         http = attributes.request.http
         principal = _metadata_string(attributes.metadata_context, self._view.principal_path)
         server: str = attributes.context_extensions.get(self._view.server_key, "")
@@ -70,13 +79,25 @@ class ExtAuthzServicer(external_auth_pb2_grpc.AuthorizationServicer):  # type: i
         if rpc.method != TOOLS_CALL:
             return self._other_method(rpc.method), rpc.id_json
         params = b"" if rpc.params is None else body[rpc.params.start : rpc.params.end]
-        context = MappingProxyType(dict(attributes.context_extensions))
-        return Call(Principal(principal), ServerName(server), params, context), rpc.id_json
+        context = GatewayContext(Principal(principal), ServerName(server), self._attributes(attributes), deadline)
+        return (context, params), rpc.id_json
+
+    def _attributes(self, attributes: Any) -> Mapping[str, str]:
+        """Each attribute `view.attributes` names, from its one source; a missing or non-string one is left out."""
+        found = {name: _attribute(attributes, source) for name, source in self._view.attributes.items()}
+        return MappingProxyType({name: value for name, value in found.items() if value is not None})
 
     def _other_method(self, method: str) -> Pass | Rejected:
         if method in self.PASS_METHODS:
             return Pass()
         return Rejected(RejectReason.TASK_REQUESTED if method.startswith("tasks/") else RejectReason.MALFORMED)
+
+
+def _attribute(attributes: Any, source: ExtAuthzAttributeView) -> str | None:
+    if source.metadata is not None:
+        return _metadata_string(attributes.metadata_context, source.metadata)
+    value: str | None = attributes.context_extensions.get(source.context_extension)
+    return value
 
 
 def _body_refusal(http: Any) -> Rejected | None:
@@ -128,18 +149,9 @@ def _partial(http: Any) -> bool:
     return any(value.strip().lower() == "true" for value in values)
 
 
-def _metadata_string(metadata: Any, path: tuple[str, ...]) -> str:
-    """The string at `path` (a filter name, then keys) in the request's dynamic metadata; "" when any step is
+def _metadata_string(metadata: Any, path: tuple[str, ...]) -> str | None:
+    """The string at `path` (a filter name, then keys) in the request's dynamic metadata; None when any step is
     missing or the value is not a string."""
     filter_name, *keys = path
     struct: Any = metadata.filter_metadata.get(filter_name)
-    value: Any = None
-    for key in keys:
-        if struct is None or key not in struct.fields:
-            return ""
-        value = struct.fields[key]
-        struct = value.struct_value if value.WhichOneof("kind") == "struct_value" else None
-    if value is None or value.WhichOneof("kind") != "string_value":
-        return ""
-    text: str = value.string_value
-    return text
+    return None if struct is None else struct_string(struct, tuple(keys))

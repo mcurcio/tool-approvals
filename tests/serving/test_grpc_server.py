@@ -15,7 +15,7 @@ from tests.fixtures.certs import TlsFiles, tls_files
 from tests.fixtures.ports import free_port
 from tool_approvals.config.views import ListenerView, TlsView
 from tool_approvals.contract.check.v1 import check_pb2, check_pb2_grpc
-from tool_approvals.serving.grpc_server import grpc_server, serve_grpc
+from tool_approvals.serving.grpc_server import grpc_server, inbound_deadline, serve_grpc
 
 
 class _Held(check_pb2_grpc.CheckServiceServicer):
@@ -130,3 +130,33 @@ async def test_a_port_in_use_is_a_bind_error(tls: TlsFiles, started: list[grpc.a
     started.append(first)
     with pytest.raises(RuntimeError):
         grpc_server(listener, [])
+
+
+class _Deadlines(check_pb2_grpc.CheckServiceServicer):
+    """Records inbound_deadline for each call."""
+
+    def __init__(self) -> None:
+        self.seen: list[timedelta | None] = []
+
+    async def Check(
+        self, request: check_pb2.CheckRequest, context: grpc.aio.ServicerContext[Any, Any]
+    ) -> check_pb2.CheckResponse:
+        self.seen.append(inbound_deadline(context))
+        return check_pb2.CheckResponse()
+
+
+async def test_inbound_deadline_is_what_the_caller_has_left_or_none(started: list[grpc.aio.Server]) -> None:
+    port = free_port()
+    servicer = _Deadlines()
+    server = grpc_server(ListenerView("localhost", port, None), [])
+    check_pb2_grpc.add_CheckServiceServicer_to_server(servicer, server)
+    await server.start()
+    started.append(server)
+    async with grpc.aio.insecure_channel(f"localhost:{port}") as channel:
+        stub = check_pb2_grpc.CheckServiceStub(channel)
+        await stub.Check(check_pb2.CheckRequest(), timeout=1, wait_for_ready=True)
+        await stub.Check(check_pb2.CheckRequest(), wait_for_ready=True)
+    with_deadline, without = servicer.seen
+    assert with_deadline is not None
+    assert timedelta(seconds=0.5) < with_deadline <= timedelta(seconds=1.05)  # the wire rounds the timeout up
+    assert without is None
