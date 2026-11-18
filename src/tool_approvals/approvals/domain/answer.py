@@ -42,6 +42,7 @@ class Answer:
     sign_in_moment: datetime
     verdict: Verdict
     comment: str | None
+    answered_at: datetime | None  # the unit of work's clock; None only for a yes stored before migration 0002
 
     def __init__(  # noqa: PLR0913 (one keyword per answer field)
         self,
@@ -56,6 +57,7 @@ class Answer:
         sign_in_moment: datetime,
         verdict: Verdict,
         comment: str | None,
+        answered_at: datetime | None,
     ) -> None:
         """Raises RuntimeError unless `key` is the issuer's."""
         if not isinstance(key, IssuerKey):  # one instance ever exists, so its type names it
@@ -70,10 +72,12 @@ class Answer:
             "sign_in_moment": sign_in_moment,
             "verdict": verdict,
             "comment": comment,
+            "answered_at": answered_at,
         }
         for name, value in fields.items():
             object.__setattr__(self, name, value)  # frozen: the dataclass's own way past its __setattr__
 
 
 # How Approval.record_answer makes an Answer without importing the issuer: AnswerService passes `issuer.issue`.
-type Issue = Callable[[Ticket, Digest, AnswerFacts, GroupRef, Verdict, str | None], Answer]
+# The last argument is answered_at: the unit of work's clock reading.
+type Issue = Callable[[Ticket, Digest, AnswerFacts, GroupRef, Verdict, str | None, datetime], Answer]

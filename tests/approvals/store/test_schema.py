@@ -1,5 +1,5 @@
-"""Migration 0001_initial on Postgres 18: it creates exactly the mapped schema, and its rules refuse an approved
-row without an answer, a partial answer and another principal's wait."""
+"""The migrations on Postgres 18: they create exactly the mapped schema, 0002 goes down and up again, and the rules
+refuse an approved row without an answer, a partial answer and another principal's wait."""
 
 import uuid
 from collections.abc import Iterator, Mapping
@@ -8,6 +8,7 @@ from typing import Any
 
 import psycopg
 import pytest
+from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
 from psycopg import errors
@@ -15,7 +16,7 @@ from sqlalchemy import create_engine
 
 from tests.approvals.store.postgres import postgres_dsn
 from tool_approvals.approvals.infra.store.engine import connect_kwargs
-from tool_approvals.approvals.infra.store.migrate import migrate
+from tool_approvals.approvals.infra.store.migrate import HEAD, alembic_config, migrate
 from tool_approvals.approvals.infra.store.tables import metadata
 
 FINGERPRINT = b"\x01" * 32
@@ -39,9 +40,38 @@ async def test_migrate_upgrades_an_empty_database_and_is_idempotent() -> None:
     await migrate(fresh)
     await migrate(fresh)
     with psycopg.connect(fresh) as connection:
-        assert connection.execute("SELECT version_num FROM alembic_version").fetchall() == [("0001_initial",)]
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchall() == [("0002_answered_at",)]
         tables = connection.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY 1")
         assert [row[0] for row in tables] == ["alembic_version", "approval_events", "approvals", "waits"]
+
+
+def _columns(connection: psycopg.Connection[Any]) -> list[str]:
+    found = connection.execute(
+        "SELECT column_name FROM information_schema.columns WHERE table_name = 'approvals' ORDER BY 1"
+    )
+    return [row[0] for row in found]
+
+
+async def test_answered_at_goes_down_and_up_again() -> None:
+    name = f"round_{uuid.uuid4().hex}"
+    with psycopg.connect(postgres_dsn(), autocommit=True) as admin:
+        admin.execute(f"CREATE DATABASE {name}")
+    fresh = psycopg.conninfo.make_conninfo(postgres_dsn(), dbname=name)
+    await migrate(fresh)
+    engine = create_engine("postgresql+psycopg://", creator=lambda: psycopg.connect(fresh, **connect_kwargs(fresh)))
+    try:
+        with engine.begin() as connection:
+            command.downgrade(alembic_config(connection), "0001_initial")
+        with psycopg.connect(fresh) as connection:
+            assert "answered_at" not in _columns(connection)
+            assert connection.execute("SELECT version_num FROM alembic_version").fetchall() == [("0001_initial",)]
+        with engine.begin() as connection:
+            command.upgrade(alembic_config(connection), HEAD)
+            assert compare_metadata(MigrationContext.configure(connection), metadata) == []
+        with psycopg.connect(fresh) as connection:
+            assert "answered_at" in _columns(connection)
+    finally:
+        engine.dispose()
 
 
 @pytest.fixture
@@ -92,7 +122,7 @@ APPROVED: dict[str, object] = {"state": "approved", "use_deadline": "2026-01-01T
 
 def test_the_rows_the_schema_takes(sql: psycopg.Connection[Any]) -> None:
     _insert(sql)
-    _insert(sql, "t2", APPROVED | ANSWER)
+    _insert(sql, "t2", APPROVED | ANSWER)  # a yes stored before 0002: no answered_at
     due = sql.execute(
         "SELECT ticket, next_due_at = answer_deadline, next_due_at = use_deadline FROM approvals ORDER BY ticket"
     ).fetchall()

@@ -1,5 +1,5 @@
-"""The schema as SQLAlchemy Core tables (migration 0001_initial is its DDL), and the audit columns every audited
-table carries.
+"""The schema as SQLAlchemy Core tables (the migrations, 0001_initial onward, are its DDL), and the audit columns
+every audited table carries.
 
 The tables describe the schema to the mapping and the queries; the CHECK rules live only in the migration, the
 DDL's one home, and a test holds the two equal (`compare_metadata` finds no difference).
@@ -121,6 +121,7 @@ approvals: Final = Table(
     Column("answer_surface", Text),
     Column("answer_assurance", Text),
     Column("answer_sign_in_moment", TZ),
+    Column("answered_at", TZ),  # migration 0002; NULL on a yes stored before it
     Column("version", Integer, nullable=False),
     *audit_columns(),
     UniqueConstraint("ticket", "principal", name="approvals_ticket_principal_key"),

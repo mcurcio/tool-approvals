@@ -56,11 +56,12 @@ class AnswerColumns:
     surface: str | None
     assurance: str | None
     sign_in_moment: datetime | None
+    answered_at: datetime | None  # None also on a yes stored before migration 0002: not a partial answer
 
     @classmethod
     def of(cls, answer: Answer | None) -> "AnswerColumns":
         if answer is None:
-            return cls(None, None, None, None, None, None, None, None, None)
+            return cls(None, None, None, None, None, None, None, None, None, None)
         return cls(
             answer.verdict,
             answer.comment,
@@ -71,6 +72,7 @@ class AnswerColumns:
             answer.surface,
             answer.vouched_assurance,
             answer.sign_in_moment,
+            answer.answered_at,
         )
 
     def answer(self, ticket: Ticket) -> Answer | None:
@@ -99,6 +101,7 @@ class AnswerColumns:
             sign_in_moment=moment,
             verdict=self.verdict,
             comment=self.comment,
+            answered_at=self.answered_at,
         )
 
 
@@ -135,6 +138,7 @@ mapper_registry.map_imperatively(
             _a.answer_surface,
             _a.answer_assurance,
             _a.answer_sign_in_moment,
+            _a.answered_at,
         ),
     },
     column_prefix="_",
