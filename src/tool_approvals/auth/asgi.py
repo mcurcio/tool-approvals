@@ -18,7 +18,8 @@ _WS_POLICY_VIOLATION: Final = 1008
 class BearerGuard:
     """401 without a registry credential (a bearer, or a client certificate the server's TLS verified, read from
     the ASGI TLS extension); 403 without `method`'s grant (None: authenticate only). The caller is put in the scope
-    for `caller_of`."""
+    for `caller_of`. serve_asgi serves HTTP only; a websocket scope (another server's) is refused with a close, and
+    a client certificate counts only when that server fills the TLS extension."""
 
     def __init__(self, app: ASGIApp, registry: Registry, method: Method | None) -> None:
         self._app: Final = app

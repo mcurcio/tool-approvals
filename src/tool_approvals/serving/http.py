@@ -79,7 +79,7 @@ class _Server(uvicorn.Server):
 async def serve_asgi(app: ASGIApp, listener: ListenerView, stop: asyncio.Event, grace: timedelta = STOP_GRACE) -> None:
     """Serve `app` with uvicorn on `listener` (TLS from its view) until `stop` is set, then give in-flight
     requests `grace` to finish and cut whatever is still connected; installs no signal handlers of its own
-    (stop_on_signals owns them)."""
+    (stop_on_signals owns them). HTTP only: a WebSocket upgrade request is served as plain HTTP."""
     tls = listener.tls
     config = uvicorn.Config(
         app,
@@ -87,6 +87,8 @@ async def serve_asgi(app: ASGIApp, listener: ListenerView, stop: asyncio.Event, 
         port=listener.port,
         log_config=None,  # the process's logging stays its own
         http=_TlsScopeProtocol,
+        # No route speaks WebSocket, and uvicorn's WebSocket protocols would never see the TLS extension.
+        ws="none",
         server_header=False,
         ssl_certfile=None if tls is None else tls.cert,
         ssl_keyfile=None if tls is None else tls.key,

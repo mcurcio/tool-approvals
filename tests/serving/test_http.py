@@ -4,10 +4,12 @@ import asyncio
 import ssl
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
 import trustme
+import uvicorn
 from starlette.applications import Starlette
 from starlette.responses import PlainTextResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -200,3 +202,51 @@ async def test_an_idle_client_that_never_starts_tls_does_not_hold_the_stop(tls: 
     async with asyncio.timeout(2):
         assert await reader.read() == b""  # the server cut it rather than leaving it to the handshake timeout
     idle.close()
+
+
+async def test_a_websocket_upgrade_is_served_as_plain_http(tls: TlsFiles, tmp_path: Path) -> None:
+    """No route speaks WebSocket, and the TLS extension is filled only on the HTTP protocol: an upgrade request
+    never reaches an app as a websocket scope (where a client certificate could not be read)."""
+    presented = client_cert(tls.authority, tmp_path, "gateway")
+    listener = _listener(tls, tls.ca)
+    seen: list[tuple[str, bool]] = []
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "lifespan":
+            return
+        seen.append((scope["type"], "tls" in (scope.get("extensions") or {})))
+        if scope["type"] == "http":
+            await PlainTextResponse("ok")(scope, receive, send)
+
+    upgrade = {
+        "Connection": "Upgrade",
+        "Upgrade": "websocket",
+        "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==",
+        "Sec-WebSocket-Version": "13",
+    }
+    async with serving_asgi(app, listener):
+        context = ssl.create_default_context(cafile=tls.ca)
+        context.load_cert_chain(presented.cert, presented.key)
+        async with httpx.AsyncClient(base_url=f"https://localhost:{listener.port}", verify=context) as client:
+            reply = await client.get("/", headers=upgrade)
+    assert (reply.status_code, seen) == (200, [("http", True)])
+
+
+async def test_serve_asgi_turns_websocket_off_whatever_is_installed(
+    tls: TlsFiles, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """uvicorn's "auto" serves WebSocket once a WebSocket library is installed, through protocols that never see
+    the TLS extension: serve_asgi asks for none."""
+    asked: list[object] = []
+    real = uvicorn.Config
+
+    def config(*args: Any, **kwargs: Any) -> uvicorn.Config:
+        asked.append(kwargs.get("ws", "auto"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(uvicorn, "Config", config)
+    stop = asyncio.Event()
+    stop.set()
+    async with asyncio.timeout(10):
+        await serve_asgi(health_app({}), _listener(tls), stop)
+    assert asked == ["none"]
