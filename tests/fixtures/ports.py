@@ -1,10 +1,15 @@
 """Local ports and a running ASGI listener for tests that serve over real sockets."""
 
 import asyncio
+import errno
+import itertools
+import os
+import random
 import socket
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import timedelta
+from typing import Final
 
 from starlette.types import ASGIApp
 
@@ -12,13 +17,68 @@ from tool_approvals.config.views import ListenerView
 from tool_approvals.serving.http import serve_asgi
 from tool_approvals.serving.signals import STOP_GRACE
 
+# A test names a listener's port before its server starts, so the kernel's own pick (bind port 0, close, hand the
+# number on) is a race: between the probe's close and the server's bind the kernel may give the same port to another
+# test worker's probe, to this worker's next probe, or to any outgoing connection. These ports sit below every common
+# ephemeral range (Linux 32768-60999, IANA and macOS 49152-65535), which the kernel never assigns on its own, and each
+# pytest-xdist worker takes its own slice of them in turn, from a random start so that two runs on one host (or two
+# workers sharing a slice) do not walk the same sequence.
+PORTS: Final = range(20000, 32768)
+
+
+class PortBlock:
+    """Ports from `ports` in turn from a random one (drawn from `rng`), wrapping round, skipping any already bound on
+    either loopback address."""
+
+    def __init__(self, ports: range, rng: random.Random | None = None) -> None:
+        if not ports:
+            raise ValueError("an empty port block")
+        self._ports = ports
+        start = (rng or random.SystemRandom()).randrange(len(ports))
+        self._turn = itertools.cycle(itertools.chain(ports[start:], ports[:start]))
+
+    def take(self) -> int:
+        for port in itertools.islice(self._turn, len(self._ports)):
+            if _unbound(port):
+                return port
+        raise RuntimeError(f"every port in {self._ports} is bound")
+
+
+def _unbound(port: int) -> bool:
+    """Nothing holds `port` on 127.0.0.1 or ::1: a server on `localhost` binds both (a loopback this host lacks, such
+    as ::1 without IPv6, holds nothing)."""
+    for family, host in ((socket.AF_INET, "127.0.0.1"), (socket.AF_INET6, "::1")):
+        try:
+            with socket.socket(family, socket.SOCK_STREAM) as probe:
+                probe.bind((host, port))
+        except OSError as refused:
+            if refused.errno in (errno.EADDRNOTAVAIL, errno.EAFNOSUPPORT):
+                continue
+            return False
+    return True
+
+
+def worker_ports(worker: str | None, workers: int) -> range:
+    """The slice of PORTS for pytest-xdist worker `worker` ("gw3") of `workers`; all of PORTS outside xdist. A worker
+    xdist starts in place of a crashed one takes the next unused id (gwN, gwN+1, ...), so it wraps onto a live worker's
+    slice (gwN onto gw0's), not the dead one's; each block's random start makes that shared slice a low-odds clash
+    rather than the same sequence."""
+    if worker is None:
+        return PORTS
+    size = len(PORTS) // workers
+    index = int(worker.removeprefix("gw")) % workers
+    return PORTS[index * size : (index + 1) * size]
+
+
+_BLOCK: Final = PortBlock(
+    worker_ports(os.environ.get("PYTEST_XDIST_WORKER"), int(os.environ.get("PYTEST_XDIST_WORKER_COUNT", "1")))
+)
+
 
 def free_port() -> int:
-    """A local TCP port nothing listens on now (the kernel's pick for port 0)."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.bind(("127.0.0.1", 0))
-        port: int = probe.getsockname()[1]
-        return port
+    """A local TCP port for a server the test starts on `localhost` or either loopback address: free on both now,
+    never handed to another worker, and not handed out again by this one until its slice wraps round."""
+    return _BLOCK.take()
 
 
 @asynccontextmanager
