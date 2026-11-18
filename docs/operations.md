@@ -40,7 +40,10 @@ docker run --rm --read-only -v "$PWD/config.yaml:/etc/tool-approvals/config.yaml
 ## Start-up order
 
 1. **Credentials.** For each registry entry run `tool-approvals credentials issue`: the bearer goes to the caller
-   (gateway, gate or wait server) as a secret, the `sha256:` hex into `registry[].credential.bearer_sha256`.
+   (gateway, gate or wait server) as a secret, the `sha256:` hex into `registry[].credential.bearer_sha256`. A
+   gateway's hook may use a client certificate instead: its fingerprint goes into
+   `registry[].credential.client_cert_sha256`, and the listeners it calls get `tls.client_ca`
+   ([configuration](reference/configuration.md#registry-who-may-call-whom)).
    Issue the TLS certificates each bearer-carrying listener needs, and the two desk keys
    (`openssl rand -base64 32 > desk-session-key`, likewise the form key: at least 32 bytes each).
 2. **Check** the file with `config check`.
@@ -48,7 +51,7 @@ docker run --rm --read-only -v "$PWD/config.yaml:/etc/tool-approvals/config.yaml
 4. **Approvals:** `tool-approvals approvals serve`; wait until `/readyz` answers 200.
 5. **Gate and wait server:** `tool-approvals gate`, `tool-approvals wait`.
 6. **Gateway:** wire it ([agentgateway](reference/agentgateway.md), [Envoy](reference/envoy.md), or
-   [the Check API](reference/check-api.md)).
+   [the Check API](reference/check-api.md)). Each is an optional adapter; configure only the ones you use.
 
 The wait server starts without its `approvals` section; it then answers discovery and refuses every call.
 
@@ -63,7 +66,8 @@ create tables in it (`approvals migrate` creates the schema).
 - Every connection sets TCP keepalives and `idle_in_transaction_session_timeout` (30 s), so a stalled holder
   cannot keep a lock; a unit of work that waits longer than `approvals.database.lock_timeout` for a lock is refused
   as unavailable, and the agent's call with it.
-- Deadlines nest: the gate sends what is left of `gate.check_budget` as each call's gRPC deadline, and Approvals
+- Deadlines nest: a check ends within `gate.check_budget`, and 250 ms before the gateway hook's own gRPC deadline
+  when it sends one; the gate sends what is left as each call's gRPC deadline, and Approvals
   waits on no lock past it and commits nothing once less than 250 ms of it is left, so a yes is never spent for a
   check that has already given up.
 - All deadlines and sign-in ages are judged by the database's clock.
@@ -136,7 +140,8 @@ timeout the same margin.
 
 - Keep `approvals.listeners.approvers` (the desk) and `approvals.listeners.requests` unreachable from agents; only
   the gate and the wait server call `:requests`, only people use the desk.
-- One registry entry per caller; never share a bearer. Store bearers as secrets; only their hashes are in the file.
+- One registry entry per caller; never share a bearer or a client certificate. Store bearers as secrets; only
+  their hashes are in the file.
 - TLS on every listener that carries a bearer (`config check` enforces it); serve the desk's `public_url` over
   HTTPS.
 - Treat `desk.session_key` as answer authority.

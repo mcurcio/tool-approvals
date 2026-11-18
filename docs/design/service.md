@@ -3,24 +3,26 @@
 The three services, what crosses between them, who owns which data, and how each fails. Read the
 [system design](system.md) first; the [module design](module.md) goes one level down.
 
-> **Status:** the tracer (milestone 1) is built; the rest arrives in milestones 2-4
+> **Status:** milestones 1 (the tracer) and 2 (gateway breadth) are built; the rest arrives in milestones 3-4
 > ([roadmap](system.md#delivery-milestones)). How to run what is built: [operations](../operations.md).
 
 ## Summary
 
-1. **Three services, one image:** the **gate** (stateless; gateway mappings and the Check API), the **wait
-   server** (stateless; `approval_wait` and Wait Tasks) and **Approvals** (active-active over one Postgres;
-   requests, desk, Answers API, audit report, event delivery).
+1. **Three services, one image:** the **gate** (stateless; optional gateway adapters and the Check API over one
+   gateway-neutral port), the **wait server** (stateless; `approval_wait` and Wait Tasks) and **Approvals**
+   (active-active over one Postgres; requests, desk, Answers API, audit report, event delivery).
 2. **Postgres, through Approvals, is the only state.** The gate and the wait server hold nothing past one request.
 3. **One credential registry:** every caller, surface, operator and channel is a named entry with its own
-   credential and granted methods, checked at startup; bearer credentials only over TLS.
-4. **Deadlines nest, and a missed one refuses:** policy + claim + request fit inside the hook's own deadline.
+   credential and granted methods, checked at startup; bearer credentials only over TLS; a gateway's hook may use
+   mTLS instead.
+4. **Deadlines nest, and a missed one refuses:** policy + claim + request fit inside the hook's own deadline,
+   read from the inbound gRPC call when the gateway sends one.
 5. **Event ids rise in commit order:** delivery to each channel is at least once, receivers order and deduplicate
    by id, and the audit report pages without gaps.
 
 | Goal | Delivered by |
 |---|---|
-| Different gateways | Gate listeners and mappings, mapping conformance tests |
+| Different gateways | Gate listeners and optional adapters behind the gateway port; one conformance suite run through each |
 | Bring your own routing | Policy port, requirements, channels, integrated surfaces |
 | MCP Tasks | Wait Task |
 | Service-to-service authentication; audit | Credential registry; audit sinks and report |
@@ -61,7 +63,7 @@ The three services, what crosses between them, who owns which data, and how each
 
 | Service | Responsibility | Replicas, load, drain | Never |
 |---|---|---|---|
-| **Gate** | Call from attested metadata; policy; claim or request; one listener per mapping, plus the Check API (gRPC and JSON, one schema) | N ≥ 2, stateless; drains in-flight checks on stop | List, show or answer; carry tool traffic; re-encode params |
+| **Gate** | Gateway context from attested metadata; policy; claim or request; one listener per enabled adapter (`ext_mcp`, `ext_authz`, the Check API over gRPC and JSON, one schema), each optional | N ≥ 2, stateless; drains in-flight checks on stop | List, show or answer; carry tool traffic; re-encode params; let its core depend on a gateway's types |
 | **Wait server** | `approval_wait` (held, bounded) and Wait Tasks (`tasks/get`; `tasks/cancel` from milestone 4; `tasks/update` refused) | N ≥ 2, stateless; any replica serves any task | Answer; open a wait on another principal's ticket |
 | **Approvals** | Approval lifecycle, call identity, requirements, answers, deadlines, retention, delivery, audit | N ≥ 2 active-active; clients round-robin over all replicas and servers cap connection age, so new replicas take load and a stopping one sheds it | Run a tool; decide what needs approval |
 
@@ -196,7 +198,7 @@ Each is one config value; the defaults are placeholders until measured.
 
 | Budget | Default | When missed |
 |---|---|---|
-| Check (policy + claim + request) | `gate.check_budget`, 5 s, which must be below each mapping's declared hook timeout (agentgateway 10 s, E5); from milestone 2 also below an inbound gRPC deadline | `unavailable`; the gateway fails closed |
+| Check (policy + claim + request) | `gate.check_budget`, 5 s, which must be below each mapping's declared hook timeout (agentgateway 10 s, E5). When the hook's gRPC call carries a deadline, the check ends 250 ms before it if that is sooner (the reply reserve); less than 250 ms left refuses at once without asking policy or Approvals. The JSON binding carries no deadline | `unavailable`; the gateway fails closed |
 | Envoy `ext_authz` timeout | Must be raised above the check budget (E6's 200 ms would refuse every gated call) | — |
 | Wait route at the gateway | agentgateway request timeout ≥ 20 s (E8; it bounds only the time to response headers, and the suite uses 60 s); Envoy route timeout off and idle timeout above the keep-alive (E6, milestone 4) | The wait is cut; the agent calls again |
 | Held wait | 15 min, then `still_waiting` | The agent calls again |
@@ -229,7 +231,7 @@ Each is one config value; the defaults are placeholders until measured.
 | database (DSN, direct, no transaction pooler) | approvals | — |
 | identity provider, desk (client, session and form keys) | approvals | Issuer form; keys present and at least 32 bytes |
 | `assurance`, `floor`, `requirements`, `surfaces` | gate (names only), approvals | Requirement ≥ floor; known surfaces; cap ≥ minimum wherever a surface is allowed |
-| policy | gate | Rules name known requirements; gateway-context policy only with a mapping that supplies gateway attributes |
+| policy | gate | Rules name known requirements; every gateway attribute a rule reads is mapped by every enabled `ext_mcp` and `ext_authz` adapter, and supplied by at least one enabled adapter (the Check API's caller sends its own) |
 | retention | approvals | Retention ≥ the longest answer deadline + use window |
 | channels (including Web Push keys and allowed push origins), telemetry (milestone 3) | approvals | Retention ≥ delivery give-up horizon |
 
@@ -255,7 +257,7 @@ Approvals, channel lag and dead letters. Arguments, words, comments and wait ids
 | `LISTEN` lost | Waits delayed until reconnect; that Approvals replica reports not ready | — | Reconnect wakes every feed |
 | Channel receiver | — | No notice; the desk works | The channel resumes from its position |
 | Identity provider | — | Cannot sign in; requests reach their deadline | The provider returns |
-| Missing principal, unknown requirement or verdict kind, unclassifiable request | That call refused | — | Fix the configuration |
+| Missing principal, unknown requirement or verdict kind, unclassifiable request, a gateway attribute a rule reads missing from the call | That call refused | — | Fix the configuration |
 
 ## Deploying it
 
@@ -266,10 +268,14 @@ Helm chart (milestone 3), released with the image, renders three Deployments (2 
 budget, spread), the migration job as a `pre-install,pre-upgrade` hook using only Secrets the operator already
 created, one Service port per listener (headless for `:requests`), and a NetworkPolicy per listener.
 
-| Gateway | Wiring that the mapping's conformance test proves |
+One conformance suite holds the cases; each adapter runs them all, and a case an adapter cannot express is
+skipped by name with its reason.
+
+| Gateway | Wiring that the conformance suite proves through it |
 |---|---|
-| agentgateway | Guardrail processor last, fail closed, `tools/call` request phase, reached over TLS with a bearer; parameter bytes as forwarded; server from the route; the principal header replaces any client copy |
-| Envoy family | `ext_authz` last body filter, `with_request_body` with `pack_as_bytes` and room for the params size cap; raised timeout; principal from `jwt_authn` metadata; the mapping classifies `tools/call` itself and refuses batches, GET, DELETE and anything unclassifiable |
+| agentgateway | Guardrail processor last, fail closed, `tools/call` request phase, reached over TLS with a bearer; parameter bytes as forwarded; server from the route; the principal header replaces any client copy; the agent's `Authorization` and `Cookie` kept from the gate |
+| Envoy family | `ext_authz` last body filter, `with_request_body` with `pack_as_bytes` and room for the params size cap; raised timeout; principal from `jwt_authn` metadata; `disallowed_headers` keeps the agent's credentials from the gate; the adapter classifies each request itself: one `tools/call` is checked, discovery passes, `tasks/*` and any other method are refused, as is any HTTP method but POST and any body that is not one JSON-RPC request. The wait route behind Envoy arrives in milestone 4 |
+| Check API caller | A caller that asks the gate (gRPC or JSON) and forwards the same params bytes only on `pass` |
 
 ## The executor seam (reserved, not built)
 

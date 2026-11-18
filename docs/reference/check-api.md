@@ -1,9 +1,10 @@
 # The Check API
 
 The gate's public, versioned contract: one method, "may this call run now?". A gateway with no first-party
-mapping calls it from its own hook or plugin, before it forwards a `tools/call`. The agentgateway and Envoy
-mappings ([agentgateway](agentgateway.md), [Envoy](envoy.md)) put the same question to the same core and add only
-their gateways' encodings.
+adapter calls it from its own hook or plugin, before it forwards a `tools/call`. The Check API is itself one of the
+gate's adapters: it and the agentgateway and Envoy adapters ([agentgateway](agentgateway.md), [Envoy](envoy.md))
+each build the same gateway context (principal, server, gateway attributes, deadline) for one gateway-neutral core,
+and differ only in their gateways' encodings. Each is optional; a gate serves the ones its configuration names.
 
 The schema is [`proto/tool_approvals/contract/check/v1/check.proto`](../../proto/tool_approvals/contract/check/v1/check.proto),
 with the shared `Refused` and `Rejected` messages in
@@ -120,6 +121,7 @@ A `pending` refusal tells the agent to call the wait tool, which your gateway mu
 any MCP server ([the wait tool](wait.md)). The first-party agentgateway mapping recognises the wait route and sets
 the attested principal on it; a gateway using the Check API must do the same itself: on the route named
 `wait_route.server`, set the header `wait_route.principal_header` to the principal it attested, replacing any copy
-the client sent, and authenticate to the wait server with a bearer granted `wait.call`. On every other route,
+the client sent, and authenticate to the wait server with a registry credential granted `wait.call` (a bearer,
+or a client certificate on a listener with `tls.client_ca`). On every other route,
 remove that header. Do not send the wait route's calls to the Check API: policy would judge them like any other
 call.

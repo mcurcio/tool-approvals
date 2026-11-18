@@ -109,7 +109,20 @@ wait_route:
 ```
 
 `hook_timeout` is agentgateway's own timeout on the guardrail call, 10 s in v1.7.0; `gate.check_budget` (default
-5 s) must stay below it, so a slow check is refused by the gate rather than cut off by the gateway.
+5 s) must stay below it, so a slow check is refused by the gate rather than cut off by the gateway. If the
+guardrail call carries a gRPC deadline, the gate also finishes 250 ms before it.
+
+**Gateway attributes for policy.** To let policy rules match a value agentgateway attested (a tenant claim, say),
+add it to the processor's `metadata` beside the principal, as any CEL expression, and name it in
+`gate.ext_mcp.attributes` with its key path into that metadata: one key for a string value, more keys to descend
+into a value that is itself a map. For example, `metadata: {principal: jwt.sub, tenant: jwt.tenant}` on the
+gateway and `attributes: {tenant: [tenant]}` on the gate. The gate copies only the names listed; a value that is
+missing or not a string is left out, and a rule that reads it refuses the call as `unavailable`
+([configuration](configuration.md#gate)).
+
+**mTLS instead of the bearer.** The hook may present a client certificate in place of `backendAuth.key`, where the
+gateway can send one on this connection: name the certificate's SHA-256 fingerprint in the registry entry and set
+`tls.client_ca` on `gate.ext_mcp.listener` ([configuration](configuration.md#registry-who-may-call-whom)).
 
 ## What the agent sees
 

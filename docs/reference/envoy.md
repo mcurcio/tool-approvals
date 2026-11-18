@@ -65,8 +65,8 @@ http_filters:
 |---|---|
 | `payload_in_metadata: payload` and `metadata_context_namespaces` | The verified JWT payload reaches the gate as dynamic metadata; `gate.ext_authz.principal_path` (`[envoy.filters.http.jwt_authn, payload, sub]`) points at the principal in it |
 | `failure_mode_allow: false` | A gate that cannot be reached refuses the call |
-| `grpc_service.timeout` | **Raise it** to `gate.ext_authz.hook_timeout` (70 s in the example). Envoy's default, 200 ms, would refuse gated calls; the gate keeps its own `check_budget` below this value |
-| `initial_metadata` `authorization` | A registry bearer granted `check`, sent to the gate on every check |
+| `grpc_service.timeout` | **Raise it** to `gate.ext_authz.hook_timeout` (70 s in the example). Envoy's default, 200 ms, would refuse gated calls; the gate keeps its own `check_budget` below this value, and when the check call carries a gRPC deadline it also finishes 250 ms before that |
+| `initial_metadata` `authorization` | A registry bearer granted `check`, sent to the gate on every check. Or leave it out and use mTLS: give the gate's cluster a client certificate (`tls_certificates` in its `common_tls_context`), name its SHA-256 fingerprint in the registry entry and set `tls.client_ca` on `gate.ext_authz.listener` ([configuration](configuration.md#registry-who-may-call-whom)) |
 | `with_request_body` | `pack_as_bytes: true` gives the gate the exact body bytes. `max_request_bytes` must leave room for the largest params the gate accepts (16384 bytes) plus the JSON-RPC envelope; the suite uses twice that. With `allow_partial_message: false` Envoy itself refuses a larger body; a body Envoy cut anyway is refused by the gate as too large |
 | `disallowed_headers` | By default `ext_authz` sends the gate every request header, the agent's credentials included. The gate reads none of them, and the agent's credentials are not the gate's to see. `jwt_authn` already removes `Authorization` once it has verified it (its `forward` is false by default); the matcher is what keeps `Cookie` (and `Authorization` under any other authentication) out. The conformance suite checks it with a cookie |
 
@@ -88,6 +88,21 @@ routes:
 
 The key (`server`) is `gate.ext_authz.server_key`; the value is the server name policy rules match. A route
 without it is refused (`unavailable`), as is a request without a principal at `principal_path`.
+
+## Gateway attributes for policy
+
+A policy rule can match values Envoy attested. Each one is named in `gate.ext_authz.attributes` with exactly one
+source: `metadata`, a filter's dynamic-metadata namespace then the keys down to a string (the namespace must be
+in `metadata_context_namespaces`), or `context_extension`, a key the route sets beside `server`:
+
+```yaml
+    attributes: # name: exactly one of metadata (filter name, then keys) or context_extension (a key)
+      tenant: { metadata: [envoy.filters.http.jwt_authn, payload, tenant] }
+      zone: { context_extension: zone }
+```
+
+The gate copies only the names listed; a source that is missing or not a string is left out, and a rule that reads
+it refuses the call as `unavailable` ([configuration](configuration.md#gate)).
 
 ## The gate's cluster
 

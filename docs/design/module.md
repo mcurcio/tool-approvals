@@ -3,9 +3,9 @@
 The Python packages, what each may import, what each module promises, and how Approvals uses Postgres. Read the
 [system](system.md) and [service](service.md) designs first.
 
-> **Status:** milestones 0 and 1 are built: every module below not marked planned exists, and the import contracts
-> are enforced in CI ([roadmap](system.md#delivery-milestones)). Modules for later milestones (`gate.policy`'s
-> gateway-context, AuthZEN and OPA adapters; `approvals.edges.answers` and `admin`; `approvals.infra.channels`;
+> **Status:** milestones 0, 1 and 2 are built: every module below not marked planned exists, and the import
+> contracts are enforced in CI ([roadmap](system.md#delivery-milestones)). Modules for later milestones
+> (`gate.policy`'s AuthZEN and OPA adapters; `approvals.edges.answers` and `admin`; `approvals.infra.channels`;
 > `approvals.app.delivery` and `audit`; telemetry) are planned.
 
 ## Summary
@@ -111,7 +111,7 @@ standard library's network, process and database modules):
 | `approvals.app.deadlines`, `delivery`, `audit` | the due index; committed events; `after=<id>` | ended deadlines; deliveries, pauses, dead letters; audit records | Poll; send arguments or words |
 | `approvals.edges.desk` | a browser session (OIDC code + PKCE, `acr_values`, `max_age`; checks `aud`, `azp`, `nonce`, `acr`, `auth_time`) | review pages; answers as the desk surface; push subscriptions to configured push origins only | Render agent words or arguments other than as escaped text (never in an attribute, URL or script); hide control or bidi characters (they show visibly) |
 | `config` | file, command | that command's typed view; every refusal listed | Resolve another command's secrets; call an identity provider |
-| `auth` | the registry; a credential | one decision (entry, grants), used by both the gRPC interceptor and the ASGI guard | Store a bearer in plain text |
+| `auth` | the registry; a bearer and, on a listener with `tls.client_ca`, the client certificate's DER leaf | one decision (entry, grants), used by both the gRPC interceptor and the ASGI guard; a bearer naming a different entry than the certificate refuses | Store a bearer in plain text |
 
 **Persistence:** one repository per aggregate: `Approval` (with its `Wait` entities and its answer, held as
 all-or-none answer columns on the Approval row, including the digest it answered), `ChannelCursor` (with its dead
@@ -132,8 +132,9 @@ when its retention ends (the foreign keys cascade); longer audit is the integrat
 | 7 | feed → `wait.mcp`; repeat → gate → `claim` | `approved`; the same bytes | Approved → Used |
 
 - **One call library:** the gate parses to ask policy, Approvals parses for identity, the `ext_authz` mapping
-  finds `params` with the span reader, and the digest and desk use the shown digest. Batches, GET, DELETE and
-  unclassifiable requests are refused by the mapping before parsing.
+  finds `params` with the span reader, and the digest and desk use the shown digest. The `ext_authz` mapping
+  classifies each HTTP request with one pure function (`classify`) before parsing: any method but POST, a cut
+  body, a batch or anything but one JSON-RPC request is refused; only one `tools/call` reaches the checker.
 - **Contracts:** `proto/` holds `calls/v1` (the shared `Rejected` and `Refused`), `check/v1`, `requests/v1`, then
   `answers/v1`, `events/v1`, `audit/v1`. The proto package equals the directory equals the Python package
   (`tool_approvals.contract.check.v1`), so generated stubs import each other without rewriting. Stubs are
@@ -205,15 +206,15 @@ requested level. An identity provider that reuses an earlier ceremony for a high
 
 | Module | Proof |
 |---|---|
-| `kernel.calls` | Hypothesis: identity ignores `_meta` and changes with any argument byte; every refusal above; planned: the span reader returns exact bytes under any whitespace |
+| `kernel.calls` | Hypothesis: identity ignores `_meta` and changes with any argument byte; every refusal above; the span reader returns the exact params bytes under any insignificant whitespace and member order, in the params and in the envelope |
 | Pure cores | Fakes for their ports; every verdict and error |
-| Mappings | **Conformance suite per gateway** (real agentgateway, real Envoy): the gate is the last processor (a fixture tool records the bytes it receives), exact bytes, attested server, header replacement on the wait route, fail closed when the gate is stopped or slow |
+| Mappings | **One conformance suite, run through each adapter** (real agentgateway, real Envoy, a plain Check API caller over gRPC and JSON): the gate is the last processor (a fixture tool records the bytes it receives), exact bytes, attested server, gateway attributes, header replacement on the wait route, the agent's credentials kept from the gate, fail closed when the gate is stopped or slow. A case an adapter cannot express is skipped by name with its reason. `ext_authz`'s classification table is also tested row by row as a pure function. A real listener proves an inbound deadline reaches Approvals less the reply reserve |
 | Check API, policy | The same golden cases over gRPC and JSON; OPA and an AuthZEN PDP as real images |
 | Store | Real Postgres: concurrent writers paused before commit never expose a later, lower id; an EVENTS wait past `lock_timeout` refuses; the waker and an event writer on one row do not deadlock; killing the channel-lock connection moves delivery with no cursor regression |
 | Desk | A scripted OIDC provider: too weak, too old, future `auth_time`, wrong `aud`, `azp` or `nonce` refused; a form token for another ticket, session or digest refused; hostile words and arguments (HTML, `javascript:` URLs, control and bidi characters) render as visible escaped text |
 | Answers API | Above-cap assurance, surface not allowed, digest mismatch, already answered, past deadline |
 | Channels | Order by id, at least once, pause, give-up; Web Push decrypted with test keys; a subscription outside the configured push origins refused |
-| Config | Refused: below the floor; a shared credential; an agents'-side entry granted a desk, answers or admin method; a bearer on a plaintext listener; retention shorter than the give-up horizon; a duplicate YAML key |
+| Config | Refused: below the floor; a shared credential; an agents'-side entry granted a desk, answers or admin method; a bearer on a plaintext listener; a client-certificate entry granted more than check and `wait.call`, or one no listener asks for; a rule attribute an enabled adapter does not map; retention shorter than the give-up horizon; a duplicate YAML key |
 | End to end, chart | Compose with both gateways; `helm lint` and kubeconform, an install on kind only when the chart changes |
 
 ## Canonical shape and design rules
@@ -239,6 +240,7 @@ requested level. An identity provider that reuses an earlier ceremony for a high
   channel per replica; ordering only by id at the receiver; a Connect client cannot call the JSON binding
   directly; order holds per sender only, so a delivery takeover can interleave; one Web Push cursor pauses every
   device when one push service fails.
-- **Deferred:** a published conformance kit for third-party mappings; `connectrpc` once it reaches 1.0; per-role
+- **Deferred:** a published conformance kit for third-party adapters (the suite's cases live in one module, so a
+  kit can export them); `connectrpc` once it reaches 1.0; per-role
   database users.
 - **Not planned:** Python plugin loading; hot reload; a policy cache.
