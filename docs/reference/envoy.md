@@ -154,20 +154,23 @@ The filter sees every HTTP request on the route, so the gate classifies each one
 | A body that is neither one JSON-RPC request nor one JSON-RPC response: a batch, duplicate keys, trailing data, no method and no `result` or `error` | Refused (`malformed`) |
 | `POST` of a client's JSON-RPC response (its answer to a server's request: sampling, elicitation, roots) | Passed |
 | `POST` of a single `tools/call` | Checked like any call, on the params' exact bytes ([the Check API](check-api.md#the-verdict)); on the wait route, passed without policy ([the wait route](#the-wait-route)) |
+| `POST` of a `notifications/*` method carrying an `id` (an MCP notification has none) | Refused (`malformed`) |
 | `POST` of `initialize`, `notifications/*`, `tools/list`, `prompts/*`, `resources/*`, `completion/complete`, `logging/setLevel`, `ping` | Passed |
 | `POST` of a `tasks/*` method | Refused (`task-requested`): task follow-ups would escape the approved call |
 | `POST` of any other method | Refused (`malformed`) |
 
 Every MCP method but `tools/call` passes, as it does behind agentgateway, whose guardrail is sent `tools/call`
 alone. The list is fixed in the gate, not configured. A refusal answers the request's own `id` when the gate could
-read one (the method rows), and `null` otherwise, so a refused notification is never answered with an id. A route
-that names no server, or a request with no principal at `principal_path`, is refused (`unavailable`) before any of
-these.
+read one (the method rows), and `null` when it could read no message. A refused notification (a method and no
+`id`, a `tools/call` too) is answered as MCP's Streamable HTTP transport asks: HTTP 400, its JSON-RPC error carrying
+no `id` member. A route that names no server, or a request with no principal at `principal_path`, is refused
+(`unavailable`) before any of these.
 
 ## What the agent sees
 
 A refused request gets HTTP 200 with a JSON-RPC error answering the request's own `id` (its exact bytes; `null`
-when it had none). The message is the Check API's `agent_text`; `data` names the verdict and, when pending, the
+when the gate could read no message). A refused notification gets HTTP 400 with the same error and no `id`. The
+message is the Check API's `agent_text`; `data` names the verdict and, when pending, the
 ticket:
 
 ```json
@@ -191,9 +194,11 @@ bootstrap needs to ask for them.
 
 The wait server is one more MCP route, whose `context_extensions` server is `wait_route.server`. The gate passes
 its `tools/call` requests without policy and sets `wait_route.principal_header` to the principal at
-`principal_path`, overwriting any copy the agent sent (an OK response header with `append: false`); the wait
-server reads the principal from that header alone. The route authenticates to the wait server itself, with a
-registry bearer granted `wait.call`, in place of the agent's `Authorization` (which `jwt_authn` does not forward):
+`principal_path`, overwriting every copy the agent sent (an OK response header with `append: false`, which Envoy's
+ext_authz reads for these headers, and `append_action: OVERWRITE_IF_EXISTS_OR_ADD`, the field that replaces it);
+the wait server reads the principal from that header alone. The route authenticates to the wait server itself,
+with a registry bearer granted `wait.call`, in place of the agent's `Authorization` (which `jwt_authn` does not
+forward):
 
 ```yaml
 - match:

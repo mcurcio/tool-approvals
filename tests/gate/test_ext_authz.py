@@ -43,13 +43,16 @@ from tool_approvals.kernel.requests import NotApproved, Rejected, Ticketed
 MALFORMED = Rejected(RejectReason.MALFORMED)
 TASK_REQUESTED = Rejected(RejectReason.TASK_REQUESTED)
 TOO_LARGE = Rejected(RejectReason.TOO_LARGE)
-# Every MCP method but tools/call, as agentgateway passes them: the owner's list, written out independently.
-PASSED: Final = (
-    "initialize",
+# Every MCP method but tools/call, as agentgateway passes them: the owner's list, written out independently. The
+# notifications are sent as MCP has them, with no id; the requests with one.
+PASSED_NOTIFICATIONS: Final = (
     "notifications/initialized",
     "notifications/cancelled",
     "notifications/progress",
     "notifications/roots/list_changed",
+)
+PASSED_REQUESTS: Final = (
+    "initialize",
     "tools/list",
     "prompts/list",
     "prompts/get",
@@ -82,6 +85,10 @@ def _rpc(method: str, id_json: bytes = b"1", params: bytes | None = b"{}") -> by
     return body + (b"" if params is None else b',"params":' + params) + b"}"
 
 
+def _notification(method: str) -> bytes:
+    return b'{"jsonrpc":"2.0","method":"' + method.encode() + b'","params":{}}'
+
+
 @dataclass(frozen=True, slots=True)
 class Row:
     """One HTTP request and what the table says the gate does with it."""
@@ -112,11 +119,11 @@ ROWS: Final = (
     Row(
         "tools-call-notification", b'{"jsonrpc":"2.0","method":"tools/call","params":' + FREE + b"}", ToCheck(FREE, b"")
     ),
-    *(Row(f"pass-{m}", _rpc(m), PassOn()) for m in PASSED),
-    *(
-        Row(f"pass-notification-{m}", b'{"jsonrpc":"2.0","method":"' + m.encode() + b'","params":{}}', PassOn())
-        for m in ("notifications/initialized", "notifications/cancelled")
-    ),
+    *(Row(f"pass-{m}", _rpc(m), PassOn()) for m in PASSED_REQUESTS),
+    *(Row(f"pass-{m}", _notification(m), PassOn()) for m in PASSED_NOTIFICATIONS),
+    # An MCP notification has no id, and MCP names no request notifications/*: one carrying an id is no MCP message,
+    # refused as a request, answering that id.
+    *(Row(f"notification-with-id-{m}", _rpc(m, b'"n-1"'), Deny(MALFORMED, b'"n-1"')) for m in PASSED_NOTIFICATIONS),
     *(
         Row(f"task-{m}", _rpc(m, b'"req-1"'), Deny(TASK_REQUESTED, b'"req-1"'))
         for m in ("tasks/get", "tasks/cancel", "tasks/list", "tasks/result")
@@ -134,11 +141,14 @@ ROWS: Final = (
             "promptsget",
             "notifications",
             "Ping",
+            "Tools/call",  # methods are case-sensitive: not tools/call, so refused, never checked or passed
         )
     ),
-    # A refused notification has no id to answer: its JSON-RPC error answers null.
-    Row("unknown-notification", b'{"jsonrpc":"2.0","method":"unknown/thing"}', Deny(MALFORMED, b"")),
-    Row("tasks-notification", b'{"jsonrpc":"2.0","method":"tasks/cancel"}', Deny(TASK_REQUESTED, b"")),
+    # A refused notification has no id to answer: HTTP 400, its JSON-RPC error carrying no id (MCP Streamable HTTP).
+    Row("unknown-notification", b'{"jsonrpc":"2.0","method":"unknown/thing"}', Deny(MALFORMED, b"", True)),
+    Row("tasks-notification", b'{"jsonrpc":"2.0","method":"tasks/cancel"}', Deny(TASK_REQUESTED, b"", True)),
+    Row("notification-notifications", _notification("notifications"), Deny(MALFORMED, b"", True)),
+    Row("notification-Tools/call", _notification("Tools/call"), Deny(MALFORMED, b"", True)),
     # The wait server's route is classified as any route's: the checker passes its tools/call (CheckCore.check).
     Row("wait-server", tools_call(FREE), ToCheck(FREE, b"7"), server=ROUTE.server),
     Row("wait-server-pass-method", _rpc("tools/list"), PassOn(), server=ROUTE.server),
@@ -178,10 +188,10 @@ async def test_the_servicer_answers_each_row(gate: Gate, row: Row) -> None:
     if not isinstance(row.expected, Deny):
         assert_allowed(response)  # ToCheck rows carry FREE, which the policy passes without Approvals
         return
-    verdict, id_json = row.expected.verdict, row.expected.id_json
-    assert_denied(response, verdict, id_json)
+    verdict, id_json, notification = row.expected.verdict, row.expected.id_json, row.expected.notification
+    assert_denied(response, verdict, id_json, notification=notification)
     body: bytes = response.denied_response.body.encode()
-    prefix = b'{"jsonrpc":"2.0","id":' + (id_json or b"null") + b',"error":'
+    prefix = b'{"jsonrpc":"2.0",' + (b"" if notification else b'"id":' + (id_json or b"null") + b",") + b'"error":'
     assert body.startswith(prefix), body
     error = json.loads(body[len(prefix) : -1])
     message = agent_text(verdict, WAIT_TOOL)
@@ -193,6 +203,21 @@ async def test_the_wait_route_overwrites_a_client_principal_header_without_polic
     for params in (GATED, b'{"name":"approval_wait","arguments":{},"task":{}}'):
         request = authz_request(tools_call(params), server=ROUTE.server, headers={ROUTE.principal_header: "forged"})
         assert_allowed(await ext_authz(gate, request), attested=PRINCIPAL)
+
+
+async def test_the_wait_route_replaces_every_client_copy_of_the_principal_header(gate: Gate) -> None:
+    """Duplicate and mixed-case copies, in both of Envoy's header forms: the `headers` map (lowercased keys,
+    duplicates joined by a comma) and the `header_map` list. The one OK header sets the attested value with append
+    false, Envoy's set, which replaces every value of that name; HTTP header names are case-insensitive and Envoy's
+    header map holds them lowercased. That Envoy really leaves the wait server one copy is the e2e's to prove
+    (conformance case 5 sends one copy); this layer proves the gate asks for a set, never an append, whatever the
+    client sent."""
+    header = ROUTE.principal_header
+    request = authz_request(tools_call(GATED), server=ROUTE.server, headers={header: "forged-1,forged-2"})
+    for key in (header, header.upper(), header.title(), header):
+        entry = request.attributes.request.http.header_map.headers.add()
+        entry.key, entry.raw_value = key, b"forged"
+    assert_allowed(await ext_authz(gate, request), attested=PRINCIPAL)
 
 
 async def test_another_route_removes_a_client_principal_header(gate: Gate) -> None:
@@ -234,12 +259,12 @@ async def test_a_call_without_params_is_rejected_by_the_core(gate: Gate) -> None
     assert_denied(await ext_authz(gate, authz_request(_rpc("tools/call", params=None))), MALFORMED, b"1")
 
 
-async def test_a_tools_call_notification_is_still_checked_and_answers_id_null(tls: TlsFiles) -> None:
+async def test_a_tools_call_notification_is_still_checked_and_refused_as_a_notification(tls: TlsFiles) -> None:
     script = Script(claim=[NotApproved()], request=[Ticketed(TICKET)])
     async with running_gate(script, tls) as gate:
         body = b'{"jsonrpc":"2.0","method":"tools/call","params":' + GATED + b"}"
-        denial = assert_denied(await ext_authz(gate, authz_request(body)), Pending(TICKET), b"")
-    assert denial["id"] is None
+        denial = assert_denied(await ext_authz(gate, authz_request(body)), Pending(TICKET), b"", notification=True)
+    assert "id" not in denial
     assert [method for method, _ in script.calls] == ["claim", "request"]
 
 

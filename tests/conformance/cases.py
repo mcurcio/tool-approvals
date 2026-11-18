@@ -59,6 +59,7 @@ SLOWER_THAN_THE_HOOKS: Final = EXT_AUTHZ_TIMEOUT + timedelta(seconds=2)
 AGENT_COOKIE: Final = {"cookie": "agent-session=not-the-gates"}
 FORWARDED: Final = ("x-agent-note", "seen")  # a header of the agent's that each hook is sent (case 13's control)
 METHOD_NOT_FOUND: Final = -32601  # the echo tool's answer to a method it does not serve
+_NO_ID: Final = object()  # case 11: a refused notification, answered with no id at all
 _NOT_THROUGH: Final = re.compile(r"^\s*Not through ([a-z-]+): (.+)$")
 
 type Case = Callable[[Stack, GatewayUnderTest], Awaitable[object]]
@@ -264,7 +265,8 @@ async def case_11_envoy_denies_what_is_not_one_tools_call(st: Stack, gateway: Ga
     has each row through the gate alone). A body Envoy would cut it refuses itself (413), so the gate's TOO_LARGE row
     is the gate's alone; the wait server's route is case 5's. Every MCP method but tools/call passes to the tool
     unchecked, as behind agentgateway: a notification and a client's response reach it and are answered 202 with
-    no body, never with an id of the gate's.
+    no body, never with an id of the gate's. A notification the gate refuses is HTTP 400, its JSON-RPC error
+    carrying no id (MCP Streamable HTTP); a notifications/* message carrying an id is refused as a request.
 
     Not through agentgateway: it hands the gate tools/call only, already parsed; nothing else reaches the hook.
     Not through check-api: a Check API caller asks about tools/call params only; it classifies its own traffic."""
@@ -288,13 +290,18 @@ async def case_11_envoy_denies_what_is_not_one_tools_call(st: Stack, gateway: Ga
         "no method": ("POST", b'{"jsonrpc":"2.0","id":9,"params":{}}', malformed, None),
         "tasks/get": ("POST", request("tasks/get", {"taskId": "t"}, "t-1"), tasks, "t-1"),
         "an unknown method": ("POST", request("sampling/createMessage", {}), malformed, 9),
-        "an unknown notification": ("POST", notification("unknown/thing", {}), malformed, None),
+        "a notification with an id": ("POST", request("notifications/initialized", {}), malformed, 9),
+        "an unknown notification": ("POST", notification("unknown/thing", {}), malformed, _NO_ID),
     }
     for what, (method, body, reason, request_id) in denied.items():
         raw = await gateway.raw(principal, method, body)  # type: ignore[arg-type]
-        assert raw.status == 200, (what, raw)
         answer = json.loads(raw.body)
-        assert answer["id"] == request_id, (what, raw)
+        if request_id is _NO_ID:  # a refused notification: an HTTP error status, and no id in the error
+            assert raw.status == 400, (what, raw)
+            assert "id" not in answer, (what, raw)
+        else:
+            assert raw.status == 200, (what, raw)
+            assert answer["id"] == request_id, (what, raw)
         error = answer["error"]
         assert error["code"] == PERMISSION_DENIED_CODE, (what, raw)
         assert error["data"] == {"verdict": "rejected"}, (what, raw)

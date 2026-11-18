@@ -53,8 +53,9 @@ def assert_ext_mcp_shows(result: ext_mcp_pb2.McpRequestResult, verdict: CheckVer
 
 def assert_allowed(response: Any, attested: Principal | None = None) -> None:
     """OK, removing the principal header, so no tool sees one a client sent; with `attested` (the wait route),
-    setting it to that principal instead, overwriting the client's copy (append false) and removing nothing, since
-    Envoy applies removals after it sets headers."""
+    setting it to that principal instead, overwriting the client's copies (append false, which Envoy's ext_authz
+    reads, and append_action OVERWRITE_IF_EXISTS_OR_ADD, which replaces it) and removing nothing, since Envoy
+    applies removals after it sets headers."""
     assert response.status.code == 0
     assert response.WhichOneof("http_response") == "ok_response"
     ok = response.ok_response
@@ -63,22 +64,31 @@ def assert_allowed(response: Any, attested: Principal | None = None) -> None:
         assert list(ok.headers) == []
         return
     assert list(ok.headers_to_remove) == []
-    assert [(h.header.key, h.header.value, h.HasField("append"), h.append.value) for h in ok.headers] == [
-        (ROUTE.principal_header, attested, True, False)
-    ]
+    from envoy.config.core.v3 import base_pb2  # noqa: PLC0415 (the envoy extra, imported where used)
+
+    overwrite = base_pb2.HeaderValueOption.OVERWRITE_IF_EXISTS_OR_ADD
+    assert [
+        (h.header.key, h.header.value, h.HasField("append"), h.append.value, h.append_action) for h in ok.headers
+    ] == [(ROUTE.principal_header, attested, True, False, overwrite)]
 
 
-def assert_denied(response: Any, verdict: CheckVerdict, id_json: bytes) -> dict[str, Any]:
-    """The ext_authz denial: HTTP 200, application/json, a JSON-RPC error answering `id_json`. Returns the body."""
+def assert_denied(
+    response: Any, verdict: CheckVerdict, id_json: bytes, *, notification: bool = False
+) -> dict[str, Any]:
+    """The ext_authz denial: HTTP 200, application/json, a JSON-RPC error answering `id_json`; for a
+    `notification`, HTTP 400 and the error with no id member (MCP Streamable HTTP). Returns the body."""
     assert response.status.code != 0
     assert response.WhichOneof("http_response") == "denied_response"
     denied = response.denied_response
-    assert denied.status.code == 200
+    assert denied.status.code == (400 if notification else 200)
     assert [(h.header.key, h.header.value) for h in denied.headers] == [("content-type", "application/json")]
     body: dict[str, Any] = json.loads(denied.body)
-    assert set(body) == {"jsonrpc", "id", "error"}
     assert body["jsonrpc"] == "2.0"
-    assert json.dumps(body["id"]).encode() == (id_json or b"null")
+    if notification:
+        assert set(body) == {"jsonrpc", "error"}
+    else:
+        assert set(body) == {"jsonrpc", "id", "error"}
+        assert json.dumps(body["id"]).encode() == (id_json or b"null")
     error = body["error"]
     assert error["code"] == json_rpc_code(verdict)
     assert error["message"] == agent_text(verdict, WAIT_TOOL)
