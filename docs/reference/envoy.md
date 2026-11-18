@@ -7,9 +7,8 @@ dynamic metadata; each MCP route names its server in `context_extensions`. The f
 bootstrap the end-to-end suite runs against Envoy v1.40 (`tests/e2e/envoy.py` renders it, as JSON), with example
 names.
 
-**Not built yet:** the wait server behind Envoy (planned, milestone 4), and the complete classification of every
-MCP request (milestone 2). Today an agent behind Envoy is told to call the wait tool, which must be served through
-another gateway.
+**Not built yet:** the wait server behind Envoy (planned, milestone 4). Today an agent behind Envoy is told to call
+the wait tool, which must be served through another gateway.
 
 ## The HTTP filters
 
@@ -51,6 +50,12 @@ http_filters:
       pack_as_bytes: true
     metadata_context_namespaces:
     - envoy.filters.http.jwt_authn
+    disallowed_headers:
+      patterns:
+      - exact: authorization
+        ignore_case: true
+      - exact: cookie
+        ignore_case: true
 - name: envoy.filters.http.router
   typed_config:
     '@type': type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
@@ -63,11 +68,7 @@ http_filters:
 | `grpc_service.timeout` | **Raise it** to `gate.ext_authz.hook_timeout` (70 s in the example). Envoy's default, 200 ms, would refuse gated calls; the gate keeps its own `check_budget` below this value |
 | `initial_metadata` `authorization` | A registry bearer granted `check`, sent to the gate on every check |
 | `with_request_body` | `pack_as_bytes: true` gives the gate the exact body bytes. `max_request_bytes` must leave room for the largest params the gate accepts (16384 bytes) plus the JSON-RPC envelope; the suite uses twice that. With `allow_partial_message: false` Envoy itself refuses a larger body; a body Envoy cut anyway is refused by the gate as too large |
-
-**Do not hand the agent's own credential to the gate.** By default `ext_authz` sends every request header to the
-authorization service, the agent's `Authorization` included, and the gate never reads them. Envoy's
-`disallowed_headers` matcher on the `ext_authz` filter keeps a header out; add `authorization` to it. The
-end-to-end suite does not set it yet, so this setting is not covered by a test here.
+| `disallowed_headers` | By default `ext_authz` sends the gate every request header, the agent's credentials included. The gate reads none of them, and the agent's credentials are not the gate's to see. `jwt_authn` already removes `Authorization` once it has verified it (its `forward` is false by default); the matcher is what keeps `Cookie` (and `Authorization` under any other authentication) out. The conformance suite checks it with a cookie |
 
 ## Each MCP route names its server
 
@@ -129,10 +130,18 @@ The filter sees every HTTP request on the route, so the gate classifies each one
 
 | Request | Gate |
 |---|---|
-| `POST` of a single `tools/call` | Checked like any call ([the Check API](check-api.md#the-verdict)) |
+| `GET` (a server stream), `DELETE` (ending a session), any HTTP method but `POST` | Refused (`malformed`) |
+| A body Envoy cut (`x-envoy-auth-partial-body: true`) | Refused (`too-large`) |
+| A body that is not one JSON-RPC request: a batch, duplicate keys, trailing data, no method, a client's JSON-RPC response | Refused (`malformed`) |
+| `POST` of a single `tools/call` | Checked like any call, on the params' exact bytes ([the Check API](check-api.md#the-verdict)) |
 | `POST` of `initialize`, `notifications/initialized`, `tools/list`, `ping` | Passed |
 | `POST` of a `tasks/*` method | Refused (`task-requested`): task follow-ups would escape the approved call |
-| Any other method, a batch, a body that is not one JSON-RPC request, `GET` (a server stream), `DELETE` | Refused (`malformed`) |
+| `POST` of any other method | Refused (`malformed`) |
+
+A refusal answers the request's own `id` when the gate could read one (the method rows), and `null` otherwise. A
+route that names no server, or a request with no principal at `principal_path`, is refused (`unavailable`) before
+any of these. A route naming `wait_route.server` is checked like any other server's until the wait route behind
+Envoy is built (milestone 4).
 
 ## What the agent sees
 

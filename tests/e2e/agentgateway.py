@@ -6,7 +6,7 @@ processor: fail closed, `tools/call` in the request phase, over TLS with the bea
 principal, and never the agent's own credentials, its `authorization` header or its cookies (the gate reads no
 header; the agent's credential is not the gate's to see). v1.7.0's strict jwtAuth already removes `authorization`
 once it has verified it; the filter holds whatever the route's authentication is, and it alone keeps `cookie` out,
-which is what lets conformance case 7 see it work. The wait target gets a request timeout above the wait server's
+which is what lets conformance case 13 see it work. The wait target gets a request timeout above the wait server's
 max_hold: on the 2026-07-28 protocol the wait server sends nothing until a hold ends, and agentgateway answers a call
 that outlives the request timeout with HTTP 500 and JSON-RPC -32603 "failed to send message" (measured on v1.7.0).
 """
@@ -36,14 +36,16 @@ def _seconds(duration: timedelta) -> str:
     return f"{duration.total_seconds():g}s"
 
 
-def guardrail_processor(hook: Hook, principal_key: str) -> dict[str, object]:
+def guardrail_processor(hook: Hook, principal_key: str, attributes: Mapping[str, str]) -> dict[str, object]:
+    """The gate's processor. `attributes`: each metadata key the gate maps to a gateway attribute
+    (`gate.ext_mcp.attributes`), with the CEL expression agentgateway fills it from."""
     return {
         "kind": "remote",
         "methods": {"tools/call": "request"},
         "host": f"{hook.host}:{hook.port}",
         "policies": {"backendTLS": {"root": hook.ca_file, "hostname": hook.host}, "backendAuth": {"key": hook.bearer}},
         "failureMode": "failClosed",
-        "metadata": {principal_key: "jwt.sub"},
+        "metadata": {principal_key: "jwt.sub", **attributes},
         "requestHeaders": {"disallowed": list(HIDDEN_FROM_GUARDRAIL)},
     }
 
@@ -52,11 +54,12 @@ def config(
     *,
     servers: Mapping[str, str],
     agents: AgentJwt,
-    guardrail: tuple[Hook, str] | None,
+    guardrail: tuple[Hook, str, Mapping[str, str]] | None,
     wait: WaitTarget | None,
 ) -> dict[str, object]:
-    """The whole file. `servers`: route name to MCP URL. `guardrail`: the gate's ext_mcp hook and the metadata key
-    the gate reads the principal from (`gate.ext_mcp.principal_key`); None runs no guardrail."""
+    """The whole file. `servers`: route name to MCP URL. `guardrail`: the gate's ext_mcp hook, the metadata key the
+    gate reads the principal from (`gate.ext_mcp.principal_key`) and the attribute metadata
+    (`guardrail_processor`); None runs no guardrail."""
     targets: list[dict[str, object]] = [{"name": name, "mcp": {"host": url}} for name, url in servers.items()]
     if wait is not None:
         targets.append(
@@ -79,9 +82,9 @@ def config(
         }
     }
     if guardrail is not None:
-        hook, principal_key = guardrail
+        hook, principal_key, attributes = guardrail
         # The gate's processor is the last one: any other processor goes before it.
-        policies["mcpGuardrails"] = {"processors": [guardrail_processor(hook, principal_key)]}
+        policies["mcpGuardrails"] = {"processors": [guardrail_processor(hook, principal_key, attributes)]}
     route = {
         "name": "mcp",
         "matches": [{"path": {"exact": MCP_PATH}}],

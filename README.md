@@ -78,8 +78,8 @@ and its own secrets), and wire your gateway. [Running tool-approvals](docs/opera
 
 | Gateway | Wiring | Status |
 |---|---|---|
-| [agentgateway](https://agentgateway.dev) | Guardrail processor (`ext_mcp`), last in the chain, fail closed, `tools/call` request phase; the wait server as an MCP target ([wiring](docs/reference/agentgateway.md)) | Built; the conformance suite completes in milestone 2 |
-| Envoy family (Envoy, Envoy Gateway, Istio) | [`ext_authz`](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_authz_filter) gRPC with the request body as raw bytes, last body filter, raised timeout; caller from `jwt_authn` metadata ([wiring](docs/reference/envoy.md)) | Built (minimal); complete in milestone 2, the wait route in milestone 4 |
+| [agentgateway](https://agentgateway.dev) | Guardrail processor (`ext_mcp`), last in the chain, fail closed, `tools/call` request phase; the wait server as an MCP target ([wiring](docs/reference/agentgateway.md)) | Complete |
+| Envoy family (Envoy, Envoy Gateway, Istio) | [`ext_authz`](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_authz_filter) gRPC with the request body as raw bytes, last body filter, raised timeout; caller from `jwt_authn` metadata ([wiring](docs/reference/envoy.md)) | Complete, except the wait route (milestone 4) |
 | Any other hook | Call the **Check API** (gRPC, or JSON over HTTP) from the gateway's own plugin ([reference](docs/reference/check-api.md)) | Built |
 
 ## The Check API
@@ -114,8 +114,9 @@ JSON-RPC error (`-32001`, or `-32003` for `queue_full` and `unavailable`). The f
 [the Check API reference](docs/reference/check-api.md).
 
 **What is hashed is what runs.** An approval covers the caller, the server, the tool and the exact argument
-bytes. The gate must be the last processor that can change the call; each gateway mapping's conformance suite
-proves the bytes the tool receives are the bytes that were approved (complete in milestone 2).
+bytes. The gate must be the last processor that can change the call; one conformance suite, run through
+agentgateway, Envoy and a plain Check API caller, proves the bytes the tool receives are the bytes that were
+approved.
 
 ## Bring your own policy and routing
 

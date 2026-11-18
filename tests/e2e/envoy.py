@@ -4,8 +4,11 @@ One HTTP listener; each tool server is a route at `/<server>/mcp` to the echo cl
 (`jwt_authn`, the verified payload kept in the request's dynamic metadata under `payload`, which is where
 `gate.ext_authz.principal_path` points). With a guardrail, `ext_authz` calls the gate over gRPC and TLS with the
 bearer: fail closed, the whole body packed as bytes (a body over the buffer limit is refused, never sent in
-part), the `jwt_authn` metadata forwarded, the gate's hook timeout raised to `gate.ext_authz.hook_timeout`, and
-each route naming its server in `context_extensions`.
+part), the `jwt_authn` metadata forwarded, the agent's own credentials (its `authorization` header and its
+cookies) kept from the gate by `disallowed_headers`, the gate's hook timeout raised to
+`gate.ext_authz.hook_timeout`, and each route naming its server in `context_extensions`. `jwt_authn` already
+removes `authorization` once it has verified it (`forward` is false by default); the filter holds whatever the
+route's authentication is, and it alone keeps `cookie` out, which is what lets conformance case 13 see it work.
 """
 
 from collections.abc import Mapping
@@ -25,6 +28,7 @@ JWT_FILTER: Final = "envoy.filters.http.jwt_authn"
 EXT_AUTHZ_FILTER: Final = "envoy.filters.http.ext_authz"
 JWT_PAYLOAD_KEY: Final = "payload"
 MAX_REQUEST_BYTES: Final = 2 * MAX_PARAMS_BYTES  # room for the JSON-RPC envelope around the largest params
+HIDDEN_FROM_GUARDRAIL: Final = ("authorization", "cookie")  # request headers the gate's ext_authz is never sent
 _TYPES: Final = "type.googleapis.com/envoy.extensions"
 
 
@@ -84,6 +88,9 @@ def _ext_authz(hook: Hook, timeout: timedelta) -> dict[str, object]:
                 "pack_as_bytes": True,
             },
             "metadata_context_namespaces": [JWT_FILTER],
+            "disallowed_headers": {
+                "patterns": [{"exact": header, "ignore_case": True} for header in HIDDEN_FROM_GUARDRAIL]
+            },
         },
     }
 
