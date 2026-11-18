@@ -8,17 +8,45 @@ readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "alembic>=1.17",
+    "authlib>=1.6",
+    "grpcio>=1.85.1",
+    "grpcio-health-checking>=1.85.1",
+    "httpx>=0.28",
+    "itsdangerous>=2.2",
+    "jinja2>=3.1",
+    "mcp>=2.3,<3",
+    "protobuf>=7.35.1,<8",
+    "psycopg[binary]>=3.3",
+    "pydantic>=2.14",
+    "ruamel-yaml>=0.18",
+    "sqlalchemy[asyncio]>=2.1",
+    "starlette>=0.50",
+    "uvicorn>=0.38",
+    "xds-protos>=1.85.1",
+]
+
+[project.scripts]
+tool-approvals = "tool_approvals.cli:main"
 
 [dependency-groups]
 dev = [
+    "grpcio-tools>=1.85.1",
     "hypothesis>=6.170",
     "import-linter>=2.16",
+    "joserfc>=1.4",
     "mypy>=2.4",
+    "mypy-protobuf>=5.1",
     "pytest>=9.2",
+    "pytest-asyncio>=1.3",
     "pytest-timeout>=2.4",
     "pytest-xdist>=3.8",
     "ruff>=0.17.5",
+    "testcontainers[postgres]>=4.13",
+    "trustme>=1.2",
+    "types-grpcio>=1.0",
+    "types-protobuf>=7.35",
 ]
 
 [build-system]
@@ -31,6 +59,8 @@ required-version = ">=0.13.5"
 [tool.ruff]
 line-length = 120
 target-version = "py313"
+# The wire stubs are generated (scripts/generate_contract.py --check keeps them current).
+extend-exclude = ["src/tool_approvals/contract/**/*_pb2*"]
 
 [tool.ruff.lint]
 select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "S", "PT", "PL", "C4", "PIE", "RET", "TID", "TC"]
@@ -47,21 +77,30 @@ ban-relative-imports = "all"
 [tool.mypy]
 strict = true
 python_version = "3.13"
-files = ["src", "tests"]
+files = ["src", "tests", "scripts"]
 mypy_path = "src"
 warn_unreachable = true
+
+# xds-protos ships Envoy's ext_authz messages and stubs without type information (nothing is vendored), and
+# grpc_tools (the stub generator's protoc) has none either.
+[[tool.mypy.overrides]]
+module = ["envoy.*", "xds.*", "udpa.*", "validate.*", "grpc_tools.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = ["--strict-markers", "--strict-config", "-ra"]
 xfail_strict = true
 timeout = 60
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 
 # Import contracts C1-C8: the module map's layering, enforced in CI by `lint-imports`.
-# IO (the I/O and wire libraries no core may import: every planned dependency's top-level modules and the
-# standard library's network, process and database modules) is spelled out in C1 and C5-cores; TOML cannot share
-# a list, so tests/test_import_contracts.py keeps the two identical. Telemetry (OpenTelemetry) lives in `serving`,
-# never in the kernel or a core.
+# IO (the I/O and wire libraries no core may import: every runtime dependency's top-level modules, the async
+# runtimes asyncio and anyio, and the standard library's network, process and database modules) is spelled out in
+# C1 and C5-cores; TOML cannot share a list, so tests/test_import_contracts.py keeps the two identical. A core
+# bounds a wait through the kernel's Timeouts port instead. Telemetry (OpenTelemetry) lives in `serving`, never in
+# the kernel or a core.
 [tool.importlinter]
 root_package = "tool_approvals"
 include_external_packages = true
@@ -96,7 +135,11 @@ forbidden_modules = [
     "xds",
     "udpa",
     "validate",
+    "cel",
+    "opencensus",
+    "psycopg_binary",
     "opentelemetry",
+    "anyio",
     "asyncio",
     "ftplib",
     "http",
@@ -142,13 +185,16 @@ layers = ["main", "edges | infra", "app", "domain"]
 
 [[tool.importlinter.contracts]]
 id = "C4-layers"
-name = "shared packages: requests_client > serving | auth > config > contract | kernel"
+name = "shared packages: requests_client > serving | auth > config | contract_mapping > contract | kernel"
 type = "layers"
-# tool_approvals.contract includes the generated wire packages beneath it.
+# tool_approvals.contract includes the generated wire packages beneath it. contract_mapping is the one translation
+# between that wire and the kernel, for the requests client, the gate's Check API and Approvals' edge and
+# composition root; it reads no configuration (the grant each method needs is each service's `main`'s table), so it
+# sits beside config, independent of it.
 layers = [
     "tool_approvals.requests_client",
     "tool_approvals.serving | tool_approvals.auth",
-    "tool_approvals.config",
+    "tool_approvals.config | tool_approvals.contract_mapping",
     "tool_approvals.contract | tool_approvals.kernel",
 ]
 
@@ -162,6 +208,7 @@ source_modules = [
     "tool_approvals.auth",
     "tool_approvals.config",
     "tool_approvals.contract",
+    "tool_approvals.contract_mapping",
     "tool_approvals.kernel",
 ]
 forbidden_modules = [
@@ -183,6 +230,7 @@ source_modules = [
 ]
 forbidden_modules = [
     "tool_approvals.contract",
+    "tool_approvals.contract_mapping",
     "grpc",
     "grpc_health",
     "grpc_reflection",
@@ -205,7 +253,11 @@ forbidden_modules = [
     "xds",
     "udpa",
     "validate",
+    "cel",
+    "opencensus",
+    "psycopg_binary",
     "opentelemetry",
+    "anyio",
     "asyncio",
     "ftplib",
     "http",
@@ -224,7 +276,7 @@ id = "C5-store"
 name = "the store imports no contract"
 type = "forbidden"
 source_modules = ["tool_approvals.approvals.infra.store"]
-forbidden_modules = ["tool_approvals.contract"]
+forbidden_modules = ["tool_approvals.contract", "tool_approvals.contract_mapping"]
 
 [[tool.importlinter.contracts]]
 id = "C6"

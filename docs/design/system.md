@@ -4,9 +4,9 @@ The whole system: what problem it solves, its parts, the public contracts and ho
 [service design](service.md) goes one level down (the three services, what crosses between them, state and
 failure); the [module design](module.md) goes one further (packages, import rules, storage mechanics).
 
-> **Status:** design. Milestone 0 is in progress; nothing here is deployable until milestone 3
-> ([roadmap](#delivery-milestones)). Where code and these pages disagree, one of them has a bug: please open an
-> issue.
+> **Status:** milestones 0 and 1 are built; nothing here is deployable until milestone 3
+> ([roadmap](#delivery-milestones)). The [reference pages](../reference/configuration.md) document what is built.
+> Where code and these pages disagree, one of them has a bug: please open an issue.
 
 ## Summary
 
@@ -87,13 +87,15 @@ answer counts.
 
 - **Call identity** is computed over the exact parameter bytes the gateway forwards: principal, server, tool,
   argument bytes. `_meta` is not part of it.
-- **Approval lifecycle:** Waiting → Approved or Refused; no answer by the deadline is Refused; Approved → Used (the
-  yes was spent) or Expired (not used within the use window).
+- **Approval lifecycle:** Waiting → Approved or Refused; no answer by the deadline is Expired (never Refused: only
+  a person refuses); Approved → Used (the yes was spent) or Expired (not used within the use window). A no stands
+  until the answer deadline: the same call is refused until then, and asks afresh after.
 - **One yes per exact call.** A yes is spent once; the next identical call needs a new Approval.
 - **No withdrawal.** An answer is final.
 - **Agent words** (a reason and a work reference) are quoted to the approver, never interpreted.
 - **Refused before an Approval exists:** a call that declares Tasks, carries any top-level key besides `name`,
-  `arguments` and `_meta`, carries a duplicate key, or is too large.
+  `arguments` and `_meta`, carries a duplicate key, is otherwise malformed, or is too large (the full list is in
+  [the Check API reference](../reference/check-api.md#what-one-approval-covers)).
 - **Approval requirement** replaces a fixed "human" kind: groups, allowed surfaces, minimum assurance, sign-in age,
   deadlines.
 - **Policy sits outside the Approval domain** and answers only "no approval needed" or "requires X".
@@ -133,7 +135,7 @@ integrated surfaces are out of process by nature.
 ## Public contracts
 
 Every public contract is a protobuf schema, served over gRPC and as proto3 JSON over HTTP (`POST /v1/<method>`).
-The sketches below show the shape; the `.proto` files are the source of truth once they land (milestone 1).
+The sketches below show the shape; the `.proto` files under [`proto/`](../../proto) are the source of truth.
 
 ### Check API v1
 
@@ -174,11 +176,13 @@ The wait is not part of the Check API (no gateway hook calls it): it is the wait
 | `refused` | A person said no (optional quoted comment) |
 | `expired` | No answer by the deadline, or the yes was not used in time |
 | `used` | The yes was already spent before this wait opened |
-| `still_waiting` | The hold limit passed or a newer wait replaced this one: call again |
+| `still-waiting` | The hold limit passed, the server is stopping, or a newer wait replaced this one: call again |
 | `cancelled` | The wait was cancelled (milestone 4); the Approval stands |
 
 As a **Wait Task**: `working` while Waiting; `completed` with the outcome as the tool result (a refusal is a normal
-result, not `failed`); `failed` only for a wait error. The task id is fresh, never the ticket. Because no gateway
+result, not `failed`). No status is `failed`: when Approvals cannot be reached, `tasks/get` answers a JSON-RPC
+error and the client polls again. The task id is fresh, never the ticket. Details:
+[the wait tool and MCP Tasks](../reference/wait.md). Because no gateway
 attests a principal on `tasks/*`, a Wait Task is authorised by its unguessable id, as
 [SEP-2663](https://modelcontextprotocol.io/seps/2663-tasks-extension) allows: a leaked id reveals that one wait's
 outcome and can cancel that wait, but cannot word, answer or spend anything.
@@ -194,7 +198,7 @@ interface ApprovalRequirement {      // config; every name checked at load
   allowedSurfaces: SurfaceName[];    // which answer surfaces may answer it
   minAssurance: AssuranceLevel;      // ordered levels, each a set of IdP `acr` values
   maxSignInAge: Duration;            // age of the sign-in that met minAssurance
-  answerDeadline: Duration;          // no answer by then: Refused
+  answerDeadline: Duration;          // no answer by then: Expired
   useWindow: Duration;               // an unused yes Expires
 }
 ```
@@ -257,23 +261,32 @@ Gated calls that declare Tasks stay refused behind gateways, because the follow-
 | **Other gateways** | A mapping onto the Check API, owned with that gateway's plugin | That gateway's authentication |
 | **No gateway** | Not designed: run any small gateway as the enforcement point | — |
 
-**An example configuration** (a sketch; the reference file and its grammar arrive in milestone 1). One requirement that only the desk can answer, needing MFA within the last
-5 minutes from the `approvers` group:
+**An example configuration,** from the [reference file](../../examples/config.yaml) (its grammar:
+[configuration reference](../reference/configuration.md)). One requirement that only the desk can answer, needing
+a passkey sign-in within the last 3 minutes from the `approvers` group:
 
 ```yaml
-assurance:                                                  # ordered, weakest first
-  - { name: password, acr: ["urn:example:acr:password"] }
-  - { name: mfa,      acr: ["urn:example:acr:mfa"] }
-floor: { min_assurance: mfa, max_sign_in_age: 5m }          # startup refuses any weaker requirement
-surfaces: [{ name: desk, kind: native, cap: mfa }]
+# Assurance levels, weakest first, each with the IdP `acr` values that vouch it.
+assurance:
+  - name: password
+    acr: ["1"]
+  - name: passkey
+    acr: ["2", "urn:example:acr:passkey"]
+
+# The deployment's minimum: no requirement may ask for less.
+floor:
+  min_assurance: passkey
+  max_sign_in_age: 5m
+
+# What an answer must meet, by name. The gate's policy names one per call.
 requirements:
-  production-writes:
-    approver_groups: [{ claim: groups, value: approvers }]
+  reviewed:
+    approver_groups: [{ claim: groups, value: approvers }] # any one qualifies
     allowed_surfaces: [desk]
-    min_assurance: mfa
-    max_sign_in_age: 5m
-    answer_deadline: 30m
-    use_window: 15m
+    min_assurance: passkey
+    max_sign_in_age: 3m # the approver signed in at most this long before answering
+    answer_deadline: 2h # from the request to the latest answer
+    use_window: 15m # from the yes to the latest claim
 ```
 
 The floor guards strength, not isolation: keeping Approvals unreachable from agents is the deployment's job.

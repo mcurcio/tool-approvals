@@ -1,5 +1,6 @@
 # Checks on every pull request and every push to main. On a push to main that passes them, the release job runs
-# semantic-release (.releaserc.json): Conventional Commit types decide the version, the tag holds it.
+# semantic-release (.releaserc.json): Conventional Commit types decide the version, the tag holds it, and nothing is
+# committed back (the release notes go on the GitHub Release).
 name: CI
 
 on:
@@ -13,11 +14,66 @@ permissions:
 # Exact tool versions, one place each. Actions are pinned by full commit sha (tag in the comment).
 env:
   UV_VERSION: 0.13.5
+  ACTIONLINT_VERSION: v1.7.12
 
 jobs:
   check:
-    name: Lint, types, import contracts, tests
+    name: Lint, types, import contracts, contract, tests
     runs-on: ubuntu-latest
+    steps:
+      # Full history and tags: buf breaking compares against the latest release tag.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+      # The workflows themselves (with shellcheck on their scripts), at a pinned release built by the runner's Go,
+      # which verifies the module against the Go checksum database.
+      - run: go run "github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}"
+      - run: uv sync --locked
+      - run: uv run --locked ruff check .
+      - run: uv run --locked ruff format --check .
+      - run: uv run --locked mypy
+      - run: uv run --locked lint-imports
+      # Expand migrations only add what the release still serving can live with (expand-then-contract).
+      - run: uv run --locked python scripts/check_migrations.py
+      # The committed wire stubs match proto/ and vendor/ under the locked grpcio-tools and mypy-protobuf.
+      - run: uv run --locked python scripts/generate_contract.py --check
+      - run: uv run --locked pytest -n auto
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      # The release rules (.releaserc.json) through the pinned commit-analyzer: what each title type releases.
+      - run: node --test tests/release_rules.test.mjs
+      # The protobuf module (buf.yaml): lint STANDARD, canonical format, and no breaking change since the last release.
+      - run: npx --no-install buf lint
+      - run: npx --no-install buf format --diff --exit-code
+      - name: buf breaking against the latest release tag
+        run: |
+          tags=$(git tag --list 'v*' --sort=-v:refname)
+          if [ -z "$tags" ]; then
+            echo "No v* tag yet: nothing released to break."
+            exit 0
+          fi
+          latest=$(printf '%s\n' "$tags" | head -n 1)
+          # A release made before the protobuf module existed has no contract to break.
+          if ! git cat-file -e "$latest:buf.yaml" 2>/dev/null; then
+            git rev-parse --verify --quiet "$latest^{commit}" > /dev/null
+            echo "$latest has no buf.yaml: nothing released to break."
+            exit 0
+          fi
+          npx --no-install buf breaking --against ".git#tag=$latest"
+
+  # The image built from this commit (amd64, loaded into the runner's Docker), then tests/e2e and
+  # tests/conformance against it: the compose stack of tests/e2e/compose.yaml with both gateways. The unit run in
+  # `check` skips these tests.
+  e2e:
+    name: End-to-end
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -26,24 +82,18 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
       - run: uv sync --locked
-      - run: uv run --locked ruff check .
-      - run: uv run --locked ruff format --check .
-      - run: uv run --locked mypy
-      - run: uv run --locked lint-imports
-      - run: uv run --locked pytest -n auto
-      # The release rules (.releaserc.json) through the pinned commit-analyzer: what each title type releases.
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build the image from this commit
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
-          node-version-file: .nvmrc
-      - run: npm ci --ignore-scripts --no-audit --no-fund
-      - run: node --test tests/release_rules.test.mjs
-
-  # Placeholder until the end-to-end harness lands; the release already waits on it.
-  e2e:
-    name: End-to-end (placeholder)
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo "No end-to-end suite yet."
+          context: .
+          load: true
+          tags: tool-approvals:e2e
+          cache-from: type=gha,scope=image
+          cache-to: type=gha,mode=max,scope=image
+      - run: uv run --locked pytest -n auto tests/e2e tests/conformance
+        env:
+          TOOL_APPROVALS_E2E_IMAGE: tool-approvals:e2e
 
   release:
     name: Release (semantic-release)
@@ -81,3 +131,56 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: npx --no-install semantic-release
+
+  # The multi-arch image, pushed after the release job on every push to main: tagged `main` and `sha-<short sha>`,
+  # and on a release also `<version>` and `latest`, with build provenance attached. It is built from the exact
+  # commit the release tagged (the pushed commit itself: the release commits nothing), checked out by the tag.
+  image:
+    name: Image
+    needs: [release]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release.outputs.tag || github.sha }}
+          persist-credentials: false
+      - name: The checkout is the commit this run tested
+        env:
+          TESTED: ${{ github.sha }}
+        run: |
+          built=$(git rev-parse HEAD)
+          if [ "$built" != "$TESTED" ]; then
+            echo "::error::The release tag points at $built, not at the tested commit $TESTED"
+            exit 1
+          fi
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Tags and labels
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository }}
+          flavor: latest=false
+          tags: |
+            type=raw,value=main
+            type=sha,prefix=sha-
+            type=raw,value=${{ needs.release.outputs.version }},enable=${{ needs.release.outputs.version != '' }}
+            type=raw,value=latest,enable=${{ needs.release.outputs.version != '' }}
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: mode=max
+          cache-from: type=gha,scope=image

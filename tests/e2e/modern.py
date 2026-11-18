@@ -1,0 +1,70 @@
+"""An agent's MCP client on the 2026-07-28 protocol, through agentgateway, written by hand.
+
+Each request stands alone (no session): the protocol version, the client's capabilities and its information ride
+in `_meta`, and the standard headers repeat what the body routes on. `tasks` declares the Tasks extension
+(SEP-2663) on every request. tasks/get carries `Mcp-Name` (the task id) too: agentgateway v1.7.0 refuses a modern
+tasks/get without it (-32020, "invalid MCP routing header"), though the MCP Python SDK sends it only on
+tools/call, prompts/get and resources/read, so the SDK's own client cannot finish a task through this gateway.
+"""
+
+import json
+from typing import Any, Final
+
+import httpx
+
+from tests.conformance.gateways import GatewayUnderTest
+from tests.e2e.agents import AgentKeys
+from tests.e2e.clients import GatewayError, HttpMcpGateway, jsonrpc_message
+from tool_approvals.kernel.calls import CLIENT_CAPABILITIES_META_KEY, TASKS_EXTENSION
+
+PROTOCOL: Final = "2026-07-28"
+_TIMEOUT_S: Final = 120.0  # above every hold the stack configures
+
+
+class ModernMcp:
+    def __init__(self, url: str, token: str, *, tasks: bool) -> None:
+        self._url = url
+        self._token = token
+        extensions: dict[str, object] = {TASKS_EXTENSION: {}} if tasks else {}
+        self._meta = {
+            "io.modelcontextprotocol/protocolVersion": PROTOCOL,
+            "io.modelcontextprotocol/clientInfo": {"name": "tool-approvals-e2e", "version": "0"},
+            CLIENT_CAPABILITIES_META_KEY: {"extensions": extensions},
+        }
+
+    async def call_tool(self, name: str, arguments: dict[str, object]) -> dict[str, Any]:
+        """tools/call's result: a CallToolResult (`resultType` "complete") or a task (`resultType` "task")."""
+        return await self._request("tools/call", {"name": name, "arguments": arguments}, name)
+
+    async def get_task(self, task_id: str) -> dict[str, Any]:
+        """tasks/get's result: the task, with `result` once it completed."""
+        return await self._request("tasks/get", {"taskId": task_id}, task_id)
+
+    async def _request(self, method: str, params: dict[str, object], name: str) -> dict[str, Any]:
+        headers = {
+            "authorization": f"Bearer {self._token}",
+            "accept": "application/json, text/event-stream",
+            "content-type": "application/json",
+            "mcp-protocol-version": PROTOCOL,
+            "mcp-method": method,
+            "mcp-name": name,
+        }
+        body = {"jsonrpc": "2.0", "id": 1, "method": method, "params": {**params, "_meta": self._meta}}
+        async with httpx.AsyncClient(timeout=_TIMEOUT_S) as http:
+            response = await http.post(self._url, headers=headers, content=json.dumps(body))
+        message = jsonrpc_message(response)
+        if "error" in message:
+            raise GatewayError(response.status_code, response.content)
+        result: dict[str, Any] = message["result"]
+        return result
+
+
+def modern_client(gateway: GatewayUnderTest, agents: AgentKeys, principal: str, *, tasks: bool) -> ModernMcp:
+    """A modern client for `principal` at `gateway`'s MCP endpoint (agentgateway serves every server on one)."""
+    assert isinstance(gateway, HttpMcpGateway), gateway
+    return ModernMcp(gateway.url_of(""), agents.token(principal), tasks=tasks)
+
+
+def result_text(result: dict[str, Any]) -> str:
+    """A CallToolResult's text."""
+    return "".join(item.get("text", "") for item in result.get("content", []) if isinstance(item, dict))

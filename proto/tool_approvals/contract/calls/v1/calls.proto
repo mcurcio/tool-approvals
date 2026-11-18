@@ -1,0 +1,21 @@
+// Shared by the public Check API and the internal ApprovalRequests contract: one name, one reason list.
+syntax = "proto3";
+
+package tool_approvals.contract.calls.v1;
+
+// Approvals will not consider the call at all.
+message Rejected {
+  Reason reason = 1;
+
+  enum Reason {
+    REASON_UNSPECIFIED = 0;
+    REASON_MALFORMED = 1;
+    REASON_TASK_REQUESTED = 2;
+    REASON_TOO_LARGE = 3;
+  }
+}
+
+// A person's standing no; the comment is their words, shown as quoted text.
+message Refused {
+  optional string comment = 1;
+}

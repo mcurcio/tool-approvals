@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block main %}
+<h1>{{ title }}</h1>
+<dl>
+<dt>Agent</dt><dd><code>{{ detail.call.principal | visible }}</code></dd>
+<dt>Server</dt><dd><code>{{ detail.call.server | visible }}</code></dd>
+<dt>Tool</dt><dd><code>{{ detail.call.tool | visible }}</code></dd>
+<dt>Requirement</dt><dd>{{ detail.effective.name | visible }}</dd>
+<dt>Answer by</dt><dd>{{ detail.answer_deadline.isoformat(timespec="seconds") }}</dd>
+<dt>State</dt><dd>{{ detail.state }}</dd>
+</dl>
+<h2>Arguments, as sent (what the approval covers)</h2>
+<pre>{{ arguments | visible }}</pre>
+<h2>Arguments, re-rendered (indented, keys sorted)</h2>
+<pre>{{ rerendered | visible }}</pre>
+{% if detail.words %}
+<h2>The agent's own words (not verified)</h2>
+<dl>
+{% if detail.words.reason is not none %}<dt>Reason</dt><dd><pre>{{ detail.words.reason | visible }}</pre></dd>{% endif %}
+{% if detail.words.work_ref is not none %}<dt>Work</dt><dd><pre>{{ detail.words.work_ref | visible }}</pre></dd>{% endif %}
+</dl>
+{% endif %}
+{% if form_token %}
+<form method="post" action="{{ action }}">
+<input type="hidden" name="digest" value="{{ digest }}">
+<input type="hidden" name="form_token" value="{{ form_token }}">
+<p><label for="comment">Comment (shown to the agent on a refusal)</label></p>
+<p><textarea id="comment" name="comment" rows="3"></textarea></p>
+<p>
+<button type="submit" name="verdict" value="approve">Approve</button>
+<button type="submit" name="verdict" value="refuse">Refuse</button>
+</p>
+</form>
+{% endif %}
+{% endblock %}

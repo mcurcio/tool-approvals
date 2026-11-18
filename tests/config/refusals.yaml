@@ -1,0 +1,243 @@
+# Each case edits examples/config.yaml (which passes `config check`) and names the problems the refusal lists, in
+# order: each expected text is part of its problem, and there are exactly as many problems as expected texts.
+#   set:     {path: value}   a dotted path; a list index is a number, one past the end appends
+#   delete:  [path]
+#   command: config | gate | wait | approvals | migrate   (default config: `config check`, no secret resolved)
+#   env:     the environment the command's view resolves secrets from
+- name: requirement below the floor's level
+  set: { requirements.reviewed.min_assurance: password }
+  expect: ["requirements.reviewed: below the floor"]
+
+- name: requirement below the floor's sign-in age
+  set: { requirements.reviewed.max_sign_in_age: 10m }
+  expect: ["requirements.reviewed: below the floor"]
+
+- name: unknown level in a requirement
+  set: { requirements.reviewed.min_assurance: hardware-key }
+  expect: ["requirements.reviewed.min_assurance: unknown assurance level 'hardware-key'"]
+
+- name: unknown level in the floor
+  set: { floor.min_assurance: hardware-key }
+  expect: ["floor.min_assurance: unknown assurance level 'hardware-key'"]
+
+- name: unknown level as a surface cap
+  set: { surfaces.0.cap: hardware-key }
+  expect: ["surfaces.desk.cap: unknown assurance level 'hardware-key'"]
+
+- name: unknown surface in a requirement
+  set: { requirements.reviewed.allowed_surfaces: [desk, chat] }
+  expect: ["requirements.reviewed.allowed_surfaces: unknown surface 'chat'"]
+
+- name: unknown requirement in a policy rule
+  set: { gate.policy.rules.0.require: admin }
+  expect: ["gate.policy.rules[0].require: unknown requirement 'admin'"]
+
+- name: unknown requirement as the policy default
+  set: { gate.policy.default: admin }
+  expect: ["gate.policy.default: unknown requirement 'admin'"]
+
+- name: a repeated level name
+  set: { assurance.2: { name: passkey, acr: ["3"] } }
+  expect: ["assurance: the level 'passkey' is named twice"]
+
+- name: a repeated acr
+  set: { assurance.1.acr: ["1", "urn:example:acr:passkey"] }
+  expect: ["assurance: the acr '1' is listed twice"]
+
+- name: a surface cap below the minimum of a requirement allowing it
+  set: { surfaces.0.cap: password }
+  expect: ["requirements.reviewed: the surface 'desk' it allows caps at 'password', below its minimum 'passkey'"]
+
+- name: a native surface not binding the digest
+  set: { surfaces.0.binds_digest: false }
+  expect: ["surfaces.desk: a native surface must bind the digest"]
+
+- name: a repeated surface name
+  set: { surfaces.1: { name: desk, kind: native, cap: passkey } }
+  expect: ["surfaces: the surface 'desk' is named twice"]
+
+- name: desk.surface not a known surface
+  set: { approvals.desk.surface: chat }
+  expect: ["approvals.desk.surface: unknown surface 'chat'"]
+
+- name: a surface kind other than native
+  set: { surfaces.0.kind: integrated }
+  expect: ["surfaces[0].kind: Input should be 'native'"]
+
+- name: one bearer hash on two entries
+  set: { registry.1.credential.bearer_sha256: 1f0b6c6e2a2d4b5f8e9a0c1d2e3f405162738495a6b7c8d9e0f1a2b3c4d5e6f7 }
+  expect: ["registry: one bearer hash on two entries (gateway-hook, gate)"]
+
+- name: an unknown method
+  set: { registry.0.grants: [check, answers.answer] }
+  expect: ["registry[0].grants[1]: Input should be 'check', 'requests.request'"]
+
+- name: a bearer hash that is not 64 hex digits
+  set: { registry.0.credential.bearer_sha256: "sha256:1f0b" }
+  expect: ["registry[0].credential.bearer_sha256: a bearer hash is 64 hex digits"]
+
+- name: every registry-authenticated listener without tls, all listed
+  delete:
+    - gate.check_api.grpc.tls
+    - gate.check_api.json.tls
+    - gate.ext_mcp.listener.tls
+    - gate.ext_authz.listener.tls
+    - wait.listeners.mcp.tls
+    - approvals.listeners.requests.tls
+  expect:
+    - "gate.check_api.grpc: carries registry bearers, so it needs tls"
+    - "gate.check_api.json: carries registry bearers, so it needs tls"
+    - "gate.ext_mcp.listener: carries registry bearers, so it needs tls"
+    - "gate.ext_authz.listener: carries registry bearers, so it needs tls"
+    - "wait.listeners.mcp: carries registry bearers, so it needs tls"
+    - "approvals.listeners.requests: carries registry bearers, so it needs tls"
+
+- name: check_budget not below the ext_mcp hook timeout
+  set: { gate.check_budget: 10s }
+  expect: ["gate.check_budget: not below gate.ext_mcp.hook_timeout"]
+
+- name: check_budget not below either hook timeout
+  set: { gate.check_budget: 70s }
+  expect:
+    - "gate.check_budget: not below gate.ext_mcp.hook_timeout"
+    - "gate.check_budget: not below gate.ext_authz.hook_timeout"
+
+- name: ext_authz without hook_timeout
+  delete: [gate.ext_authz.hook_timeout]
+  expect: ["gate.ext_authz.hook_timeout: Field required"]
+
+- name: lock_timeout more than a quarter of check_budget
+  set: { approvals.database.lock_timeout: 2s }
+  expect: ["approvals.database.lock_timeout: more than 1/4 of gate.check_budget"]
+
+- name: retention below the longest answer deadline
+  set: { approvals.retention: 30m }
+  expect: ["approvals.retention: below the longest answer_deadline + use_window"]
+
+- name: retention at the answer deadline but below it plus the use window
+  set: { approvals.retention: 1h, requirements.reviewed.answer_deadline: 1h, requirements.reviewed.use_window: 15m }
+  expect: ["approvals.retention: below the longest answer_deadline + use_window"]
+
+- name: an inline secret
+  set: { gate.approvals.credential: not-a-reference }
+  expect: ["gate.approvals.credential: a secret is {file: PATH} or {env: NAME}, never inline"]
+
+- name: a secret naming both a file and a variable
+  set: { gate.approvals.credential: { env: BEARER, file: /run/secrets/bearer } }
+  expect: ["gate.approvals.credential: a secret names exactly one of file or env"]
+
+- name: a duration without a unit
+  set: { approvals.retention: 90 }
+  expect: ["approvals.retention: a duration is a positive whole number and a unit"]
+
+- name: a zero duration
+  set: { requirements.reviewed.use_window: 0s }
+  expect: ["requirements.reviewed.use_window: a duration is a positive whole number and a unit"]
+
+- name: a requirement with no approver group
+  set: { requirements.reviewed.approver_groups: [] }
+  expect: ["requirements.reviewed.approver_groups: empty, so no one can answer it"]
+
+- name: a requirement with no allowed surface
+  set: { requirements.reviewed.allowed_surfaces: [] }
+  expect: ["requirements.reviewed.allowed_surfaces: empty, so it can be answered nowhere"]
+
+- name: an approver group under a claim the IdP does not send as groups
+  set: { requirements.reviewed.approver_groups: [{ claim: roles, value: approvers }] }
+  expect: ["requirements.reviewed.approver_groups[0].claim: 'roles', but approvals.idp.groups_claim is 'groups'"]
+
+- name: a requirement the desk cannot answer
+  set:
+    surfaces.1: { name: chat, kind: native, cap: passkey }
+    requirements.reviewed.allowed_surfaces: [chat]
+  expect: ["requirements.reviewed.allowed_surfaces: does not allow approvals.desk.surface 'desk'"]
+
+- name: an unknown key
+  set: { gate.listeners.metrics: { host: 0.0.0.0, port: 9090 } }
+  expect: ["gate.listeners.metrics: Extra inputs are not permitted"]
+
+- name: an unknown version
+  set: { version: 2 }
+  expect: ["version: Input should be 1"]
+
+- name: a requirement named like no approval
+  set:
+    requirements.none: { approver_groups: [], allowed_surfaces: [], min_assurance: passkey, max_sign_in_age: 1m, answer_deadline: 1h, use_window: 1m }
+  expect:
+    - "requirements.none: 'none' is reserved"
+    - "requirements.none.approver_groups: empty"
+    - "requirements.none.allowed_surfaces: empty"
+
+- name: problems in several sections, all listed
+  set:
+    requirements.reviewed.min_assurance: password
+    registry.1.credential.bearer_sha256: 1f0b6c6e2a2d4b5f8e9a0c1d2e3f405162738495a6b7c8d9e0f1a2b3c4d5e6f7
+    gate.policy.default: admin
+  expect:
+    - "requirements.reviewed: below the floor"
+    - "registry: one bearer hash on two entries"
+    - "gate.policy.default: unknown requirement 'admin'"
+
+- name: a desk key under 32 bytes once resolved
+  command: approvals
+  set:
+    approvals.database.dsn: { env: DSN }
+    approvals.idp.client_secret: { env: IDP_SECRET }
+    approvals.desk.session_key: { env: SESSION_KEY }
+    approvals.desk.form_key: { env: FORM_KEY }
+  env:
+    DSN: postgresql://approvals@db.example.com/approvals
+    IDP_SECRET: idp-secret
+    SESSION_KEY: "0123456789abcdef0123456789abcde"
+    FORM_KEY: "0123456789abcdef0123456789abcdef"
+  expect: ["approvals.desk.session_key: under 32 bytes once resolved"]
+
+- name: one desk key as both the session key and the form key
+  command: approvals
+  set:
+    approvals.database.dsn: { env: DSN }
+    approvals.idp.client_secret: { env: IDP_SECRET }
+    approvals.desk.session_key: { env: SESSION_KEY }
+    approvals.desk.form_key: { env: FORM_KEY }
+  env:
+    DSN: postgresql://approvals@db.example.com/approvals
+    IDP_SECRET: idp-secret
+    SESSION_KEY: "0123456789abcdef0123456789abcdef"
+    FORM_KEY: "0123456789abcdef0123456789abcdef"
+  expect: ["approvals.desk.form_key: the same as approvals.desk.session_key"]
+
+- name: unresolvable secrets, all listed
+  command: approvals
+  set:
+    approvals.idp.client_secret: { env: IDP_SECRET }
+  env: {}
+  expect:
+    - "approvals.database.dsn: cannot read the file /run/secrets/approvals-dsn"
+    - "approvals.idp.client_secret: the environment variable IDP_SECRET is unset or empty"
+    - "approvals.desk.session_key: cannot read the file /run/secrets/desk-session-key"
+    - "approvals.desk.form_key: cannot read the file /run/secrets/desk-form-key"
+
+- name: the gate's section missing
+  command: gate
+  delete: [gate]
+  expect: ["the gate command needs the 'gate' section"]
+
+- name: the wait server's sections missing
+  command: wait
+  delete: [wait, wait_route]
+  expect: ["the wait command needs the 'wait' section", "the wait command needs the 'wait_route' section"]
+
+- name: Approvals' floor missing
+  command: approvals
+  delete: [floor]
+  expect: ["the approvals serve command needs the 'floor' section"]
+
+- name: the migrate command's section missing
+  command: migrate
+  delete: [approvals]
+  expect: ["the approvals migrate command needs the 'approvals' section"]
+
+- name: the gate's credential unset
+  command: gate
+  env: {}
+  expect: ["gate.approvals.credential: the environment variable GATE_APPROVALS_BEARER is unset or empty"]

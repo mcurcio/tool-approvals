@@ -1,0 +1,46 @@
+// The Check API: gRPC, and proto3 JSON at POST /v1/check.
+syntax = "proto3";
+
+package tool_approvals.contract.check.v1;
+
+import "tool_approvals/contract/calls/v1/calls.proto";
+
+// A caller treats a verdict it does not know (an unset oneof) as a refusal, so new kinds are additive.
+service CheckService {
+  rpc Check(CheckRequest) returns (CheckResponse);
+}
+
+message CheckRequest {
+  // The gateway's authentication of the agent, never the call body.
+  string principal = 1;
+  // The gateway's route, never the call body.
+  string server = 2;
+  // The exact JSON-RPC params bytes the gateway will forward.
+  bytes params = 3;
+  // Opaque, from the gateway's own metadata (policy input).
+  map<string, string> gateway_attributes = 4;
+}
+
+message CheckResponse {
+  oneof verdict {
+    Pass pass = 1;
+    Pending pending = 2;
+    tool_approvals.contract.calls.v1.Refused refused = 3;
+    tool_approvals.contract.calls.v1.Rejected rejected = 4;
+    Unavailable unavailable = 5;
+    QueueFull queue_full = 6;
+    // 8 is the executor's verdict (the gated call returned as a Task), unused until then.
+  }
+  // What the agent is told; empty only for pass.
+  string agent_text = 7;
+}
+
+message Pass {}
+
+message Unavailable {}
+
+message QueueFull {}
+
+message Pending {
+  string ticket = 1;
+}

@@ -1,0 +1,136 @@
+# The reference configuration: every section, as the configuration reference quotes it. One file serves every
+# command; each command reads only its own sections and resolves only its own secrets.
+#
+#   tool-approvals --config examples/config.yaml config check
+#
+# Durations are a whole number and a unit: 90s, 10m, 1h, 90d. A secret is {file: PATH} or {env: NAME}, never
+# inline. A listener is {host, port, tls?: {cert, key, client_ca?}}; every listener that carries a registry bearer
+# needs tls. A value shown here that the grammar marks as a default may be left out.
+version: 1
+
+# Every service that calls another, by name: the SHA-256 of its bearer (from `tool-approvals credentials issue`)
+# and the methods it may call. No two entries share a bearer.
+registry:
+  - name: gateway-hook # the gateway's guardrail call into the gate
+    kind: caller
+    credential: { bearer_sha256: 1f0b6c6e2a2d4b5f8e9a0c1d2e3f405162738495a6b7c8d9e0f1a2b3c4d5e6f7 }
+    grants: [check]
+  - name: gate # the gate asking Approvals
+    kind: caller
+    credential: { bearer_sha256: 2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f70819 }
+    grants: [requests.request, requests.claim]
+  - name: wait-server # the wait server asking Approvals
+    kind: caller
+    credential: { bearer_sha256: 3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b }
+    grants: [requests.open_wait, requests.await_outcome]
+  - name: gateway-wait-route # the gateway calling the wait tool for an agent
+    kind: caller
+    credential: { bearer_sha256: 4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c }
+    grants: [wait.call]
+
+# Assurance levels, weakest first, each with the IdP `acr` values that vouch it.
+assurance:
+  - name: password
+    acr: ["1"]
+  - name: passkey
+    acr: ["2", "urn:example:acr:passkey"]
+
+# The deployment's minimum: no requirement may ask for less.
+floor:
+  min_assurance: passkey
+  max_sign_in_age: 5m
+
+# What an answer must meet, by name. The gate's policy names one per call.
+requirements:
+  reviewed:
+    approver_groups: [{ claim: groups, value: approvers }] # any one qualifies
+    allowed_surfaces: [desk]
+    min_assurance: passkey
+    max_sign_in_age: 3m # the approver signed in at most this long before answering
+    answer_deadline: 2h # from the request to the latest answer
+    use_window: 15m # from the yes to the latest claim
+
+# Where people answer, and the highest level each may vouch. A native surface always binds the digest of what the
+# approver was shown.
+surfaces:
+  - name: desk
+    kind: native
+    cap: passkey
+    binds_digest: true
+
+# The gateway's route to the wait server, and the header that carries the attested principal on it.
+wait_route:
+  server: approvals-wait
+  principal_header: x-approvals-principal
+
+gate:
+  listeners:
+    health: { host: 0.0.0.0, port: 8081 }
+  drain: 5s # default; on a stop signal, /readyz answers 503 this long before the listeners close
+  check_budget: 5s # default; below every hook_timeout
+  approvals:
+    address: dns:///approvals.example.com:9443
+    ca: /etc/tool-approvals/ca.pem # leave out to use the system roots
+    credential: { env: GATE_APPROVALS_BEARER }
+  check_api:
+    grpc: { host: 0.0.0.0, port: 9443, tls: { cert: /etc/tool-approvals/gate.pem, key: /etc/tool-approvals/gate-key.pem } }
+    json: { host: 0.0.0.0, port: 8443, tls: { cert: /etc/tool-approvals/gate.pem, key: /etc/tool-approvals/gate-key.pem } }
+    exposed_wait_tool: approvals-wait_approval_wait # the wait tool's name as agents see it through the gateway
+  ext_mcp:
+    listener: { host: 0.0.0.0, port: 9444, tls: { cert: /etc/tool-approvals/gate.pem, key: /etc/tool-approvals/gate-key.pem } }
+    hook_timeout: 10s # default; the gateway's own timeout on the hook
+    principal_key: principal
+    exposed_wait_tool: approvals-wait_approval_wait
+  ext_authz:
+    listener: { host: 0.0.0.0, port: 9445, tls: { cert: /etc/tool-approvals/gate.pem, key: /etc/tool-approvals/gate-key.pem } }
+    hook_timeout: 70s # no default: raise Envoy's ext_authz timeout to match
+    principal_path: [envoy.filters.http.jwt_authn, payload, sub] # filter name, then keys
+    server_key: server # default; the route's context_extensions key naming its server
+    exposed_wait_tool: approvals-wait_approval_wait
+  policy:
+    kind: rules
+    rules: # first match wins; principal, server and tool are case-sensitive patterns (default "*")
+      - { server: files, tool: "delete_*", require: reviewed }
+      - { principal: "ci-*", server: "*", tool: "*", require: none }
+    default: none
+
+wait:
+  listeners:
+    mcp: { host: 0.0.0.0, port: 8443, tls: { cert: /etc/tool-approvals/wait.pem, key: /etc/tool-approvals/wait-key.pem } }
+    health: { host: 0.0.0.0, port: 8081 }
+  drain: 5s # default
+  tool: approval_wait # default
+  approvals: # leave out and the wait server answers discovery but refuses every call ("not configured")
+    address: dns:///approvals.example.com:9443
+    ca: /etc/tool-approvals/ca.pem
+    credential: { env: WAIT_APPROVALS_BEARER }
+  max_hold: 15m # default
+  tasks: enabled # default; disabled: no MCP Tasks, every wait is a held call
+  task_poll_interval: 5s # default
+
+approvals: # `approvals migrate` reads only approvals.database
+  listeners:
+    requests: { host: 0.0.0.0, port: 9443, tls: { cert: /etc/tool-approvals/approvals.pem, key: /etc/tool-approvals/approvals-key.pem } }
+    approvers: { host: 0.0.0.0, port: 8080 } # the desk, behind a TLS-terminating proxy at public_url
+    health: { host: 0.0.0.0, port: 8081 }
+  drain: 5s # default
+  database:
+    dsn: { file: /run/secrets/approvals-dsn } # postgresql://approvals@db.example.com/approvals, direct, no pooler
+    lock_timeout: 1s # default; at most a quarter of gate.check_budget
+    pool_size: 5 # default; connections kept open per replica
+    max_overflow: 10 # default; more under load
+    pool_timeout: 1s # default; how long a request waits for a connection
+  retention: 90d # default; at least the longest answer_deadline + use_window
+  caps:
+    waiting_per_principal: 10 # default
+    live_waits_per_principal: 10 # default
+  idp:
+    issuer: https://id.example.com
+    client_id: approvals-desk
+    client_secret: { file: /run/secrets/idp-client-secret }
+    groups_claim: groups # default
+  desk:
+    surface: desk # a native surface
+    public_url: https://approvals.example.com
+    session_key: { file: /run/secrets/desk-session-key } # at least 32 bytes
+    form_key: { file: /run/secrets/desk-form-key } # at least 32 bytes, separate from the session key
