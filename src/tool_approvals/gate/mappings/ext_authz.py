@@ -18,6 +18,7 @@ from tool_approvals.gate.core.ports import GatewayContext
 from tool_approvals.gate.core.wording import agent_text
 from tool_approvals.gate.mappings.attributes import struct_string
 from tool_approvals.gate.mappings.errors import Refusal, error_code, verdict_name
+from tool_approvals.gate.mappings.grants import check_grants
 from tool_approvals.kernel.calls import CallRejected, RejectReason, RpcRequest, read_rpc_request
 from tool_approvals.kernel.names import Principal, ServerName
 from tool_approvals.kernel.requests import Rejected
@@ -31,6 +32,7 @@ PARTIAL_BODY_HEADER: Final = "x-envoy-auth-partial-body"
 _HTTP_OK: Final = 200  # the deny body is a JSON-RPC error, which MCP clients read from a 200
 _DENIED: Final = grpc.StatusCode.PERMISSION_DENIED.value[0]
 _OK: Final = grpc.StatusCode.OK.value[0]
+EXT_AUTHZ_METHODS: Final = check_grants(external_auth_pb2.DESCRIPTOR, "Authorization")
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +156,11 @@ class ExtAuthzServicer(external_auth_pb2_grpc.AuthorizationServicer):  # type: i
         """Each attribute `view.attributes` names, from its one source; a missing or non-string one is left out."""
         found = {name: _attribute(attributes, source) for name, source in self._view.attributes.items()}
         return MappingProxyType({name: value for name, value in found.items() if value is not None})
+
+
+def add_servicer(servicer: ExtAuthzServicer, server: grpc.aio.Server) -> None:
+    """Serve `servicer` as Envoy's Authorization service on `server`."""
+    external_auth_pb2_grpc.add_AuthorizationServicer_to_server(servicer, server)
 
 
 def _attribute(attributes: Any, source: ExtAuthzAttributeView) -> str | None:

@@ -330,6 +330,7 @@ Besides each value's grammar and the unknown-key and duplicate-key refusals:
   requirement or `none`; every attribute a policy rule reads mapped by each enabled `gate.ext_mcp` and
   `gate.ext_authz`, and supplied by at least one enabled mapping (the Check API counts: its caller sends them);
   each `gate.ext_authz.attributes` entry names exactly one of `metadata` or `context_extension`.
+- `gate.ext_authz` needs Envoy's types installed (the `envoy` extra; the image carries it).
 - `approvals.desk.surface` a known surface; `approvals.retention` at least the longest `answer_deadline` +
   `use_window` of a requirement (how long a Wait Task may be followed).
 - `approvals.database.lock_timeout` at most a quarter of `gate.check_budget`, when the file has both sections.

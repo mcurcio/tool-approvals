@@ -7,6 +7,9 @@ dynamic metadata; each MCP route names its server in `context_extensions`. The f
 bootstrap the end-to-end suite runs against Envoy v1.40 (`tests/e2e/envoy.py` renders it, as JSON), with example
 names.
 
+Envoy's types are an optional dependency: the published image carries them; a gate installed from the package
+needs the `envoy` extra (`tool-approvals[envoy]`), and `config check` refuses a `gate.ext_authz` section without it.
+
 **Not built yet:** the wait server behind Envoy (planned, milestone 4). Today an agent behind Envoy is told to call
 the wait tool, which must be served through another gateway.
 

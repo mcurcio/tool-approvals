@@ -5,6 +5,7 @@ the file leaves out is unknown: a requirement naming a level needs `assurance`, 
 needs `requirements`.
 """
 
+import importlib.util
 from collections import Counter
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Final
@@ -22,6 +23,10 @@ if TYPE_CHECKING:
 # lock is refused by Approvals as unavailable (and logged there as a lock wait) well before the gate's budget runs
 # out mid-commit.
 LOCK_WAITS_PER_CHECK: Final = 4
+
+# The module gate.ext_authz needs, from the `envoy` extra (xds-protos); every other gateway's types ship in the
+# package.
+ENVOY_TYPES: Final = "envoy.service.auth.v3.external_auth_pb2"
 
 
 def problems(cfg: "ConfigFile") -> list[str]:
@@ -177,12 +182,22 @@ def _gate(cfg: "ConfigFile") -> Iterator[str]:
         yield "gate.check_budget: not below gate.ext_mcp.hook_timeout"
     if gate.ext_authz is not None and not gate.check_budget < gate.ext_authz.hook_timeout:
         yield "gate.check_budget: not below gate.ext_authz.hook_timeout"
+    if gate.ext_authz is not None and not _installed(ENVOY_TYPES):
+        yield "gate.ext_authz: Envoy's types are not installed: install the envoy extra (tool-approvals[envoy])"
     known = set(cfg.requirements or {})
     named = [(f"gate.policy.rules[{index}].require", rule.require) for index, rule in enumerate(gate.policy.rules)]
     for where, name in [*named, ("gate.policy.default", gate.policy.default)]:
         if name != NO_APPROVAL and name not in known:
             yield f"{where}: unknown requirement {name!r}"
     yield from _rule_attributes(cfg)
+
+
+def _installed(module: str) -> bool:
+    """Whether `module` can be imported (its parent packages are imported to find it)."""
+    try:
+        return importlib.util.find_spec(module) is not None
+    except (ImportError, ValueError):  # a parent missing, or blocked in sys.modules
+        return False
 
 
 def _rule_attributes(cfg: "ConfigFile") -> Iterator[str]:

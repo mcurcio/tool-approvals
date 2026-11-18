@@ -14,15 +14,16 @@ ENV UV_COMPILE_BYTECODE=1 \
     UV_PYTHON=/usr/local/bin/python3 \
     UV_PROJECT_ENVIRONMENT=/app/.venv
 WORKDIR /src
-# The locked dependencies first, so a source change reuses this layer.
+# The locked dependencies first, so a source change reuses this layer. The image serves every gateway mapping,
+# so it carries the envoy extra.
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=uv.lock,target=uv.lock \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
-    uv sync --locked --no-dev --no-install-project
+    uv sync --locked --no-dev --extra envoy --no-install-project
 COPY pyproject.toml uv.lock README.md LICENSE ./
 COPY src ./src
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-dev --no-editable
+    uv sync --locked --no-dev --extra envoy --no-editable
 
 FROM python:3.13.18-slim-trixie@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
 COPY --from=build /app/.venv /app/.venv

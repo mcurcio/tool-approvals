@@ -20,11 +20,13 @@ from tool_approvals.gate.mappings.errors import (
     Refusal,
     error_code,
 )
+from tool_approvals.gate.mappings.grants import check_grants
 from tool_approvals.kernel.names import Principal, ServerName
 from tool_approvals.serving.grpc_server import inbound_deadline
 
 TOOLS_CALL: Final = "tools/call"
 MISCONFIGURED: Final = "misconfigured"
+EXT_MCP_METHODS: Final = check_grants(ext_mcp_pb2.DESCRIPTOR, "ExtMcp")
 
 _Code = ext_mcp_pb2.AuthorizationError.Code
 _CODES: Final[Mapping[int, _Code.ValueType]] = {

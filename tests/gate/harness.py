@@ -15,7 +15,6 @@ from typing import Any, Final
 import grpc
 import grpc.aio
 import httpx
-from envoy.service.auth.v3 import external_auth_pb2, external_auth_pb2_grpc
 from google.protobuf import json_format, struct_pb2
 
 from tests.fixtures.certs import TlsFiles
@@ -239,6 +238,8 @@ def authz_request(
     server: str | None = SERVER,
     headers: Mapping[str, str] | None = None,
 ) -> Any:
+    from envoy.service.auth.v3 import external_auth_pb2  # noqa: PLC0415 (the envoy extra, imported where used)
+
     request = external_auth_pb2.CheckRequest()
     attributes = request.attributes
     http = attributes.request.http
@@ -257,6 +258,8 @@ def authz_request(
 
 
 async def ext_authz(gate: Gate, request: Any) -> Any:
+    from envoy.service.auth.v3 import external_auth_pb2_grpc  # noqa: PLC0415 (the envoy extra, imported where used)
+
     assert gate.view.ext_authz is not None
     async with gate.channel(gate.view.ext_authz.listener, gate.bearer) as channel:
         return await external_auth_pb2_grpc.AuthorizationStub(channel).Check(request)

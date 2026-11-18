@@ -24,8 +24,11 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.1",
     "starlette>=0.50",
     "uvicorn>=0.38",
-    "xds-protos>=1.85.1",
 ]
+
+[project.optional-dependencies]
+# Envoy's ext_authz types, for the gate's gate.ext_authz mapping only: a gate behind another gateway needs none.
+envoy = ["xds-protos>=1.85.1"]
 
 [project.scripts]
 tool-approvals = "tool_approvals.cli:main"
@@ -47,6 +50,7 @@ dev = [
     "trustme>=1.2",
     "types-grpcio>=1.0",
     "types-protobuf>=7.35",
+    "xds-protos>=1.85.1", # the envoy extra, for the ext_authz tests
 ]
 
 [build-system]

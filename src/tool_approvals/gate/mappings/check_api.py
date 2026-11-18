@@ -16,6 +16,7 @@ from tool_approvals.contract_mapping.requests import refused_message, rejected_m
 from tool_approvals.gate.core.check import Checker, CheckVerdict, Pass, Pending, Unavailable
 from tool_approvals.gate.core.ports import GatewayContext
 from tool_approvals.gate.core.wording import agent_text
+from tool_approvals.gate.mappings.grants import check_grants
 from tool_approvals.kernel.methods import Method
 from tool_approvals.kernel.names import Principal, ServerName
 from tool_approvals.kernel.requests import QueueFull, Refused, Rejected
@@ -23,6 +24,8 @@ from tool_approvals.serving.grpc_server import inbound_deadline
 from tool_approvals.serving.http import proto_json_route
 
 CHECK_PATH: Final = "/v1/check"
+
+CHECK_METHODS: Final = check_grants(check_pb2.DESCRIPTOR, "CheckService")
 
 
 class CheckServicer(check_pb2_grpc.CheckServiceServicer):
