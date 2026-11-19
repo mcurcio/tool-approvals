@@ -79,14 +79,15 @@ open a Wait Task but not read it ([agentgateway](agentgateway.md)).
 
 **The gated call itself is never a task.** A gateway's hook judges one request; a task's follow-up requests
 (`tasks/*`) would not pass through it. So the gate rejects a gated call that declares Tasks (`task-requested`), and
-the agent makes the call again without asking for a task.
+the agent makes the call again without asking for a task. With no task behind any call the gate let through, the
+gate passes `tasks/*` itself unchecked, behind every gateway (as it passes every method but `tools/call`).
 
 ## Through the gateways
 
 | Gateway | The wait route |
 |---|---|
 | agentgateway | A target named `wait_route.server`; see [wiring agentgateway](agentgateway.md) |
-| Envoy | A route whose `context_extensions` server is `wait_route.server`; see [wiring Envoy](envoy.md#the-wait-route). Held waits only: the gate refuses `tasks/get` through Envoy, so turn Wait Tasks off (`wait.tasks: disabled`) until milestone 4 |
+| Envoy | A route whose `context_extensions` server is `wait_route.server`; see [wiring Envoy](envoy.md#the-wait-route). The gate passes `tasks/get`, as it passes every method but `tools/call` on every route |
 | Check API gateways | Route the wait server yourself and set the principal header; see [the Check API](check-api.md#the-wait-through-your-gateway) |
 
 agentgateway does not forward task notifications, so clients poll `tasks/get`.

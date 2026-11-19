@@ -136,9 +136,12 @@ gateway can send one on this connection: name the certificate's SHA-256 fingerpr
 So an agent reads "This call needs a person's approval… Call the tool "approvals-wait_approval_wait" with the
 ticket "…"" as a failed tool call, calls the wait tool, and repeats the original call once it reports `approved`.
 
-**Tasks.** agentgateway does not pass `tasks/*` follow-ups through the guardrail, so a gated call that asks to run
-as a task would escape the approved call: the gate rejects it (`task-requested`). The wait tool itself is offered as
-a task to clients that declare Tasks ([the wait tool](wait.md#mcp-tasks)).
+**Other methods and Tasks.** The guardrail is sent `tools/call` alone; agentgateway forwards every other method
+itself, `tasks/*` included. That is the gate's one rule behind every gateway (the Envoy adapter, which sees every
+request, applies it in the gate: [which requests pass](envoy.md#which-requests-pass)). Because `tasks/*` follow-ups
+are not checked, a gated call that asks to run as a task would escape the approved call: the gate rejects it
+(`task-requested`). The wait tool itself is offered as a task to clients that declare Tasks
+([the wait tool](wait.md#mcp-tasks)).
 
 **Known limit: Wait Tasks through agentgateway v1.7.0 with the MCP Python SDK.** On protocol `2026-07-28`
 agentgateway v1.7.0 refuses a `tasks/get` that carries no `Mcp-Name` header, and the MCP Python SDK's client does

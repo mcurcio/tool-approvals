@@ -10,9 +10,7 @@ names.
 Envoy's types are an optional dependency: the published image carries them; a gate installed from the package
 needs the `envoy` extra (`tool-approvals[envoy]`), and `config check` refuses a `gate.ext_authz` section without it.
 
-**Not built yet (milestone 4):** Wait Tasks and long holds through Envoy. The wait route below serves held waits;
-the gate refuses `tasks/get` through Envoy, so run the wait server with `wait.tasks: disabled` behind Envoy
-([the wait route](#the-wait-route)).
+**Not built yet (milestone 4):** long holds through Envoy ([the wait route](#the-wait-route)).
 
 ## The HTTP filters
 
@@ -145,7 +143,8 @@ certificate:
 
 ## Which requests pass
 
-The filter sees every HTTP request on the route, so the gate classifies each one:
+The filter sees every HTTP request on the route. The gate reads the HTTP facts, then applies to the body the one
+rule it applies behind every gateway: it checks `tools/call` and nothing else.
 
 | Request | Gate |
 |---|---|
@@ -155,16 +154,16 @@ The filter sees every HTTP request on the route, so the gate classifies each one
 | `POST` of a client's JSON-RPC response (its answer to a server's request: sampling, elicitation, roots) | Passed |
 | `POST` of a single `tools/call` | Checked like any call, on the params' exact bytes ([the Check API](check-api.md#the-verdict)); on the wait route, passed without policy ([the wait route](#the-wait-route)) |
 | `POST` of a `notifications/*` method carrying an `id` (an MCP notification has none) | Refused (`malformed`) |
-| `POST` of `initialize`, `notifications/*`, `tools/list`, `prompts/*`, `resources/*`, `completion/complete`, `logging/setLevel`, `ping` | Passed |
-| `POST` of a `tasks/*` method | Refused (`task-requested`): task follow-ups would escape the approved call |
-| `POST` of any other method | Refused (`malformed`) |
+| `POST` of any other request or notification, whatever its method (`initialize`, `tools/list`, `tasks/*`, `ping`, one the server does not serve) | Passed, on every route |
 
-Every MCP method but `tools/call` passes, as it does behind agentgateway, whose guardrail is sent `tools/call`
-alone. The list is fixed in the gate, not configured. A refusal answers the request's own `id` when the gate could
-read one (the method rows), and `null` when it could read no message. A refused notification (a method and no
-`id`, a `tools/call` too) is answered as MCP's Streamable HTTP transport asks: HTTP 400, its JSON-RPC error carrying
-no `id` member. A route that names no server, or a request with no principal at `principal_path`, is refused
-(`unavailable`) before any of these.
+The rule is the gate's, not Envoy's, and is not configured: behind agentgateway, whose guardrail is sent
+`tools/call` alone, every other method passes too. `tasks/*` needs no check of its own: the gate refuses every
+`tools/call` that asks to run as a task (`task-requested`), so no task follows a call it let through, and a Wait
+Task is authorised by its id at the wait server ([MCP Tasks](wait.md#mcp-tasks)). A refusal answers the request's
+own `id` when the gate could read one, and `null` when it could read no message. A refused notification (a
+`tools/call` with no `id`) is answered as MCP's Streamable HTTP transport asks: HTTP 400, its JSON-RPC error
+carrying no `id` member. A route that names no server, or a request with no principal at `principal_path`, is
+refused (`unavailable`) before any of these.
 
 ## What the agent sees
 
@@ -193,7 +192,8 @@ bootstrap needs to ask for them.
 ## The wait route
 
 The wait server is one more MCP route, whose `context_extensions` server is `wait_route.server`. The gate passes
-its `tools/call` requests without policy and sets `wait_route.principal_header` to the principal at
+its `tools/call` requests without policy (and its `tasks/get`, as on every route, so Wait Tasks work behind
+Envoy) and sets `wait_route.principal_header` to the principal at
 `principal_path`, overwriting every copy the agent sent (an OK response header with `append: false`, which Envoy's
 ext_authz reads for these headers, and `append_action: OVERWRITE_IF_EXISTS_OR_ADD`, the field that replaces it);
 the wait server reads the principal from that header alone. The route authenticates to the wait server itself,
@@ -228,8 +228,6 @@ hold ends, and Envoy's default gives a response 15 s.
 Point `gate.ext_authz.exposed_wait_tool` at the wait tool's name as agents see it: behind Envoy, which does not
 prefix tool names, `wait.tool` itself (`approval_wait` by default).
 
-**What milestone 4 adds.** The end-to-end suite runs waits that answer at once. Not yet built or proven through
-Envoy: Wait Tasks (the gate refuses `tasks/get` through Envoy, as it refuses every `tasks/*` method, so a client
-that declares Tasks would be given a task it cannot read: run the wait server with `wait.tasks: disabled` behind
-Envoy), and a hold that outlasts Envoy's stream idle timeout (5 minutes by default) or the connection manager's
-other defaults.
+**What milestone 4 adds.** The end-to-end suite runs waits that answer at once, and opens and reads a Wait Task
+through Envoy. Not yet built or proven through Envoy: a hold that outlasts Envoy's stream idle timeout (5 minutes
+by default) or the connection manager's other defaults.

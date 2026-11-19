@@ -1,5 +1,6 @@
 """agentgateway's remote mcpGuardrails processor (`agentgateway.dev.ext_mcp.ExtMcp`), on the tools/call request
-phase, as the last processor, failing closed."""
+phase, as the last processor, failing closed. agentgateway sends the hook tools/call alone and forwards every other
+method itself, which is the gate's one message rule (`gate.core.messages`): only a tools/call is checked."""
 
 from collections.abc import Mapping
 from typing import Final

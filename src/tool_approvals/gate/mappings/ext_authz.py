@@ -1,6 +1,7 @@
 """Envoy's ext_authz gRPC service (`envoy.service.auth.v3.Authorization`), with the request body, on an MCP
-route. `classify` is the whole classification, a pure function of HttpFacts; the servicer only translates Envoy's
-AttributeContext into HttpFacts and the classification (or the checker's verdict) into a CheckResponse."""
+route. Envoy sees every HTTP request on the route, so `classify` reads the HTTP facts and hands the body to the
+gate's one message rule (`gate.core.messages`); the servicer only translates Envoy's AttributeContext into
+HttpFacts and the classification (or the checker's verdict) into a CheckResponse."""
 
 import json
 from collections.abc import Mapping
@@ -15,20 +16,13 @@ from google.protobuf import wrappers_pb2
 
 from tool_approvals.config.views import ExtAuthzAttributeView, ExtAuthzView
 from tool_approvals.gate.core.check import Checker, Pass, Pending, Unavailable
+from tool_approvals.gate.core.messages import PassOn, Refuse, ToCheck, classify_message
 from tool_approvals.gate.core.ports import GatewayContext
 from tool_approvals.gate.core.wording import agent_text
 from tool_approvals.gate.mappings.attributes import present, struct_string
 from tool_approvals.gate.mappings.errors import Refusal, error_code, verdict_name
 from tool_approvals.gate.mappings.grants import check_grants
-from tool_approvals.kernel.calls import (
-    TASKS_PREFIX,
-    TOOLS_CALL,
-    CallRejected,
-    RejectReason,
-    RpcRequest,
-    RpcResponse,
-    read_rpc_message,
-)
+from tool_approvals.kernel.calls import RejectReason
 from tool_approvals.kernel.names import Principal, ServerName
 from tool_approvals.kernel.requests import Rejected
 from tool_approvals.serving.grpc_server import inbound_deadline
@@ -56,92 +50,29 @@ class HttpFacts:
 
 
 @dataclass(frozen=True, slots=True)
-class ToCheck:
-    """A tools/call: the checker decides on the params span's exact bytes."""
-
-    params: bytes  # b"" when the call has no params (the core rejects it)
-    id_json: bytes
-
-
-@dataclass(frozen=True, slots=True)
-class PassOn:
-    """Forwarded without a check."""
-
-
-@dataclass(frozen=True, slots=True)
 class Deny:
     verdict: Rejected | Unavailable
     id_json: bytes  # the exact bytes of the request's id; b"" when unknown
-    notification: bool = False  # a JSON-RPC notification (a method, no id): HTTP 400, answered with no id
 
 
 type Classification = ToCheck | PassOn | Deny
 
-# Every MCP method but tools/call passes, as it does behind agentgateway, whose guardrail is sent tools/call alone.
-# A name ending "/*" passes every method under that prefix. tasks/* and any method not listed stay refused.
-NOTIFICATIONS_PREFIX: Final = "notifications/"  # the MCP notifications, which carry no id
-EXT_AUTHZ_PASS_METHODS: Final[frozenset[str]] = frozenset(
-    {
-        "initialize",
-        f"{NOTIFICATIONS_PREFIX}*",
-        "tools/list",
-        "prompts/*",
-        "resources/*",
-        "completion/complete",
-        "logging/setLevel",
-        "ping",
-    }
-)
-_ANY_UNDER: Final = "*"
-
-
-def passes(method: str, *, notification: bool) -> bool:
-    """Whether EXT_AUTHZ_PASS_METHODS names `method`, exactly or by a "/*" prefix. A notifications/* method passes
-    only as a `notification`: an MCP notification has no id, and no MCP request is named so."""
-    if method.startswith(NOTIFICATIONS_PREFIX) and not notification:
-        return False
-    return method in EXT_AUTHZ_PASS_METHODS or any(
-        listed.endswith(_ANY_UNDER) and method.startswith(listed.removesuffix(_ANY_UNDER))
-        for listed in EXT_AUTHZ_PASS_METHODS
-    )
-
 
 def classify(facts: HttpFacts) -> Classification:
-    """What the gate does with one HTTP request on an MCP route. A route naming no server is Unavailable; anything
-    but a POST, MALFORMED; a body Envoy cut, TOO_LARGE; a body that is neither one JSON-RPC request nor one JSON-RPC
-    response (a batch, duplicate keys, trailing data, no method and no result or error), MALFORMED. A client's
-    JSON-RPC response passes on. Then by method: tools/call is checked on its params span's exact bytes (the wait
-    server's route too: the checker passes it, `CheckCore.check`); the methods `passes` names pass on (a
-    notifications/* method only without an id); tasks/* is TASK_REQUESTED; any other method MALFORMED, answering the
-    request's id, or marked a notification when it has none."""
-    read = _read_message(facts)
-    if isinstance(read, Deny):
-        return read
-    if isinstance(read, RpcResponse):
-        return PassOn()
-    if read.method == TOOLS_CALL:
-        params = b"" if read.params is None else facts.body[read.params.start : read.params.end]
-        return ToCheck(params, read.id_json)
-    notification = not read.id_json
-    if passes(read.method, notification=notification):
-        return PassOn()
-    if read.method.startswith(TASKS_PREFIX):
-        return Deny(Rejected(RejectReason.TASK_REQUESTED), read.id_json, notification)
-    return Deny(Rejected(RejectReason.MALFORMED), read.id_json, notification)
-
-
-def _read_message(facts: HttpFacts) -> RpcRequest | RpcResponse | Deny:
-    """The one JSON-RPC message the HTTP request carries, or why there is none to read."""
+    """What the gate does with one HTTP request on an MCP route: the HTTP facts first, then the gate's one message
+    rule (`gate.core.messages.classify_message`) on the body. A route naming no server is Unavailable; anything but
+    a POST (GET, a server stream; DELETE, ending a session; the rest), MALFORMED; a body Envoy cut, TOO_LARGE. Then
+    a tools/call is checked on its params span's exact bytes (the wait server's route too: the checker passes it,
+    `CheckCore.check`); every other well-formed JSON-RPC message passes on, tasks/* included; a body that is not one
+    is MALFORMED, answering the request's id when it could be read."""
     if not facts.server:
         return Deny(Unavailable(), b"")  # the gateway did not say where: fail closed
-    if facts.method != POST:  # GET (a server stream), DELETE (ending a session) and the rest
+    if facts.method != POST:
         return Deny(Rejected(RejectReason.MALFORMED), b"")
     if facts.partial_body:
         return Deny(Rejected(RejectReason.TOO_LARGE), b"")
-    rpc = read_rpc_message(facts.body)
-    if isinstance(rpc, CallRejected):
-        return Deny(Rejected(rpc.reason), b"")
-    return rpc
+    judged = classify_message(facts.body)
+    return Deny(judged.verdict, judged.id_json) if isinstance(judged, Refuse) else judged
 
 
 # xds-protos ships no type stubs (its modules are Any to mypy), so the base class is untyped.
@@ -153,8 +84,9 @@ class ExtAuthzServicer(external_auth_pb2_grpc.AuthorizationServicer):  # type: i
     (`Pass.attested`) sets `principal_header` to the attested principal, overwriting any copy the client sent; any
     other OK removes `principal_header` (headers_to_remove), so no tool sees one a client sent. A denial is
     HTTP 200 application/json {"jsonrpc": "2.0", "id": <id bytes>, "error": {"code", "message": agent_text,
-    "data": {"verdict", "ticket"?}}}, code from mappings.errors; a refused notification (a method, no id, a
-    tools/call too) is HTTP 400 with the same error and no "id" member, as MCP's Streamable HTTP asks."""
+    "data": {"verdict", "ticket"?}}}, code from mappings.errors; a refused notification (a tools/call with no id,
+    the one notification the gate refuses) is HTTP 400 with the same error and no "id" member, as MCP's Streamable
+    HTTP asks."""
 
     def __init__(self, checker: Checker, view: ExtAuthzView, principal_header: str) -> None:
         self._checker: Final = checker
@@ -176,8 +108,8 @@ class ExtAuthzServicer(external_auth_pb2_grpc.AuthorizationServicer):  # type: i
         match classify(facts):
             case PassOn():
                 return _allow(self._principal_header, None)
-            case Deny(verdict, id_json, notification):
-                return self._deny(verdict, id_json, notification=notification)
+            case Deny(verdict, id_json):
+                return self._deny(verdict, id_json)
             case ToCheck(params, id_json):
                 gateway = GatewayContext(
                     Principal(principal),

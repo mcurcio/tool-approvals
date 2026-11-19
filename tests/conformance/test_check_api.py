@@ -16,7 +16,7 @@ SKIPPED = (
     cases.case_5_principal_header_reaches_no_tool_and_wait_sees_the_attested,
     cases.case_8_gate_stopped_refuses,
     cases.case_9_gate_slower_than_the_hook_timeout_refuses,
-    cases.case_11_envoy_denies_what_is_not_one_tools_call,
+    cases.case_11_envoy_checks_tools_call_alone,
     cases.case_13_agent_credentials_never_reach_the_gate,
 )
 

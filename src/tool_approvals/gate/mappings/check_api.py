@@ -32,7 +32,9 @@ class CheckServicer(check_pb2_grpc.CheckServiceServicer):
     """Behind GrpcAuth with the CHECK grant. principal, server and gateway_attributes (as sent) become the
     GatewayContext, with the RPC's own deadline over gRPC (none over JSON); params go to the checker as sent. The
     verdict and agent_text come back: a call to the wait server's route is `pass`, without policy, as through every
-    adapter (`CheckCore.check`); the caller sets the principal header on it itself."""
+    adapter (`CheckCore.check`); the caller sets the principal header on it itself. A caller asks only about the
+    tools/call it would forward, and forwards every other well-formed message unasked: the gate's one message rule
+    (`gate.core.messages`), which it applies in its own code."""
 
     def __init__(self, checker: Checker, exposed_wait_tool: str) -> None:
         self._checker: Final = checker

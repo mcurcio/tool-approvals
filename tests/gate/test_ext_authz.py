@@ -1,6 +1,6 @@
-"""The ext_authz mapping's own rules: every row of the classification table, through `classify` and through the
-gate's real listener, with the exact deny body; then what only the servicer reads (the principal) and how it
-answers a checked call."""
+"""The ext_authz mapping's own rules: every row of the classification table (the HTTP facts, then the gate's one
+message rule, `gate.core.messages`), through `classify` and through the gate's real listener, with the exact deny
+body; then what only the servicer reads (the principal) and how it answers a checked call."""
 
 import json
 from dataclasses import dataclass
@@ -27,24 +27,16 @@ from tests.gate.harness import (
 )
 from tests.kernel.test_rpc_and_digest import spelled_params
 from tool_approvals.gate.core.check import Pending, Unavailable
+from tool_approvals.gate.core.messages import PassOn, ToCheck
 from tool_approvals.gate.core.wording import agent_text
-from tool_approvals.gate.mappings.ext_authz import (
-    EXT_AUTHZ_PASS_METHODS,
-    Classification,
-    Deny,
-    HttpFacts,
-    PassOn,
-    ToCheck,
-    classify,
-)
+from tool_approvals.gate.mappings.ext_authz import Classification, Deny, HttpFacts, classify
 from tool_approvals.kernel.calls import RejectReason
 from tool_approvals.kernel.requests import NotApproved, Rejected, Ticketed
 
 MALFORMED = Rejected(RejectReason.MALFORMED)
-TASK_REQUESTED = Rejected(RejectReason.TASK_REQUESTED)
 TOO_LARGE = Rejected(RejectReason.TOO_LARGE)
-# Every MCP method but tools/call, as agentgateway passes them: the owner's list, written out independently. The
-# notifications are sent as MCP has them, with no id; the requests with one.
+# Every method but tools/call passes, on every route, as behind every gateway. The notifications are sent as MCP has
+# them, with no id; the requests with one.
 PASSED_NOTIFICATIONS: Final = (
     "notifications/initialized",
     "notifications/cancelled",
@@ -64,6 +56,20 @@ PASSED_REQUESTS: Final = (
     "completion/complete",
     "logging/setLevel",
     "ping",
+    "tasks/get",
+    "tasks/cancel",
+    "tasks/list",
+    "tasks/result",
+    "tasks/update",
+    # Server-to-client methods and names MCP has no method for pass too: only tools/call is checked.
+    "tasksget",
+    "tools/list_changed",
+    "sampling/createMessage",
+    "elicitation/create",
+    "roots/list",
+    "notifications",
+    "Ping",
+    "Tools/call",  # methods are case-sensitive: not tools/call, so not checked
 )
 
 
@@ -124,51 +130,17 @@ ROWS: Final = (
     # An MCP notification has no id, and MCP names no request notifications/*: one carrying an id is no MCP message,
     # refused as a request, answering that id.
     *(Row(f"notification-with-id-{m}", _rpc(m, b'"n-1"'), Deny(MALFORMED, b'"n-1"')) for m in PASSED_NOTIFICATIONS),
+    # Any other notification passes, a tasks/* one and one no MCP revision names too.
     *(
-        Row(f"task-{m}", _rpc(m, b'"req-1"'), Deny(TASK_REQUESTED, b'"req-1"'))
-        for m in ("tasks/get", "tasks/cancel", "tasks/list", "tasks/result")
+        Row(f"pass-notification-{m}", _notification(m), PassOn())
+        for m in ("unknown/thing", "tasks/cancel", "notifications", "Tools/call")
     ),
-    *(
-        Row(f"other-{m}", _rpc(m, b'"req-1"'), Deny(MALFORMED, b'"req-1"'))
-        for m in (
-            "tasksget",
-            "tools/list_changed",
-            "sampling/createMessage",
-            "elicitation/create",
-            "roots/list",
-            "completion/list",
-            "logging/set",
-            "promptsget",
-            "notifications",
-            "Ping",
-            "Tools/call",  # methods are case-sensitive: not tools/call, so refused, never checked or passed
-        )
-    ),
-    # A refused notification has no id to answer: HTTP 400, its JSON-RPC error carrying no id (MCP Streamable HTTP).
-    Row("unknown-notification", b'{"jsonrpc":"2.0","method":"unknown/thing"}', Deny(MALFORMED, b"", True)),
-    Row("tasks-notification", b'{"jsonrpc":"2.0","method":"tasks/cancel"}', Deny(TASK_REQUESTED, b"", True)),
-    Row("notification-notifications", _notification("notifications"), Deny(MALFORMED, b"", True)),
-    Row("notification-Tools/call", _notification("Tools/call"), Deny(MALFORMED, b"", True)),
     # The wait server's route is classified as any route's: the checker passes its tools/call (CheckCore.check).
     Row("wait-server", tools_call(FREE), ToCheck(FREE, b"7"), server=ROUTE.server),
     Row("wait-server-pass-method", _rpc("tools/list"), PassOn(), server=ROUTE.server),
-    Row("wait-server-tasks", _rpc("tasks/get", b'"t-1"'), Deny(TASK_REQUESTED, b'"t-1"'), server=ROUTE.server),
+    Row("wait-server-tasks", _rpc("tasks/get", b'"t-1"'), PassOn(), server=ROUTE.server),
     Row("no-server", tools_call(FREE), Deny(Unavailable(), b""), server=""),
 )
-
-
-def test_the_pass_methods_are_every_mcp_method_but_tools_call() -> None:
-    expected = {
-        "initialize",
-        "notifications/*",
-        "tools/list",
-        "prompts/*",
-        "resources/*",
-        "completion/complete",
-        "logging/setLevel",
-        "ping",
-    }
-    assert expected == EXT_AUTHZ_PASS_METHODS
 
 
 @pytest.mark.parametrize("row", ROWS, ids=[row.name for row in ROWS])
@@ -188,10 +160,10 @@ async def test_the_servicer_answers_each_row(gate: Gate, row: Row) -> None:
     if not isinstance(row.expected, Deny):
         assert_allowed(response)  # ToCheck rows carry FREE, which the policy passes without Approvals
         return
-    verdict, id_json, notification = row.expected.verdict, row.expected.id_json, row.expected.notification
-    assert_denied(response, verdict, id_json, notification=notification)
+    verdict, id_json = row.expected.verdict, row.expected.id_json
+    assert_denied(response, verdict, id_json)
     body: bytes = response.denied_response.body.encode()
-    prefix = b'{"jsonrpc":"2.0",' + (b"" if notification else b'"id":' + (id_json or b"null") + b",") + b'"error":'
+    prefix = b'{"jsonrpc":"2.0","id":' + (id_json or b"null") + b',"error":'
     assert body.startswith(prefix), body
     error = json.loads(body[len(prefix) : -1])
     message = agent_text(verdict, WAIT_TOOL)

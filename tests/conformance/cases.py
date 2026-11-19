@@ -19,8 +19,9 @@ from typing import Final
 
 from tests.conformance.gateways import CallOutcome, CheckApiGateway, GatewayUnderTest
 from tests.e2e import agentgateway, envoy
+from tests.e2e.clients import HttpMcpGateway
 from tests.e2e.hook_recorder import HookCall
-from tests.e2e.modern import modern_client, result_text
+from tests.e2e.modern import ModernMcp, modern_client, result_text
 from tests.e2e.stack import (
     ATTRIBUTE_GATED,
     EXT_AUTHZ_TIMEOUT,
@@ -59,7 +60,6 @@ SLOWER_THAN_THE_HOOKS: Final = EXT_AUTHZ_TIMEOUT + timedelta(seconds=2)
 AGENT_COOKIE: Final = {"cookie": "agent-session=not-the-gates"}
 FORWARDED: Final = ("x-agent-note", "seen")  # a header of the agent's that each hook is sent (case 13's control)
 METHOD_NOT_FOUND: Final = -32601  # the echo tool's answer to a method it does not serve
-_NO_ID: Final = object()  # case 11: a refused notification, answered with no id at all
 _NOT_THROUGH: Final = re.compile(r"^\s*Not through ([a-z-]+): (.+)$")
 
 type Case = Callable[[Stack, GatewayUnderTest], Awaitable[object]]
@@ -260,13 +260,14 @@ async def case_10_no_principal_is_refused(st: Stack, gateway: GatewayUnderTest) 
             assert is_rejected(sent.outcome, RejectReason.MALFORMED), sent
 
 
-async def case_11_envoy_denies_what_is_not_one_tools_call(st: Stack, gateway: GatewayUnderTest) -> None:
+async def case_11_envoy_checks_tools_call_alone(st: Stack, gateway: GatewayUnderTest) -> None:
     """Every row of the ext_authz classification table Envoy can carry, through Envoy (tests/gate/test_ext_authz.py
     has each row through the gate alone). A body Envoy would cut it refuses itself (413), so the gate's TOO_LARGE row
-    is the gate's alone; the wait server's route is case 5's. Every MCP method but tools/call passes to the tool
-    unchecked, as behind agentgateway: a notification and a client's response reach it and are answered 202 with
-    no body, never with an id of the gate's. A notification the gate refuses is HTTP 400, its JSON-RPC error
-    carrying no id (MCP Streamable HTTP); a notifications/* message carrying an id is refused as a request.
+    is the gate's alone; the wait route's tools/call is case 5's. The gate's one message rule (gate.core.messages):
+    every method but tools/call passes to the tool unchecked, tasks/* and methods the tool does not serve included,
+    as behind every gateway; a notification and a client's response reach it and are answered 202 with no body,
+    never with an id of the gate's; a notifications/* message carrying an id is refused as a request. On the wait
+    route a Wait Task opens and its tasks/get reaches the wait server.
 
     Not through agentgateway: it hands the gate tools/call only, already parsed; nothing else reaches the hook.
     Not through check-api: a Check API caller asks about tools/call params only; it classifies its own traffic."""
@@ -280,7 +281,7 @@ async def case_11_envoy_denies_what_is_not_one_tools_call(st: Stack, gateway: Ga
         return json.dumps({"jsonrpc": "2.0", "method": method, "params": params}).encode()
 
     call = request("tools/call", {"name": "echo", "arguments": {}})
-    malformed, tasks = RejectReason.MALFORMED, RejectReason.TASK_REQUESTED
+    malformed = RejectReason.MALFORMED
     denied: dict[str, tuple[str, bytes | None, RejectReason, object]] = {
         "GET": ("GET", None, malformed, None),
         "DELETE": ("DELETE", None, malformed, None),
@@ -288,20 +289,13 @@ async def case_11_envoy_denies_what_is_not_one_tools_call(st: Stack, gateway: Ga
         "duplicate keys": ("POST", b'{"jsonrpc":"2.0","id":9,"method":"tools/call","method":"ping"}', malformed, None),
         "trailing data": ("POST", call + b" {}", malformed, None),
         "no method": ("POST", b'{"jsonrpc":"2.0","id":9,"params":{}}', malformed, None),
-        "tasks/get": ("POST", request("tasks/get", {"taskId": "t"}, "t-1"), tasks, "t-1"),
-        "an unknown method": ("POST", request("sampling/createMessage", {}), malformed, 9),
         "a notification with an id": ("POST", request("notifications/initialized", {}), malformed, 9),
-        "an unknown notification": ("POST", notification("unknown/thing", {}), malformed, _NO_ID),
     }
     for what, (method, body, reason, request_id) in denied.items():
         raw = await gateway.raw(principal, method, body)  # type: ignore[arg-type]
         answer = json.loads(raw.body)
-        if request_id is _NO_ID:  # a refused notification: an HTTP error status, and no id in the error
-            assert raw.status == 400, (what, raw)
-            assert "id" not in answer, (what, raw)
-        else:
-            assert raw.status == 200, (what, raw)
-            assert answer["id"] == request_id, (what, raw)
+        assert raw.status == 200, (what, raw)
+        assert answer["id"] == request_id, (what, raw)
         error = answer["error"]
         assert error["code"] == PERMISSION_DENIED_CODE, (what, raw)
         assert error["data"] == {"verdict": "rejected"}, (what, raw)
@@ -316,10 +310,17 @@ async def case_11_envoy_denies_what_is_not_one_tools_call(st: Stack, gateway: Ga
     listed = await gateway.raw(principal, "POST", request("prompts/list", {}))
     assert (listed.status, json.loads(listed.body)) == (200, {"jsonrpc": "2.0", "id": 9, "result": {"prompts": []}})
     # The echo tool answers a method it does not serve itself: the gate let it through.
-    unserved = await gateway.raw(principal, "POST", request("resources/read", {"uri": "file:///a"}))
-    assert json.loads(unserved.body)["error"]["code"] == METHOD_NOT_FOUND, unserved
+    for unserved_request in (
+        request("resources/read", {"uri": "file:///a"}),
+        request("tasks/get", {"taskId": "t"}, "t-1"),
+        request("sampling/createMessage", {}),
+    ):
+        unserved = await gateway.raw(principal, "POST", unserved_request)
+        assert json.loads(unserved.body)["error"]["code"] == METHOD_NOT_FOUND, unserved
     for what, body in {
         "notifications/cancelled": notification("notifications/cancelled", {"requestId": 3, "reason": "stop"}),
+        "an unknown notification": notification("unknown/thing", {}),
+        "a tasks notification": notification("tasks/cancel", {"taskId": "t"}),
         "a client response": b'{"jsonrpc":"2.0","id":9,"result":{}}',
     }.items():
         accepted = await gateway.raw(principal, "POST", body)
@@ -328,6 +329,14 @@ async def case_11_envoy_denies_what_is_not_one_tools_call(st: Stack, gateway: Ga
     ran = await gateway.raw(principal, "POST", call)  # a tools/call is checked, and this one passes
     assert ran.status == 200, ran
     assert len(st.echo.received()) == before + 1
+    # A Wait Task on the wait route: the gate passes its tasks/get as any route's, and the wait server answers it.
+    ticket = ticket_of(await gateway.call(principal, GATED_SERVER, GATED_TOOL, b"{}"))
+    assert isinstance(gateway, HttpMcpGateway), gateway
+    waiting = ModernMcp(gateway.url_of(WAIT_SERVER), st.agents.token(principal), tasks=True)
+    task = await waiting.call_tool("approval_wait", {"ticket": ticket})
+    assert (task["resultType"], task["status"]) == ("task", "working"), task
+    read = await waiting.get_task(task["taskId"])
+    assert read["status"] == "working", read
 
 
 async def case_12_gateway_attributes_reach_policy(st: Stack, gateway: GatewayUnderTest) -> None:

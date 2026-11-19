@@ -31,7 +31,7 @@ async def test_envoy(tmp_path: Path) -> None:
         await cases.case_5_principal_header_reaches_no_tool_and_wait_sees_the_attested(st, gateway, used)
         await cases.case_6_a_tasks_declaring_call_is_rejected(st, gateway)
         await cases.case_7_the_hook_runs_over_tls_with_the_bearer(st, gateway)
-        await cases.case_11_envoy_denies_what_is_not_one_tools_call(st, gateway)
+        await cases.case_11_envoy_checks_tools_call_alone(st, gateway)
         await cases.case_12_gateway_attributes_reach_policy(st, gateway)
         await cases.case_13_agent_credentials_never_reach_the_gate(st, gateway)
         await cases.case_10_no_principal_is_refused(st, gateway)
