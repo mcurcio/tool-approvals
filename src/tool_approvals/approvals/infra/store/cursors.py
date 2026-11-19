@@ -29,11 +29,13 @@ _CREATE: Final = text(
     "VALUES (:channel, 0, clock_timestamp(), :by, clock_timestamp(), :by) ON CONFLICT (channel) DO NOTHING"
 )
 _POSITION: Final = text(
-    "SELECT last_event_id, paused_until, clock_timestamp() AS now FROM channel_cursors WHERE channel = :channel"
+    "SELECT last_event_id, paused_until, failing_since, clock_timestamp() AS now FROM channel_cursors "
+    "WHERE channel = :channel"
 )
 _ADVANCE: Final = text(
     "UPDATE channel_cursors SET last_event_id = GREATEST(last_event_id, :event_id), paused_until = NULL, "
-    "pause_reason = NULL, updated_at = clock_timestamp(), updated_by = :by WHERE channel = :channel"
+    "pause_reason = NULL, failing_since = NULL, updated_at = clock_timestamp(), updated_by = :by "
+    "WHERE channel = :channel"
 )
 _SKIP: Final = text(
     "UPDATE channel_cursors SET last_event_id = GREATEST(last_event_id, :event_id), "
@@ -49,7 +51,8 @@ _DEAD_LETTER: Final = text(
 )
 _PAUSE: Final = text(
     "UPDATE channel_cursors SET paused_until = clock_timestamp() + :delay, pause_reason = :reason, "
-    "updated_at = clock_timestamp(), updated_by = :by WHERE channel = :channel"
+    "failing_since = COALESCE(failing_since, clock_timestamp()), updated_at = clock_timestamp(), updated_by = :by "
+    "WHERE channel = :channel"
 )
 
 
@@ -94,7 +97,12 @@ class _SqlChannelLog:
 
     async def position(self) -> ChannelPosition:
         row = (await self._connection.execute(_POSITION, {"channel": self._channel})).one()
-        return ChannelPosition(last_event_id=row.last_event_id, paused_until=row.paused_until, now=row.now)
+        return ChannelPosition(
+            last_event_id=row.last_event_id,
+            paused_until=row.paused_until,
+            now=row.now,
+            failing_since=row.failing_since,
+        )
 
     async def events_after(self, after: int, limit: int) -> list[CommittedEvent]:
         rows = (await self._connection.execute(events_after(after, limit))).mappings().all()

@@ -111,8 +111,14 @@ async def test_a_pause_keeps_the_position_and_a_success_clears_it(world: StoreWo
         assert paused.paused_until is not None
         assert paused.paused_until - paused.now > timedelta(seconds=50)
         assert (await _cursor(world))["pause_reason"] == "http 503"
+        first = paused.failing_since
+        assert first is not None
+        await log.pause(timedelta(minutes=2), "timeout")
+        assert (await log.position()).failing_since == first  # failing since the first pause, not the last
         await log.advance(0)
-        assert (await log.position()).paused_until is None
+        cleared = await log.position()
+        assert cleared.paused_until is None
+        assert cleared.failing_since is None
 
 
 async def _holder_pid(world: StoreWorld) -> int:

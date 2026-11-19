@@ -200,14 +200,43 @@ async def test_a_paused_channel_sends_nothing_until_its_pause_ends() -> None:
         await until(lambda: sender.sent == [1, 2])
 
 
-async def test_while_paused_an_event_older_than_the_give_up_horizon_is_dead_lettered_unsent() -> None:
+async def test_failing_past_the_horizon_an_event_older_than_it_is_dead_lettered_unsent() -> None:
     channels, feed, sender = FakeChannels(), MemoryFeed(), ScriptedSender()
     channels.add(committed(1, at=START - timedelta(hours=25)), committed(2, at=START))
-    channels.cursors[CHANNEL] = Cursor(paused_until=START - timedelta(seconds=1), pause_reason="http 503")
+    channels.cursors[CHANNEL] = Cursor(
+        paused_until=START - timedelta(seconds=1),
+        pause_reason="http 503",
+        failing_since=START - timedelta(hours=25),
+    )
     async with running(loop(channels, sender, feed)):
         await until(lambda: cursor(channels).last_event_id == 2)
     assert sender.sent == [2]
     assert channels.dead_letters == [(CHANNEL, 1, "gave up after 24h")]
+
+
+async def test_an_old_event_after_a_single_retry_is_sent_again_not_dead_lettered() -> None:
+    # The horizon counts how long the channel has been failing, not the event's age: a channel back after a long
+    # outage of its own (or a new channel over old events) loses nothing to one short pause.
+    channels, feed = FakeChannels(), MemoryFeed()
+    sender = ScriptedSender(script=[Retry("http 503")])
+    channels.add(committed(1, at=START - timedelta(hours=25)))
+    async with running(loop(channels, sender, feed)):
+        await until(lambda: cursor(channels).last_event_id == 1)
+    assert sender.sent == [1, 1]
+    assert channels.dead_letters == []
+    assert cursor(channels).failing_since is None  # cleared by the success
+
+
+async def test_a_channel_paused_without_failing_that_long_sends_old_events() -> None:
+    channels, feed, sender = FakeChannels(), MemoryFeed(), ScriptedSender()
+    channels.add(committed(1, at=START - timedelta(hours=25)))
+    channels.cursors[CHANNEL] = Cursor(
+        paused_until=START - timedelta(seconds=1), pause_reason="http 503", failing_since=START - timedelta(hours=1)
+    )
+    async with running(loop(channels, sender, feed)):
+        await until(lambda: cursor(channels).last_event_id == 1)
+    assert sender.sent == [1]
+    assert channels.dead_letters == []
 
 
 async def test_an_old_event_is_sent_when_the_channel_is_not_paused() -> None:
@@ -376,28 +405,52 @@ async def test_a_subscription_the_push_service_no_longer_knows_is_deleted_and_co
     assert service.pushed == [(ENDPOINT_A, 1), (ENDPOINT_B, 1)]
 
 
-@pytest.mark.parametrize("outcome", [Retry("http 503"), Retry("timeout"), Rejected("http 400")])
-async def test_a_failing_subscription_stops_the_event_with_its_outcome(outcome: SendOutcome) -> None:
+@pytest.mark.parametrize("outcome", [Retry("http 503"), Retry("timeout"), Misconfigured("http 403")])
+async def test_a_subscription_to_send_again_still_lets_the_others_have_the_event(outcome: SendOutcome) -> None:
     store = await push_store(
         subscription(ENDPOINT_A, frozenset({APPROVERS})), subscription(ENDPOINT_B, frozenset({APPROVERS}))
     )
     service = FakePushService({ENDPOINT_A: outcome})
     channel = PushChannel("push", store.unit_of_work, service)
     assert await channel.send(committed(1)) == outcome
-    assert service.pushed == [(ENDPOINT_A, 1)]
+    assert service.pushed == [(ENDPOINT_A, 1), (ENDPOINT_B, 1)]
     assert set(store.subscriptions()) == {ENDPOINT_A, ENDPOINT_B}
 
 
-async def test_a_web_push_retry_pauses_the_whole_channel_and_resends_to_every_subscription() -> None:
+async def test_a_rejecting_subscription_loses_only_its_own_notice(caplog: pytest.LogCaptureFixture) -> None:
     store = await push_store(
         subscription(ENDPOINT_A, frozenset({APPROVERS})), subscription(ENDPOINT_B, frozenset({APPROVERS}))
     )
-    service = FakePushService({ENDPOINT_B: Retry("http 429")})
+    service = FakePushService({ENDPOINT_A: Rejected("http 400")})
+    channels, feed = FakeChannels(), MemoryFeed()
+    channels.add(committed(1), committed(2, EventKind.APPROVED))
+    with caplog.at_level(logging.ERROR):
+        async with running(loop(channels, PushChannel(CHANNEL, store.unit_of_work, service), feed)):
+            await until(lambda: cursor(channels).last_event_id == 2)
+    assert service.pushed == [(ENDPOINT_A, 1), (ENDPOINT_B, 1), (ENDPOINT_A, 2), (ENDPOINT_B, 2)]  # each once
+    assert channels.dead_letters == []  # the event is not dead-lettered for every subscriber
+    assert channels.pauses == []
+    assert any("http 400" in r.getMessage() and ENDPOINT_A not in r.getMessage() for r in caplog.records)
+
+
+async def test_a_web_push_retry_pauses_the_channel_and_resends_only_to_the_subscription_still_owed() -> None:
+    store = await push_store(
+        subscription(ENDPOINT_A, frozenset({APPROVERS})), subscription(ENDPOINT_B, frozenset({APPROVERS}))
+    )
+    service = FakePushService({ENDPOINT_A: Retry("http 429")})
     channels, feed = FakeChannels(), MemoryFeed()
     channels.add(committed(1))
     async with running(loop(channels, PushChannel(CHANNEL, store.unit_of_work, service), feed)):
         await until(lambda: len(service.pushed) == 2)
         assert cursor(channels).pause_reason == "http 429"
-        del service.outcomes[ENDPOINT_B]
+        del service.outcomes[ENDPOINT_A]
         await until(lambda: cursor(channels).last_event_id == 1)
-    assert service.pushed == [(ENDPOINT_A, 1), (ENDPOINT_B, 1), (ENDPOINT_A, 1), (ENDPOINT_B, 1)]
+    assert service.pushed == [(ENDPOINT_A, 1), (ENDPOINT_B, 1), (ENDPOINT_A, 1)]
+
+
+async def test_web_push_marks_progress_after_each_subscription() -> None:
+    store = await push_store(*(subscription(e, frozenset({APPROVERS})) for e in (ENDPOINT_A, ENDPOINT_B, ENDPOINT_C)))
+    ticks: list[int] = []
+    channel = PushChannel("push", store.unit_of_work, FakePushService())
+    assert await channel.send(committed(1), moved=lambda: ticks.append(1)) == Delivered()
+    assert len(ticks) == 3

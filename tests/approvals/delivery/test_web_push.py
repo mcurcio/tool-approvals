@@ -15,7 +15,7 @@ from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
 from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
 
 from tests.approvals.delivery.fakes import APPROVERS, DESK_URL, committed
-from tool_approvals.approvals.app.delivery import Delivered, Gone, Rejected, Retry, SendOutcome
+from tool_approvals.approvals.app.delivery import Delivered, Gone, Misconfigured, Rejected, Retry, SendOutcome
 from tool_approvals.approvals.domain.approval import EventKind
 from tool_approvals.approvals.domain.push import PushSubscription
 from tool_approvals.approvals.infra.channels.web_push import (
@@ -186,9 +186,11 @@ async def test_an_endpoint_outside_the_push_origins_is_never_contacted(endpoint:
         (429, Retry("http 429")),
         (502, Retry("http 502")),
         (400, Rejected("http 400")),
-        (401, Rejected("http 401")),
-        (403, Rejected("http 403")),
+        (401, Misconfigured("http 401")),
+        (403, Misconfigured("http 403")),
         (413, Rejected("http 413")),
+        (301, Misconfigured("http 301")),
+        (307, Misconfigured("http 307")),
     ],
 )
 def test_each_push_service_status_means_one_outcome(status: int, outcome: SendOutcome | Gone) -> None:

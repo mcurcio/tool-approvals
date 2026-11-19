@@ -44,6 +44,7 @@ def upgrade() -> None:
         ),
         sa.Column("paused_until", _TZ),
         sa.Column("pause_reason", sa.Text),
+        sa.Column("failing_since", _TZ),  # the first pause since the last success
         *_audit(),
     )
     op.create_table(

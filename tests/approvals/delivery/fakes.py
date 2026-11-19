@@ -6,7 +6,7 @@ Its lock is an asyncio.Lock per channel; `lose(channel)` makes the holder's next
 """
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -78,6 +78,7 @@ class Cursor:
     last_event_id: int = 0
     paused_until: datetime | None = None
     pause_reason: str | None = None
+    failing_since: datetime | None = None
 
 
 @dataclass
@@ -135,7 +136,7 @@ class _FakeLog:
     async def position(self) -> ChannelPosition:
         self.channels.check(self.holding)
         cursor = self._cursor
-        return ChannelPosition(cursor.last_event_id, cursor.paused_until, self.channels.now())
+        return ChannelPosition(cursor.last_event_id, cursor.paused_until, self.channels.now(), cursor.failing_since)
 
     async def events_after(self, after: int, limit: int) -> list[CommittedEvent]:
         self.channels.check(self.holding)
@@ -145,7 +146,7 @@ class _FakeLog:
         self.channels.check(self.holding)
         cursor = self._cursor
         cursor.last_event_id = max(cursor.last_event_id, event_id)
-        cursor.paused_until = cursor.pause_reason = None
+        cursor.paused_until = cursor.pause_reason = cursor.failing_since = None
 
     async def skip(self, event_id: int) -> None:
         self.channels.check(self.holding)
@@ -160,7 +161,9 @@ class _FakeLog:
     async def pause(self, until: timedelta, reason: str) -> None:
         self.channels.check(self.holding)
         self.channels.pauses.append(until)
-        self._cursor.paused_until = self.channels.now() + until
+        now = self.channels.now()
+        self._cursor.paused_until = now + until
+        self._cursor.failing_since = self._cursor.failing_since or now
         self._cursor.pause_reason = reason
 
 
@@ -174,7 +177,7 @@ class ScriptedSender:
     sent: list[int] = field(default_factory=list)
     sent_any: asyncio.Event = field(default_factory=asyncio.Event)
 
-    async def send(self, event: CommittedEvent) -> SendOutcome:
+    async def send(self, event: CommittedEvent, *, moved: Callable[[], None] | None = None) -> SendOutcome:
         self.sent.append(event.id)
         self.sent_any.set()
         return self.script.pop(0) if self.script else Delivered()

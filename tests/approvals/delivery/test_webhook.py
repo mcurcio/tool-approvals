@@ -54,7 +54,10 @@ def test_a_secret_that_is_not_whsec_and_base64_is_refused(secret: str) -> None:
         (400, Rejected("http 400")),
         (409, Rejected("http 409")),
         (422, Rejected("http 422")),
-        (301, Rejected("http 301")),
+        (101, Misconfigured("http 101")),
+        (301, Misconfigured("http 301")),
+        (302, Misconfigured("http 302")),
+        (308, Misconfigured("http 308")),
     ],
 )
 def test_each_status_means_one_outcome(status: int, outcome: SendOutcome) -> None:

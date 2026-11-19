@@ -211,6 +211,7 @@ channel_cursors: Final = Table(  # one per channel; written only through the cha
     Column("last_event_id", BigInteger, nullable=False, server_default="0"),
     Column("paused_until", TZ),
     Column("pause_reason", Text),
+    Column("failing_since", TZ),  # the first pause since the last success: the give-up horizon counts from it
     *audit_columns(),
 )
 

@@ -324,7 +324,7 @@ approvals: # `approvals migrate` reads only approvals.database
     form_key: { file: /run/secrets/desk-form-key } # at least 32 bytes, separate from the session key
   delivery:
     attempt_timeout: 5s # default; one webhook or push attempt
-    give_up_after: 24h # default; a paused channel dead-letters an event older than this (retention is at least it)
+    give_up_after: 24h # default; a channel failing longer than this dead-letters events older than it (retention is at least it)
 ```
 
 | Key | Meaning |
@@ -343,7 +343,7 @@ approvals: # `approvals migrate` reads only approvals.database
 | `desk.surface` | The native surface the desk answers as |
 | `desk.public_url` | The desk's external HTTPS address; the sign-in callback is `<public_url>/callback` |
 | `delivery.attempt_timeout` | One webhook or Web Push attempt; past it the channel pauses with backoff. Default `5s` |
-| `delivery.give_up_after` | While a channel is paused, an event older than this is dead-lettered and delivery moves on. Default `24h`; `retention` must be at least it when any channel is configured |
+| `delivery.give_up_after` | Once a channel has been failing (paused since its last 2xx) for longer than this, an event older than this is dead-lettered and delivery moves on. Default `24h`; `retention` must be at least it when any channel is configured |
 | `desk.session_key`, `desk.form_key` | Two separate secrets of at least 32 bytes (refused if they are equal), the same on every replica. The session key signs the sign-in cookie, so whoever holds it can mint a qualifying session: guard it as answer authority |
 
 ## `channels`: where Approvals sends events

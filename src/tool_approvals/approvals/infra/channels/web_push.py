@@ -7,8 +7,9 @@ give-up horizon in seconds, `Topic` = the ticket (a later notice for the same Ap
 one), `Urgency` = high for approval.waiting, normal otherwise. The VAPID JWT's `aud` is the endpoint's origin and
 its `sub` the configured subject.
 
-Status → outcome: 2xx delivered; 404 and 410 gone (the subscription is deleted); 429 and 5xx retry (the whole
-channel pauses); any other status rejected (the event is dead-lettered for the channel). A timeout (the attempt
+Status → outcome: 2xx delivered; 404 and 410 gone (the subscription is deleted); 429 and 5xx retry; 401 and 403
+misconfigured (the VAPID key or subject is refused), and so is any status that is neither 2xx, 4xx nor 5xx (1xx,
+3xx: redirects are not followed); any other 4xx rejected for that subscription. A timeout (the attempt
 timeout, end to end) or a connection error is retry. The endpoint's origin is checked against the push origins
 again at every send: an endpoint outside them is never contacted.
 """
@@ -28,13 +29,14 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from py_vapid import Vapid02
 
-from tool_approvals.approvals.app.delivery import Delivered, Gone, Rejected, Retry, SendOutcome
+from tool_approvals.approvals.app.delivery import Delivered, Gone, Misconfigured, Rejected, Retry, SendOutcome
 from tool_approvals.approvals.app.ports import CommittedEvent
 from tool_approvals.approvals.app.records import Audience, EventType, event_type
 from tool_approvals.approvals.domain.push import PushSubscription
 from tool_approvals.contract_mapping.events import cloudevent
 
 GONE_STATUSES: Final = frozenset({404, 410})
+MISCONFIGURED_STATUSES: Final = frozenset({401, 403})  # the push service refuses the VAPID authorisation
 TOO_MANY_REQUESTS: Final = 429
 VAPID_LIFETIME: Final = timedelta(hours=12)  # a VAPID JWT's exp; RFC 8292 allows at most 24 hours
 CONTENT_ENCODING: Final = "aes128gcm"
@@ -91,6 +93,8 @@ def outcome_of(status: int) -> SendOutcome | Gone:
     reason = f"http {status}"
     if status == TOO_MANY_REQUESTS or status >= 500:
         return Retry(reason)
+    if status in MISCONFIGURED_STATUSES or not 400 <= status < 500:
+        return Misconfigured(reason)
     return Rejected(reason)
 
 

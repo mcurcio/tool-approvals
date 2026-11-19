@@ -5,8 +5,9 @@ Headers: `webhook-id` = the event id (the same on every retry, so a receiver ded
 `v1,<base64 HMAC-SHA256(key, "<id>.<timestamp>.<body>")>`, where the key is the base64 after `whsec_` in the
 channel's signing secret. Implemented here (no Standard Webhooks library).
 
-Status → outcome: 2xx delivered; 401, 403, 404 misconfigured; 429 and 5xx retry; any other status rejected. A
-timeout (the attempt timeout, end to end) or a connection error is retry.
+Status → outcome: 2xx delivered; 401, 403, 404 misconfigured; 429 and 5xx retry; any other 4xx rejected; any
+other status (1xx, 3xx: redirects are not followed, so a moved URL or a login page) misconfigured. A timeout (the
+attempt timeout, end to end) or a connection error is retry.
 """
 
 import asyncio
@@ -60,7 +61,9 @@ def outcome_of(status: int) -> SendOutcome:
         return Misconfigured(reason)
     if status == TOO_MANY_REQUESTS or status >= 500:
         return Retry(reason)
-    return Rejected(reason)
+    if 400 <= status < 500:
+        return Rejected(reason)
+    return Misconfigured(reason)  # 1xx, 3xx: the channel's URL is wrong (redirects are not followed)
 
 
 class WebhookSender:
@@ -89,7 +92,7 @@ class WebhookSender:
     def audience(self) -> Audience:
         return self._audience
 
-    async def send(self, event: CommittedEvent) -> SendOutcome:
+    async def send(self, event: CommittedEvent, *, moved: Callable[[], None] | None = None) -> SendOutcome:
         kind = event_type(self._audience, event.kind)
         if kind is None:  # pragma: no cover - the delivery loop never sends what the channel is not sent
             raise ValueError(f"a {self._audience} channel is not sent {event.kind}")

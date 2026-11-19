@@ -176,6 +176,7 @@ class ChannelPosition:
     last_event_id: int  # the last event delivered or dead-lettered; 0 for a new channel
     paused_until: datetime | None  # set while the channel is paused (it stays set past the moment, until a success)
     now: datetime  # the database's clock_timestamp() at the read
+    failing_since: datetime | None  # the first pause since the last success; None while not failing
 
 
 class ChannelLog(Protocol):
@@ -188,7 +189,7 @@ class ChannelLog(Protocol):
     async def events_after(self, after: int, limit: int) -> list[CommittedEvent]: ...
 
     async def advance(self, event_id: int) -> None:
-        """The cursor to at least `event_id` (never lower: GREATEST), the pause cleared."""
+        """The cursor to at least `event_id` (never lower: GREATEST), the pause and `failing_since` cleared."""
         ...
 
     async def skip(self, event_id: int) -> None:
@@ -201,7 +202,8 @@ class ChannelLog(Protocol):
         ...
 
     async def pause(self, until: timedelta, reason: str) -> None:
-        """Pause the channel for `until` from the database's now, with `reason`; the cursor kept."""
+        """Pause the channel for `until` from the database's now, with `reason`; the cursor kept; `failing_since`
+        set to now unless already set."""
         ...
 
 
