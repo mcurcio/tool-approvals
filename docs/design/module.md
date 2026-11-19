@@ -91,6 +91,7 @@ standard library's network, process and database modules):
 | C8 | `requests_client` is importable only by `gate.main` and `wait.main` | protected |
 | C9 | `gate.core` and `gate.policy` import no `gate.mappings`, no `contract.agentgateway` and no Envoy types (`envoy`, `xds`, `udpa`, `validate`): each gateway is an optional adapter at the edge, reaching the core only through the gateway port | forbidden |
 | C10 | The adapters `gate.mappings.check_api`, `ext_mcp` and `ext_authz` import none of each other; only `ext_authz` imports Envoy's types and only `ext_mcp` imports `contract.agentgateway` (the shared `attributes`, `errors` and `grants` import neither) | independence, forbidden |
+| C11 | The channel adapters `approvals.infra.channels.webhook` and `web_push` import none of each other, and only `approvals.main` imports `approvals.infra.channels` | independence, protected |
 
 `pyproject.toml` holds the exact contracts.
 

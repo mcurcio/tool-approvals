@@ -386,6 +386,23 @@ source_modules = [
 forbidden_modules = ["tool_approvals.contract.agentgateway"]
 
 [[tool.importlinter.contracts]]
+id = "C11-independent"
+name = "the channel adapters import none of each other"
+type = "independence"
+# Each channel is a drop-in adapter behind approvals.app.delivery's ChannelSender or PushService ports.
+modules = [
+    "tool_approvals.approvals.infra.channels.web_push",
+    "tool_approvals.approvals.infra.channels.webhook",
+]
+
+[[tool.importlinter.contracts]]
+id = "C11-protected"
+name = "only approvals.main (the composition root) reaches the channel adapters"
+type = "protected"
+protected_modules = ["tool_approvals.approvals.infra.channels"]
+allowed_importers = ["tool_approvals.approvals.main"]
+
+[[tool.importlinter.contracts]]
 id = "C8"
 name = "only the gate and wait composition roots reach the requests client"
 type = "protected"
