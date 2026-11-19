@@ -34,6 +34,7 @@ async def test_envoy(tmp_path: Path) -> None:
         await cases.case_11_envoy_checks_tools_call_alone(st, gateway)
         await cases.case_12_gateway_attributes_reach_policy(st, gateway)
         await cases.case_13_agent_credentials_never_reach_the_gate(st, gateway)
+        await cases.case_15_a_wait_task_is_read_only_by_the_agent_that_opened_it(st, gateway)
         await cases.case_10_no_principal_is_refused(st, gateway)
         await cases.case_9_gate_slower_than_the_hook_timeout_refuses(st, gateway)
         await cases.case_8_gate_stopped_refuses(st, gateway)

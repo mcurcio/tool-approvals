@@ -9,6 +9,13 @@ once it has verified it; the filter holds whatever the route's authentication is
 which is what lets conformance case 13 see it work. The wait target gets a request timeout above the wait server's
 max_hold: on the 2026-07-28 protocol the wait server sends nothing until a hold ends, and agentgateway answers a call
 that outlives the request timeout with HTTP 500 and JSON-RPC -32603 "failed to send message" (measured on v1.7.0).
+
+The principal header (`wait_route.principal_header`) carries the attested principal on every message of the wait
+route and on no other route's. The guardrail sees tools/call alone, so it cannot write the header on the wait
+route's tasks/get: the wait target's own request transformation sets it, from the same CEL expression the
+guardrail's principal comes from, on every message agentgateway sends that target (a set replaces every copy the
+client sent; a failed expression removes the header, so the wait server refuses). The route removes it from
+every request first, so no other target sees a copy the client sent, tools/call or not.
 """
 
 from collections.abc import Mapping
@@ -25,6 +32,7 @@ READINESS_PORT: Final = 15021
 READINESS_PATH: Final = "/healthz/ready"
 MCP_PATH: Final = "/mcp"
 HIDDEN_FROM_GUARDRAIL: Final = ("authorization", "cookie")  # request headers the gate's processor is never sent
+PRINCIPAL: Final = "jwt.sub"  # the CEL expression for the attested principal, the guardrail's and the wait target's
 
 
 def tool_name(server: str, tool: str) -> str:
@@ -45,7 +53,7 @@ def guardrail_processor(hook: Hook, principal_key: str, attributes: Mapping[str,
         "host": f"{hook.host}:{hook.port}",
         "policies": {"backendTLS": {"root": hook.ca_file, "hostname": hook.host}, "backendAuth": {"key": hook.bearer}},
         "failureMode": "failClosed",
-        "metadata": {principal_key: "jwt.sub", **attributes},
+        "metadata": {principal_key: PRINCIPAL, **attributes},
         "requestHeaders": {"disallowed": list(HIDDEN_FROM_GUARDRAIL)},
     }
 
@@ -70,6 +78,7 @@ def config(
                     "backendTLS": {"root": wait.ca_file},
                     "backendAuth": {"key": wait.bearer},
                     "http": {"requestTimeout": _seconds(wait.request_timeout)},
+                    "transformations": {"request": {"set": {wait.principal_header: PRINCIPAL}}},
                 },
             }
         )
@@ -85,6 +94,9 @@ def config(
         hook, principal_key, attributes = guardrail
         # The gate's processor is the last one: any other processor goes before it.
         policies["mcpGuardrails"] = {"processors": [guardrail_processor(hook, principal_key, attributes)]}
+    if wait is not None:
+        # No target sees a principal header the client sent; the wait target's transformation writes the attested.
+        policies["transformations"] = {"request": {"remove": [wait.principal_header]}}
     route = {
         "name": "mcp",
         "matches": [{"path": {"exact": MCP_PATH}}],

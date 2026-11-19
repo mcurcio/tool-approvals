@@ -38,6 +38,10 @@ class HttpMcpGateway:
         self._agents = agents
         self._echo = echo
 
+    def tool_of(self, server: str, tool: str) -> str:
+        """`tool` on `server` as agents see it through this gateway."""
+        return self._tool_of(server, tool)
+
     async def call(  # noqa: PLR0913 (the frozen page's signature)
         self,
         principal: str,

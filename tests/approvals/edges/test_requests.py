@@ -51,8 +51,8 @@ async def _wait(edge: Edge, ticket: Ticket, principal: Principal = AGENT) -> Wai
     return opened(await edge.waiter.open_wait(principal, ticket, None))
 
 
-async def _reports(client: RequestsClient, wait: WaitId) -> list[WaitReport]:
-    return [report async for report in client.await_outcome(wait)]
+async def _reports(client: RequestsClient, wait: WaitId, principal: Principal = AGENT) -> list[WaitReport]:
+    return [report async for report in client.await_outcome(wait, principal)]
 
 
 def _code(failure: pytest.ExceptionInfo[RequestsUnavailable]) -> grpc.StatusCode:
@@ -106,7 +106,7 @@ async def test_open_wait_answers_every_kind(edge: Edge) -> None:
 async def test_await_outcome_follows_a_wait_to_the_answer(edge: Edge) -> None:
     ticket = await _ticket(edge)
     wait = await _wait(edge, ticket)
-    stream = edge.waiter.await_outcome(wait)
+    stream = edge.waiter.await_outcome(wait, AGENT)
     waiting = await anext(stream)
     assert waiting.state is WaitState.WAITING
     assert waiting.opened_at is not None
@@ -149,6 +149,19 @@ async def test_await_outcome_reports_every_terminal_kind(edge: Edge) -> None:
         assert report == WaitReport(WaitState.UNKNOWN_WAIT, None, None, None, None)
 
 
+async def test_await_outcome_answers_another_principal_as_an_unknown_wait(edge: Edge) -> None:
+    """A wait is its opener's: for another principal, an empty one or one Postgres
+    cannot hold, the answer is the one an id never issued gets, on the real store over the wire."""
+    ticket = await _ticket(edge)
+    wait = await _wait(edge, ticket)
+    await edge.world.answer(ticket, Verdict.APPROVE)
+    (unknown,) = await _reports(edge.waiter, WaitId("bm8tc3VjaC13YWl0"))
+    assert unknown == WaitReport(WaitState.UNKNOWN_WAIT, None, None, None, None)
+    for stranger in (OTHER_AGENT, Principal(""), Principal("agent-1\x00")):
+        assert await _reports(edge.waiter, wait, stranger) == [unknown], stranger
+    assert [r.state for r in await _reports(edge.waiter, wait)] == [WaitState.APPROVED]
+
+
 async def test_every_change_names_the_registry_caller(edge: Edge) -> None:
     ticket = await _ticket(edge)
     assert (await edge.world.row(ticket))["created_by"] == f"principal:{AGENT} via {HOOK}"
@@ -174,7 +187,7 @@ async def test_registry_auth_guards_every_method(edge: Edge) -> None:
             await refused
         assert _code(denied) is grpc.StatusCode.PERMISSION_DENIED
     with pytest.raises(RequestsUnavailable) as stream:
-        await anext(edge.hook.await_outcome(WaitId("bm8tc3VjaC13YWl0")))
+        await anext(edge.hook.await_outcome(WaitId("bm8tc3VjaC13YWl0"), AGENT))
     assert _code(stream) is grpc.StatusCode.PERMISSION_DENIED
 
 

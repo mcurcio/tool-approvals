@@ -141,7 +141,8 @@ ROWS: Final = (
     ),
     # Refused as the notification it is: HTTP 400, no id (a body with no readable message keeps 200 and id null).
     Row("lookalike-notification", _notification("Tools/call"), Deny(MALFORMED, b"", notification=True)),
-    # The wait server's route is classified as any route's: the checker passes its tools/call (CheckCore.check).
+    # The wait server's route is classified as any route's: the checker passes its tools/call (CheckCore.check),
+    # and every message passed on there carries the attested principal too (CheckCore.unchecked).
     Row("wait-server", tools_call(FREE), ToCheck(FREE, b"7"), server=ROUTE.server),
     Row("wait-server-pass-method", _rpc("tools/list"), PassOn(), server=ROUTE.server),
     Row("wait-server-tasks", _rpc("tasks/get", b'"t-1"'), PassOn(), server=ROUTE.server),
@@ -160,8 +161,9 @@ async def test_the_servicer_answers_each_row(gate: Gate, row: Row) -> None:
     headers = {"x-envoy-auth-partial-body": "true"} if row.partial else None
     request = authz_request(row.body, method=row.method, server=row.server, headers=headers)
     response = await ext_authz(gate, request)
-    if isinstance(row.expected, ToCheck) and row.server == ROUTE.server:
-        assert_allowed(response, attested=PRINCIPAL)  # the wait route: the attested principal, no policy
+    if not isinstance(row.expected, Deny) and row.server == ROUTE.server:
+        # The wait route: every message, checked or passed on, carries the attested principal; no policy.
+        assert_allowed(response, attested=PRINCIPAL)
         return
     if not isinstance(row.expected, Deny):
         assert_allowed(response)  # ToCheck rows carry FREE, which the policy passes without Approvals
@@ -181,6 +183,26 @@ async def test_the_wait_route_overwrites_a_client_principal_header_without_polic
     for params in (GATED, b'{"name":"approval_wait","arguments":{},"task":{}}'):
         request = authz_request(tools_call(params), server=ROUTE.server, headers={ROUTE.principal_header: "forged"})
         assert_allowed(await ext_authz(gate, request), attested=PRINCIPAL)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        _rpc("tasks/get", b'"t-1"'),
+        _rpc("tools/list"),
+        _rpc("initialize"),
+        _notification("notifications/initialized"),
+        b'{"jsonrpc":"2.0","id":9,"result":{}}',
+    ],
+    ids=["tasks/get", "tools/list", "initialize", "a notification", "a client response"],
+)
+async def test_every_message_on_the_wait_route_carries_the_attested_principal(gate: Gate, body: bytes) -> None:
+    """The wait server binds each wait to its opener, so it must know who sends
+    every message on its route, not only the tools/call; a client's copy naming another agent is overwritten."""
+    request = authz_request(body, server=ROUTE.server, headers={ROUTE.principal_header: "another-agent"})
+    assert_allowed(await ext_authz(gate, request), attested=PRINCIPAL)
+    elsewhere = authz_request(body, headers={ROUTE.principal_header: "another-agent"})
+    assert_allowed(await ext_authz(gate, elsewhere))  # any other route: removed
 
 
 async def test_the_wait_route_replaces_every_client_copy_of_the_principal_header(gate: Gate) -> None:

@@ -6,12 +6,12 @@ from typing import Final
 from tool_approvals.approvals.app.attempts import attempt
 from tool_approvals.approvals.app.ports import ChangeFeed, UnitOfWork, UnitOfWorkFactory
 from tool_approvals.approvals.app.rules import Rules
-from tool_approvals.approvals.domain.approval import DEADLINE_ACTOR, Actor, ActorKind, Approval
+from tool_approvals.approvals.domain.approval import DEADLINE_ACTOR, Actor, ActorKind, Approval, Wait
 from tool_approvals.kernel.names import CallerName, Principal, Ticket, WaitId, wait_id_hash
 from tool_approvals.kernel.requests import OpenWaitResult, TicketError, TooManyWaits, WaitReport, WaitState
 from tool_approvals.kernel.words import AgentWords
 
-# Following a wait only reads, so it stamps nothing; a wait is authorised by its id, not by a principal.
+# Following a wait only reads, so it stamps nothing; who may follow it is the wait's own principal (`_wait_of`).
 _FOLLOWER: Final = Actor(ActorKind.PRINCIPAL, None, None)
 _UNKNOWN_WAIT: Final = WaitReport(WaitState.UNKNOWN_WAIT, comment=None, opened_at=None, updated_at=None, ttl=None)
 
@@ -53,39 +53,46 @@ class WaitService:
 
         return await attempt(self._uow, by, work)
 
-    async def await_outcome(self, wait: WaitId) -> AsyncIterator[WaitReport]:
+    async def await_outcome(self, wait: WaitId, principal: Principal) -> AsyncIterator[WaitReport]:
         """The current report first, then one per change to the Approval, ending after a terminal one; a single
-        UNKNOWN_WAIT report for an id it does not hold. Subscribes to the feed before the first read, so no
-        commit falls between them."""
+        UNKNOWN_WAIT report for an id it does not hold, or for a wait `principal` did not open: to anyone but its
+        opener a wait does not exist, and the two answers are the same (no oracle for whose a wait is).
+        Subscribes to the feed before the first read, so no commit falls between them."""
         id_hash = wait_id_hash(wait)
-        ticket = await self._ticket_of(id_hash)  # only to know what to watch; the first report is read after it
+        ticket = await self._ticket_of(id_hash, principal)  # only to know what to watch; the report is read after
         if ticket is None:
             yield _UNKNOWN_WAIT
             return
         async with self._feed.watch(ticket) as changes:
-            report = await self._report(id_hash)
+            report = await self._report(id_hash, principal)
             yield report
             if report.state is not WaitState.WAITING:
                 return
             async for _ in changes:
-                report = await self._report(id_hash)
+                report = await self._report(id_hash, principal)
                 yield report
                 if report.state is not WaitState.WAITING:
                     return
         # The feed was lost: the stream ends without a terminal report and the caller asks again.
 
-    async def _ticket_of(self, id_hash: bytes) -> Ticket | None:
+    async def _ticket_of(self, id_hash: bytes, principal: Principal) -> Ticket | None:
         async with self._uow(_FOLLOWER) as unit:
             approval = await unit.approvals.by_wait(id_hash)
-            return None if approval is None else approval.ticket
+            return None if approval is None or _wait_of(approval, id_hash, principal) is None else approval.ticket
 
-    async def _report(self, id_hash: bytes) -> WaitReport:
+    async def _report(self, id_hash: bytes, principal: Principal) -> WaitReport:
         async with self._uow(_FOLLOWER) as unit:
             approval = await unit.approvals.by_wait(id_hash)
-            if approval is None:
-                return _UNKNOWN_WAIT  # deleted at the end of its retention
-            wait = next(wait for wait in approval.waits if wait.id_hash == id_hash)
+            wait = None if approval is None else _wait_of(approval, id_hash, principal)
+            if approval is None or wait is None:
+                return _UNKNOWN_WAIT  # deleted at the end of its retention, or not this principal's
             return approval.report(wait, unit.now)
+
+
+def _wait_of(approval: Approval, id_hash: bytes, principal: Principal) -> Wait | None:
+    """The approval's wait with `id_hash` when `principal` opened it; None for anyone else, as for no wait."""
+    wait = next(wait for wait in approval.waits if wait.id_hash == id_hash)
+    return wait if wait.principal == principal else None
 
 
 def _live_waits(approval: Approval) -> int:

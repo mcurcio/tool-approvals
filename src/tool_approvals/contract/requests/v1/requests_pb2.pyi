@@ -271,15 +271,19 @@ class AwaitOutcomeRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
     WAIT_ID_FIELD_NUMBER: _builtins.int
+    PRINCIPAL_FIELD_NUMBER: _builtins.int
     wait_id: _builtins.str
+    principal: _builtins.str
+    """The principal the gateway attested on the request that reads the wait (the wait route's principal header)."""
     def __init__(
         self,
         *,
         wait_id: _builtins.str = ...,
+        principal: _builtins.str = ...,
     ) -> None: ...
     _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["wait_id", b"wait_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["principal", b"principal", "wait_id", b"wait_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
     def WhichOneof(self, oneof_group: _Never) -> None: ...
 

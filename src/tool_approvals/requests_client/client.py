@@ -97,13 +97,13 @@ class RequestsClient:
         except (grpc.aio.AioRpcError, UnknownReply) as failed:
             raise RequestsUnavailable(f"open_wait: {_why(failed)}") from failed
 
-    async def await_outcome(self, wait: WaitId) -> AsyncIterator[WaitReport]:
-        """The wait's reports, current first, ending after a terminal one. A dropped stream is re-subscribed (the
-        first report of the new stream is the current one, so nothing is missed); RequestsUnavailable when it
-        cannot be."""
+    async def await_outcome(self, wait: WaitId, principal: Principal) -> AsyncIterator[WaitReport]:
+        """The wait's reports as `principal` may read them (UNKNOWN_WAIT for a wait it did not open), current
+        first, ending after a terminal one. A dropped stream is re-subscribed (the first report of the new stream
+        is the current one, so nothing is missed); RequestsUnavailable when it cannot be."""
         while True:
             delivered = False
-            stream = self._stub.AwaitOutcome(requests_pb2.AwaitOutcomeRequest(wait_id=wait))
+            stream = self._stub.AwaitOutcome(requests_pb2.AwaitOutcomeRequest(wait_id=wait, principal=principal))
             try:
                 async for message in stream:
                     report = wait_report(message)

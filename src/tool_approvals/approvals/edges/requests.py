@@ -101,11 +101,12 @@ class RequestsServicer(requests_pb2_grpc.ApprovalRequestsServiceServicer):
         request: requests_pb2.AwaitOutcomeRequest,
         context: grpc.aio.ServicerContext[requests_pb2.AwaitOutcomeRequest, requests_pb2.AwaitOutcomeResponse],
     ) -> AsyncIterator[requests_pb2.AwaitOutcomeResponse]:
-        if not is_wait_id(request.wait_id):
-            yield await_outcome_response(_UNKNOWN_WAIT)  # names no wait: never reaches the store
+        if not is_wait_id(request.wait_id) or not request.principal or _NUL in request.principal:
+            # Names no wait, or no principal one could have opened (none holds a ticket): never reaches the store.
+            yield await_outcome_response(_UNKNOWN_WAIT)
             return
         try:
-            async for report in self._waits.await_outcome(WaitId(request.wait_id)):
+            async for report in self._waits.await_outcome(WaitId(request.wait_id), Principal(request.principal)):
                 yield await_outcome_response(report)
         except StoreUnavailable as failed:
             await _unavailable(context, failed)

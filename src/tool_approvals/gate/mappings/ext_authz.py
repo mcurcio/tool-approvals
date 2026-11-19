@@ -83,9 +83,10 @@ class ExtAuthzServicer(external_auth_pb2_grpc.AuthorizationServicer):  # type: i
     """Behind GrpcAuth. Translates Envoy's AttributeContext into HttpFacts and `classify`'s answer into a
     CheckResponse. The principal at `principal_path` in the dynamic metadata must be a non-empty string, else
     denied (unavailable). A ToCheck goes to the checker with only the attributes `view.attributes` maps (each from
-    the dynamic metadata or a context_extensions key) and the RPC's deadline. An OK on the wait route
-    (`Pass.attested`) sets `principal_header` to the attested principal, overwriting any copy the client sent; any
-    other OK removes `principal_header` (headers_to_remove), so no tool sees one a client sent. A denial is
+    the dynamic metadata or a context_extensions key) and the RPC's deadline; a PassOn takes the checker's
+    `unchecked` pass. An OK on the wait route (`Pass.attested`, on every message there: tools/call, tasks/get and
+    the rest) sets `principal_header` to the attested principal, overwriting any copy the client sent; any other OK
+    removes `principal_header` (headers_to_remove), so no tool sees one a client sent. A denial is
     HTTP 200 application/json {"jsonrpc": "2.0", "id": <id bytes>, "error": {"code", "message": agent_text,
     "data": {"verdict", "ticket"?}}}, code from mappings.errors; a refused notification (a message with a method
     and no id, whatever refused it: a checked tools/call or the core's message rule) is HTTP 400 with the same
@@ -111,7 +112,8 @@ class ExtAuthzServicer(external_auth_pb2_grpc.AuthorizationServicer):  # type: i
         facts = HttpFacts(method=http.method, partial_body=_partial(http), body=http.raw_body, server=server)
         match classify(facts):
             case PassOn():
-                return _allow(self._principal_header, None)
+                passed = self._checker.unchecked(Principal(principal), ServerName(server))
+                return _allow(self._principal_header, passed.attested)
             case Deny(verdict, id_json, notification):
                 return self._deny(verdict, id_json, notification=notification)
             case ToCheck(params, id_json):

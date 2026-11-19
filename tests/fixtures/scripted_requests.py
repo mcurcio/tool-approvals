@@ -39,7 +39,8 @@ class Script:
 
     An AwaitOutcome stream sends the wait's reports front first and ends after a terminal one. It is dropped
     (UNAVAILABLE) when the list runs out before a terminal report, and after its first report while `drops`
-    counts streams of that wait still to drop. A method whose list is empty answers INTERNAL.
+    counts streams of that wait still to drop. A wait named in `owners` is followed only by its owner: any other
+    principal's stream is one UNKNOWN_WAIT, as Approvals answers it. A method whose list is empty answers INTERNAL.
     """
 
     request: list[RequestResult] = field(default_factory=list)
@@ -49,6 +50,7 @@ class Script:
     delay: timedelta = timedelta(0)  # before every answer
     calls: list[tuple[str, object]] = field(default_factory=list)  # (method, the kernel-typed arguments)
     drops: dict[WaitId, int] = field(default_factory=dict)
+    owners: dict[WaitId, Principal] = field(default_factory=dict)
     # Each unary call's gRPC time remaining as it arrived (None: sent without a deadline), in order.
     deadlines: list[float | None] = field(default_factory=list)
 
@@ -111,7 +113,11 @@ class _Scripted(requests_pb2_grpc.ApprovalRequestsServiceServicer):
         self, request: requests_pb2.AwaitOutcomeRequest, context: _Context
     ) -> AsyncIterator[requests_pb2.AwaitOutcomeResponse]:
         wait = WaitId(request.wait_id)
-        self._script.calls.append(("await_outcome", wait))
+        principal = Principal(request.principal)
+        self._script.calls.append(("await_outcome", (wait, principal)))
+        if self._script.owners.get(wait, principal) != principal:
+            yield await_outcome_response(WaitReport(WaitState.UNKNOWN_WAIT, None, None, None, None))
+            return
         reports = self._script.reports.setdefault(wait, [])
         drop_after_first = self._script.drops.get(wait, 0) > 0
         if drop_after_first:

@@ -1,5 +1,6 @@
 """The wait use case: hold a call open until the outcome, or open a Wait Task and report on it. It keeps no wait
-state of its own: Approvals holds every wait."""
+state of its own: Approvals holds every wait, bound to the principal that opened it, so every read names the
+attested principal and Approvals answers a wait of anyone else's as unknown."""
 
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
@@ -63,7 +64,7 @@ class WaitCore:
             opened = await _open(requests, principal, ticket, words)
             if isinstance(opened, _OpenRefused):
                 return opened
-            async with _subscribed(requests.await_outcome(opened)) as reports:
+            async with _subscribed(requests.await_outcome(opened, principal)) as reports:
                 async for report in reports:
                     if report.state is not WaitState.WAITING:
                         return Held(report)
@@ -88,7 +89,7 @@ class WaitCore:
             opened = await _open(requests, principal, ticket, words)
             if isinstance(opened, _OpenRefused):
                 return opened
-            report = await _first(requests, opened)
+            report = await _first(requests, opened, principal)
             return TaskOpened(opened, report) if report.state is WaitState.WAITING else Held(report)
 
         try:
@@ -99,14 +100,15 @@ class WaitCore:
             return Held(_CUT_SHORT)
         return outcome
 
-    async def task_report(self, wait: WaitId) -> WaitReport | WaitUnavailable:
-        """The wait's current report (its stream's first)."""
+    async def task_report(self, wait: WaitId, principal: Principal) -> WaitReport | WaitUnavailable:
+        """The wait's current report (its stream's first) as `principal` may read it: UNKNOWN_WAIT for a wait it
+        did not open."""
         requests = self._requests
         if requests is None:
             return WaitUnavailable()
 
         async def current() -> WaitReport:
-            return await _first(requests, wait)
+            return await _first(requests, wait, principal)
 
         try:
             outcome = await self._timeouts.run(self._max_hold, current, self._stopping)
@@ -127,9 +129,9 @@ async def _open(
     return await requests.open_wait(principal, ticket, words)
 
 
-async def _first(requests: WaitRequests, wait: WaitId) -> WaitReport:
-    """The wait's current report: the first on its stream, which is closed after it."""
-    async with _subscribed(requests.await_outcome(wait)) as reports:
+async def _first(requests: WaitRequests, wait: WaitId, principal: Principal) -> WaitReport:
+    """The wait's current report for `principal`: the first on its stream, which is closed after it."""
+    async with _subscribed(requests.await_outcome(wait, principal)) as reports:
         async for report in reports:
             return report
     raise RequestsUnavailable("the wait's stream ended without a report")

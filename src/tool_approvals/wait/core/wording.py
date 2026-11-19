@@ -44,6 +44,10 @@ _WORDS_ERRORS: Final = {
 NO_PRINCIPAL: Final = (
     "The gateway did not say who is calling, so no wait was opened. Calling again unchanged fails too."
 )
+# The same for a task read: no wait is read for a caller no gateway named.
+NO_PRINCIPAL_TASK: Final = (
+    "The gateway did not say who is asking, so no task was read. Asking again unchanged fails too."
+)
 
 
 def next_step(report: WaitReport) -> str:

@@ -6,9 +6,11 @@ and a client's response to a server's request. A body that is not one well-forme
 
 `tasks/*` needs no check of its own: every checked `tools/call` that asks to run as a task is refused
 (`kernel.calls.parse_call`, TASK_REQUESTED), so no task follows a call the gate let through, and a Wait Task is
-authorised by its id at the wait server. How each gateway meets the rule: agentgateway sends its hook `tools/call`
-alone and forwards every other method itself; the Envoy adapter hands each body to `classify_message`; a Check API
-caller asks about the `tools/call` it would forward and forwards the rest itself.
+read only by the principal that opened it, at the wait server. So on the wait route every message, passed on or
+checked, carries the attested principal (`CheckCore.unchecked`, `Pass.attested`). How each gateway meets the rule:
+agentgateway sends its hook `tools/call` alone and forwards every other method itself, its wait target writing the
+principal header on each; the Envoy adapter hands each body to `classify_message`; a Check API caller asks about the
+`tools/call` it would forward, forwards the rest itself, and sets the principal header on all of the wait route's.
 
 A method that is not `tools/call` but reads as it (`lookalike_tools_call`: another case, whitespace, a fullwidth or
 other confusable slash) is refused, not passed: a server or gateway that normalises method names could run it as a

@@ -10,6 +10,7 @@ from mcp.shared.exceptions import MCPError
 from mcp_types import (
     INTERNAL_ERROR,
     INVALID_PARAMS,
+    INVALID_REQUEST,
     MISSING_REQUIRED_CLIENT_CAPABILITY,
     CallToolRequestParams,
     CallToolResult,
@@ -21,8 +22,8 @@ from tool_approvals.kernel.calls import TASKS_EXTENSION, declares_tasks
 from tool_approvals.kernel.names import WaitId, is_wait_id
 from tool_approvals.kernel.requests import WaitReport, WaitState
 from tool_approvals.wait.core.hold import Held, TaskOpened, WaitCore, WaitUnavailable
-from tool_approvals.wait.core.wording import refusal
-from tool_approvals.wait.mcp.calls import refused_result, report_result, wait_call
+from tool_approvals.wait.core.wording import NO_PRINCIPAL_TASK, refusal
+from tool_approvals.wait.mcp.calls import principal_of, refused_result, report_result, wait_call
 
 # The protocol revision whose per-request capabilities carry the Tasks declaration; tasks are served on it only.
 TASKS_PROTOCOL: Final = "2026-07-28"
@@ -30,7 +31,8 @@ _TASK_NOT_FOUND: Final = "Failed to retrieve task: Task not found"  # SEP-2663's
 
 
 class TaskRef(RequestParams):
-    """tasks/get's params: the task id, which is the wait id (a 128-bit bearer, A4)."""
+    """tasks/get's params: the task id, which is the wait id (128 random bits, A4). It names the task; it does not
+    authorise reading it: only the principal that opened the wait may (`WaitTasks._get`)."""
 
     task_id: str
 
@@ -73,16 +75,23 @@ class WaitTasks(Extension):
                 return refused_result(refusal(opened))
 
     async def _get(self, ctx: ServerRequestContext[Any, Any], params: TaskRef) -> HandlerResult:
+        """tasks/get for the attested principal (`wait_route.principal_header`, which the gateway writes on every
+        message of the wait route): no principal → INVALID_REQUEST, whatever the id; a task that is not that
+        principal's → the same -32602 "Task not found" as an id never issued."""
         if not declares_tasks(ctx.meta):
             raise MCPError(
                 MISSING_REQUIRED_CLIENT_CAPABILITY,
                 "Missing required client capability",
                 {"requiredCapabilities": {"extensions": {TASKS_EXTENSION: {}}}},
             )
+        principal = principal_of(ctx, self._view.wait_route.principal_header)
+        if principal is None:
+            raise MCPError(INVALID_REQUEST, NO_PRINCIPAL_TASK)  # fail closed, whatever the id
         if not is_wait_id(params.task_id):
             raise MCPError(INVALID_PARAMS, _TASK_NOT_FOUND)
         wait = WaitId(params.task_id)
-        report = await self._core.task_report(wait)
+        # Another principal's wait reads UNKNOWN_WAIT, so it is answered exactly as an id never issued.
+        report = await self._core.task_report(wait, principal)
         if isinstance(report, WaitUnavailable):
             raise MCPError(INTERNAL_ERROR, "Approvals cannot be reached right now; poll again later")
         if report.state is WaitState.UNKNOWN_WAIT:

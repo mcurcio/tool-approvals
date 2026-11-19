@@ -18,6 +18,7 @@ SKIPPED = (
     cases.case_9_gate_slower_than_the_hook_timeout_refuses,
     cases.case_11_envoy_checks_tools_call_alone,
     cases.case_13_agent_credentials_never_reach_the_gate,
+    cases.case_15_a_wait_task_is_read_only_by_the_agent_that_opened_it,
 )
 
 

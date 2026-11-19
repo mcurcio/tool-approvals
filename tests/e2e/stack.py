@@ -280,7 +280,12 @@ def render(  # noqa: PLR0913 (every setting a case varies)
     hook_bearer = bearers["gateway-hook"]
     wait = (
         WaitTarget(
-            WAIT_SERVER, f"https://wait:{WAIT_MCP_PORT}/mcp", ca, bearers["gateway-wait-route"], wait_request_timeout
+            WAIT_SERVER,
+            f"https://wait:{WAIT_MCP_PORT}/mcp",
+            ca,
+            bearers["gateway-wait-route"],
+            wait_request_timeout,
+            PRINCIPAL_HEADER,
         )
         if guardrails
         else None

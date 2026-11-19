@@ -42,7 +42,7 @@ message CheckRequest {
   nothing after the gate may change them: the approval covers these bytes. In proto3 JSON, `bytes` are base64.
 - **Which messages to ask about:** a `tools/call` only, with or without an `id`. Forward every other well-formed
   JSON-RPC message unasked (any other method, `tasks/*` included, notifications, and the client's responses to the
-  server), and refuse a body that is not one JSON-RPC request or response (a batch, duplicate keys, trailing data),
+  server; on the wait route, with the principal header set: [the wait](#the-wait-through-your-gateway)), and refuse a body that is not one JSON-RPC request or response (a batch, duplicate keys, trailing data),
   a `notifications/*` method carrying an `id`, or a method that is not `tools/call` but reads as it (another case,
   padding, a fullwidth or other confusable slash: [Envoy](envoy.md#which-requests-pass) lists the comparison), since
   a server that normalises method names would run it as a call nobody checked. This is the rule the gate's own adapters apply
@@ -131,8 +131,15 @@ params and without asking policy or Approvals; the wait server reads its own cal
 still required. So a gateway using the Check API may ask about the wait route's calls like any other, and gets
 `pass`, or skip asking.
 
-What the first-party agentgateway and Envoy mappings do on a pass, a gateway using the Check API does itself: on
-the route named `wait_route.server`, set the header `wait_route.principal_header` to the principal it attested,
-replacing any copy the client sent, and authenticate to the wait server with a registry credential granted
-`wait.call` (a bearer, or a client certificate on a listener with `tls.client_ca`). On every other route, remove
-that header. The Check API's `pass` carries no header to set: the principal is the one the caller sent.
+What the first-party agentgateway and Envoy wiring does, a gateway using the Check API does itself: on the route
+named `wait_route.server`, set the header `wait_route.principal_header` to the principal it attested on **every**
+message it forwards there, the `tools/call` and every message it forwards unasked (`tasks/get`, `initialize`,
+notifications) alike, replacing any copy the client sent, and authenticate to the wait server with a registry
+credential granted `wait.call` (a bearer, or a client certificate on a listener with `tls.client_ca`). On every
+other route, remove that header, on every message. The Check API's `pass` carries no header to set: the principal
+is the one the caller sent, and the messages it forwards unasked never reach the gate at all.
+
+The wait server binds every wait to the principal that opened it: it reads a Wait Task only for the principal in
+that header, answers another principal's task exactly as an unknown one, and refuses a `tasks/get` that carries no
+principal. A gateway that writes the header on `tools/call` alone leaves its agents unable to read their own
+tasks; one that forwards a client's copy would let an agent read as another.

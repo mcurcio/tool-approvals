@@ -28,9 +28,11 @@ REPLY_RESERVE: Final = timedelta(milliseconds=250)
 
 @dataclass(frozen=True, slots=True)
 class Pass:
-    """Run the call. `attested`: on the wait server's route, the gateway's attested principal, which the adapter
-    forwards to the wait server in its principal header, replacing any copy the client sent; None on every other
-    route, where the adapter removes that header so no tool sees one a client sent."""
+    """Forward the message. `attested`: on the wait server's route, the gateway's attested principal, which the
+    adapter forwards to the wait server in its principal header on every message of that route (a checked
+    tools/call and every message passed unchecked alike), replacing any copy the client sent, so the wait server
+    knows who sends each one and binds every wait to its opener; None on every other route, where the adapter
+    removes that header so no tool sees one a client sent."""
 
     attested: Principal | None = None
 
@@ -55,6 +57,11 @@ class Checker(Protocol):
     concrete core. `params` are the exact JSON-RPC params bytes the gateway forwards."""
 
     async def check(self, context: GatewayContext, params: bytes) -> CheckVerdict: ...
+
+    def unchecked(self, principal: Principal, server: ServerName) -> Pass:
+        """The pass for a message the gate's message rule forwards without a check (`gate.core.messages.PassOn`):
+        attested on the wait route, as every message there is, else not."""
+        ...
 
 
 class CheckCore:
@@ -83,7 +90,7 @@ class CheckCore:
         the limit passing → Unavailable. The whole check runs within `budget`, or within the gateway's deadline
         less REPLY_RESERVE when that is sooner; no time left at all → Unavailable without asking policy or
         Approvals."""
-        if context.server == self._wait_server and context.principal:
+        if self._on_wait_route(context.principal, context.server):
             return Pass(attested=context.principal)
         parsed = parse_call(context.principal, context.server, params)
         if isinstance(parsed, CallRejected):
@@ -102,6 +109,16 @@ class CheckCore:
             _log.warning("check refused: the check's limit of %s passed", limit)
             return Unavailable()
         return outcome
+
+    def unchecked(self, principal: Principal, server: ServerName) -> Pass:
+        """A message passed without a check (any but a tools/call: `gate.core.messages`): on the wait route, with a
+        principal, Pass(attested=principal), the same as its tools/call, so the wait server reads who sent every
+        message on its route (tasks/get included) and answers a wait only to its opener; elsewhere Pass()."""
+        return Pass(attested=principal) if self._on_wait_route(principal, server) else Pass()
+
+    def _on_wait_route(self, principal: Principal, server: ServerName) -> bool:
+        """The one test of the wait route: the gateway routed the message to `wait_server`, and attested who."""
+        return server == self._wait_server and bool(principal)
 
     def _limit(self, deadline: timedelta | None) -> timedelta:
         """check_budget, or the gateway's deadline less REPLY_RESERVE when that is sooner."""

@@ -46,6 +46,7 @@ from tool_approvals.serving.timeouts import AsyncioTimeouts
 CALL = CallRef(Principal("agent-1"), ServerName("files"), b'{"name":"delete","arguments":{"path":"/a"}}')
 REQUIREMENT = RequirementName("two-person")
 WAIT = WaitId("d2FpdC1pZC0xMjM0NTY3OA")
+AGENT = Principal("agent-1")
 OPENED = datetime(2026, 1, 2, 3, 4, 5, 123456, tzinfo=UTC)
 
 
@@ -129,32 +130,32 @@ async def test_await_outcome_streams_until_a_terminal_report(scripted: Scripted,
     comment = "not today" if terminal is WaitState.REFUSED else None
     reports = [_report(WaitState.WAITING), _report(WaitState.WAITING), _report(terminal, comment)]
     scripted.script.reports[WAIT] = [*reports, _report(WaitState.WAITING)]  # never read: the stream ended
-    got = [report async for report in scripted.client.await_outcome(WAIT)]
+    got = [report async for report in scripted.client.await_outcome(WAIT, AGENT)]
     assert got == reports
-    assert scripted.script.calls == [("await_outcome", WAIT)]
+    assert scripted.script.calls == [("await_outcome", (WAIT, AGENT))]
 
 
 async def test_a_report_without_moments_round_trips(scripted: Scripted) -> None:
     unknown = WaitReport(WaitState.UNKNOWN_WAIT, None, None, None, None)
     scripted.script.reports[WAIT] = [unknown]
-    assert [report async for report in scripted.client.await_outcome(WAIT)] == [unknown]
+    assert [report async for report in scripted.client.await_outcome(WAIT, AGENT)] == [unknown]
 
 
 async def test_a_dropped_stream_is_resubscribed(scripted: Scripted) -> None:
     scripted.script.reports[WAIT] = [_report(WaitState.WAITING), _report(WaitState.WAITING), _report(WaitState.USED)]
     scripted.script.drops[WAIT] = 2
-    got = [report.state async for report in scripted.client.await_outcome(WAIT)]
+    got = [report.state async for report in scripted.client.await_outcome(WAIT, AGENT)]
     assert got == [WaitState.WAITING, WaitState.WAITING, WaitState.USED]
-    assert scripted.script.calls == [("await_outcome", WAIT)] * 3
+    assert scripted.script.calls == [("await_outcome", (WAIT, AGENT))] * 3
 
 
 async def test_a_stream_that_cannot_be_resubscribed_is_unavailable(scripted: Scripted) -> None:
     scripted.script.reports[WAIT] = [_report(WaitState.WAITING)]  # dropped after it, and nothing after that
-    reports = scripted.client.await_outcome(WAIT)
+    reports = scripted.client.await_outcome(WAIT, AGENT)
     assert (await anext(reports)).state is WaitState.WAITING
     with pytest.raises(RequestsUnavailable):
         await anext(reports)
-    assert scripted.script.calls == [("await_outcome", WAIT)] * 2
+    assert scripted.script.calls == [("await_outcome", (WAIT, AGENT))] * 2
 
 
 async def test_an_unexpected_status_is_unavailable(scripted: Scripted) -> None:
@@ -227,7 +228,7 @@ async def test_nothing_listening_is_unavailable(tls: TlsFiles, bearer: str) -> N
         with pytest.raises(RequestsUnavailable):
             await client.request(CALL, REQUIREMENT)
         with pytest.raises(RequestsUnavailable):
-            await anext(client.await_outcome(WAIT))
+            await anext(client.await_outcome(WAIT, AGENT))
     finally:
         await client.close()
 
@@ -281,7 +282,7 @@ async def test_a_reply_kind_it_does_not_know_is_unavailable(
         with pytest.raises(RequestsUnavailable):
             await client.open_wait(Principal("agent-1"), Ticket("t"), None)
         with pytest.raises(RequestsUnavailable):
-            await anext(client.await_outcome(WAIT))
+            await anext(client.await_outcome(WAIT, AGENT))
     finally:
         await client.close()
         await server.stop(None)

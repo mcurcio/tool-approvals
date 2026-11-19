@@ -60,6 +60,7 @@ SLOWER_THAN_THE_HOOKS: Final = EXT_AUTHZ_TIMEOUT + timedelta(seconds=2)
 AGENT_COOKIE: Final = {"cookie": "agent-session=not-the-gates"}
 FORWARDED: Final = ("x-agent-note", "seen")  # a header of the agent's that each hook is sent (case 13's control)
 METHOD_NOT_FOUND: Final = -32601  # the echo tool's answer to a method it does not serve
+INVALID_PARAMS: Final = -32602  # the wait server's answer to a tasks/get for a task that is not the caller's
 _NOT_THROUGH: Final = re.compile(r"^\s*Not through ([a-z-]+): (.+)$")
 
 type Case = Callable[[Stack, GatewayUnderTest], Awaitable[object]]
@@ -370,6 +371,35 @@ async def case_13_agent_credentials_never_reach_the_gate(st: Stack, gateway: Gat
     for call in calls:
         for header in hidden:
             assert call.header(header) == [], (header, call)
+
+
+async def case_15_a_wait_task_is_read_only_by_the_agent_that_opened_it(st: Stack, gateway: GatewayUnderTest) -> None:
+    """A Wait Task is bound to the agent that opened it. Another agent's tasks/get
+    for it, even sending a principal header that names the opener, gets exactly the answer an id never issued gets
+    (no oracle for whose a task is); the opener reads it. So the gateway attests the principal on every message of
+    the wait route, not only the tools/call: Envoy through the gate's ext_authz (`CheckCore.unchecked`), agentgateway
+    through the wait target's own request transformation, since its guardrail hook sees tools/call alone.
+
+    Not through check-api: a Check API caller forwards tasks/get itself and sets the principal header in its own
+    code; the gate never sees it."""
+    owner, other = f"{gateway.name}-15", f"{gateway.name}-15-other"
+    assert isinstance(gateway, HttpMcpGateway), gateway
+    wait_tool = gateway.tool_of(WAIT_SERVER, "approval_wait")
+    ticket = ticket_of(await gateway.call(owner, GATED_SERVER, GATED_TOOL, b'{"n":15}'))
+    opener = modern_client(gateway, st.agents, owner, tasks=True, server=WAIT_SERVER)
+    task = await opener.call_tool(wait_tool, {"ticket": ticket})
+    assert (task["resultType"], task["status"]) == ("task", "working"), task
+    task_id: str = task["taskId"]
+    # agentgateway names a task `<target>+<id>`; the wait server's ids are base64url, which has no "+".
+    routed, _, _ = task_id.rpartition("+")
+    never_issued = f"{routed}+bm8tc3VjaC13YWl0LWlk" if routed else "bm8tc3VjaC13YWl0LWlk"
+    forging = modern_client(
+        gateway, st.agents, other, tasks=True, server=WAIT_SERVER, headers={PRINCIPAL_HEADER: owner}
+    )
+    theirs = await forging.task_error(task_id)
+    assert theirs == await forging.task_error(never_issued), theirs
+    assert theirs["code"] == INVALID_PARAMS, theirs
+    assert (await opener.get_task(task_id))["status"] == "working"
 
 
 GOLDEN: Final[tuple[tuple[str, str, str, bytes, str], ...]] = (

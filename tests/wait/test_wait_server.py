@@ -44,6 +44,7 @@ from tool_approvals.kernel.requests import TicketError, TooManyWaits, WaitReport
 from tool_approvals.kernel.words import MAX_REASON_CHARS, AgentWords, WordsError
 
 TICKET = "dGlja2V0LTAxMjM0NTY3ODk"
+AGENT_1: Final = Principal("agent-1")  # the principal the test client's gateway attests
 APPROVED_WORDS = (
     "A person approved the call. Make the original call again, exactly as before, with the same arguments: it runs "
     "once."
@@ -141,7 +142,10 @@ async def test_a_client_that_does_not_declare_tasks_gets_the_held_result(tls: Tl
         result = await mcp.session.call_tool(TOOL, {"ticket": TICKET})
     assert _text(result) == APPROVED_WORDS
     assert result.structured_content == {"state": "approved"}
-    assert script.calls == [("open_wait", (Principal("agent-1"), Ticket(TICKET), None)), ("await_outcome", WAIT)]
+    assert script.calls == [
+        ("open_wait", (Principal("agent-1"), Ticket(TICKET), None)),
+        ("await_outcome", (WAIT, AGENT_1)),
+    ]
 
 
 async def test_a_tasks_declaration_on_the_handshake_protocol_gets_the_held_result(tls: TlsFiles) -> None:
@@ -169,7 +173,7 @@ async def test_stopping_ends_a_held_call_still_waiting_and_the_server_exits_0(tl
     async with wait_server(script, tls) as running:
         async with client(running) as mcp:
             held = asyncio.create_task(mcp.call_tool(TOOL, {"ticket": TICKET}))
-            while ("await_outcome", WAIT) not in script.calls:
+            while ("await_outcome", (WAIT, AGENT_1)) not in script.calls:
                 await asyncio.sleep(0.01)
             running.stop.set()
             result = await asyncio.wait_for(held, 10)
@@ -193,7 +197,64 @@ async def test_tasks_get_for_an_unknown_wait_is_invalid_params(tls: TlsFiles) ->
     assert unknown_wait.value.code == INVALID_PARAMS
     assert unknown_wait.value.message == "Failed to retrieve task: Task not found"
     assert not_a_wait_id.value.code == INVALID_PARAMS
-    assert script.calls == [("await_outcome", unknown)]  # the malformed id never reached Approvals
+    assert script.calls == [("await_outcome", (unknown, AGENT_1))]  # the malformed id never reached Approvals
+
+
+# A Wait Task is its opener's (service design, "A wait is its opener's"). The gateway attests the principal on every
+# message of the wait route; tasks/get reads the wait for that principal only, and Approvals answers anyone else's
+# read as an unknown wait (tests/approvals: the binding itself), which the agent gets exactly as an id never issued.
+
+
+async def test_tasks_get_reads_the_wait_for_the_attested_principal_only(tls: TlsFiles) -> None:
+    script = Script(
+        open_wait=[WAIT],
+        owners={WAIT: AGENT_1},
+        delay=SLOW,
+        reports={WAIT: [report(WaitState.WAITING) for _ in range(4)]},
+    )
+    stranger = {"authorization": f"Bearer {GATEWAY_BEARER}", PRINCIPAL_HEADER: "agent-2"}
+    unknown = WaitId("bm8tc3VjaC13YWl0LWlk")
+    script.reports[unknown] = [WaitReport(WaitState.UNKNOWN_WAIT, None, None, None, None)]
+    async with wait_server(script, tls) as running:
+        async with client(running, tasks=True) as owner:
+            handle = await owner.session.call_tool(TOOL, {"ticket": TICKET}, allow_claimed=True)
+            assert isinstance(handle, TaskHandle)
+            read = await get_task(owner.session, handle.task_id)
+        async with client(running, headers=stranger, tasks=True) as other:
+            with pytest.raises(MCPError) as theirs:
+                await get_task(other.session, handle.task_id)
+            with pytest.raises(MCPError) as never_issued:
+                await get_task(other.session, unknown)
+    assert read["status"] == "working"
+    assert (theirs.value.code, theirs.value.message, theirs.value.data) == (
+        never_issued.value.code,
+        never_issued.value.message,
+        never_issued.value.data,
+    )
+    assert theirs.value.code == INVALID_PARAMS
+    assert script.calls[1:] == [
+        ("await_outcome", (WAIT, AGENT_1)),  # the task's first report, for its opener
+        ("await_outcome", (WAIT, AGENT_1)),
+        ("await_outcome", (WAIT, Principal("agent-2"))),
+        ("await_outcome", (unknown, Principal("agent-2"))),
+    ]
+
+
+@pytest.mark.parametrize("principal", [None, ""])
+async def test_tasks_get_without_the_attested_principal_is_refused_and_reads_nothing(
+    tls: TlsFiles, principal: str | None
+) -> None:
+    script = Script(reports={WAIT: [report(WaitState.APPROVED)]})
+    headers = {"authorization": f"Bearer {GATEWAY_BEARER}"} | ({} if principal is None else {PRINCIPAL_HEADER: ""})
+    async with wait_server(script, tls) as running, client(running, headers=headers, tasks=True) as mcp:
+        with pytest.raises(MCPError) as read:
+            await get_task(mcp.session, WAIT)
+        with pytest.raises(MCPError) as malformed:
+            await get_task(mcp.session, "not a wait id")
+    assert read.value.code == malformed.value.code == INVALID_REQUEST
+    assert read.value.message == malformed.value.message
+    assert read.value.message.startswith("The gateway did not say who is asking")
+    assert script.calls == []
 
 
 async def test_tasks_get_when_approvals_cannot_be_reached_is_an_internal_error(tls: TlsFiles) -> None:
@@ -356,7 +417,10 @@ async def test_with_tasks_disabled_a_declaring_client_gets_the_held_result_and_n
     assert isinstance(result, CallToolResult)
     assert _text(result) == APPROVED_WORDS
     assert read.value.code == METHOD_NOT_FOUND
-    assert script.calls == [("open_wait", (Principal("agent-1"), Ticket(TICKET), None)), ("await_outcome", WAIT)]
+    assert script.calls == [
+        ("open_wait", (Principal("agent-1"), Ticket(TICKET), None)),
+        ("await_outcome", (WAIT, AGENT_1)),
+    ]
 
 
 async def test_with_tasks_disabled_calls_still_need_a_bearer(tls: TlsFiles) -> None:

@@ -33,7 +33,7 @@ The three services, what crosses between them, who owns which data, and how each
 | # | Constraint | Source |
 |---|---|---|
 | E1-E3 | Hook limits; Tasks (SEP-2663); `tasks/*` skip agentgateway's guardrail | [System design](system.md#goals-and-constraints) |
-| E5 | agentgateway's guardrail call defaults to 10 s, overridable by the guardrail target's backend policy; it forwards client headers it does not itself set; it drops `notifications/tasks`, so clients poll | agentgateway |
+| E5 | agentgateway's guardrail call defaults to 10 s, overridable by the guardrail target's backend policy; it forwards client headers it does not itself set; a target's backend policies, a request transformation included, run on every message it sends that target, and a header whose expression fails is removed; it drops `notifications/tasks`, so clients poll | agentgateway |
 | E6 | Envoy: `ext_authz` gRPC timeout 200 ms by default, failing closed; route timeout 15 s by default; `pack_as_bytes` gives raw body bytes | [ext_authz](https://www.envoyproxy.io/docs/envoy/latest/api-v3/extensions/filters/http/ext_authz/v3/ext_authz.proto) |
 | E7 | Tasks: a handle only once durable; ids unguessable and may be bearer tokens; authorisation on every `tasks/*`; terminal states final | [SEP-2663](https://modelcontextprotocol.io/seps/2663-tasks-extension) §Security |
 | E8 | The MCP SDK sends a held call's response headers only after 15 s | MCP Python SDK |
@@ -52,7 +52,7 @@ The three services, what crosses between them, who owns which data, and how each
    AGENTS' SIDE                                   │ APPROVERS' SIDE
  gateway hook ─(ext_mcp | ext_authz | Check API)─►┤ GATE x N ──policy port──► rules file (in process) | AuthZEN | OPA
                                                   │   └ Request, Claim ─────┐
- gateway ──MCP (principal on tools/call only)───► WAIT SERVER x N ─────────┤ OpenWait, AwaitOutcome (CancelWait later)
+ gateway ──MCP (principal on every message)────► WAIT SERVER x N ─────────┤ OpenWait, AwaitOutcome (CancelWait later)
                                                   │                         ▼  (gRPC, client-side round robin)
                                                   │   APPROVALS x N ─────────────────────────► Postgres (direct, LISTEN)
                                                   │    :requests  ◄ gate, wait server   :approvers ◄ browsers (desk)
@@ -64,7 +64,7 @@ The three services, what crosses between them, who owns which data, and how each
 | Service | Responsibility | Replicas, load, drain | Never |
 |---|---|---|---|
 | **Gate** | Gateway context from attested metadata; policy; claim or request; one listener per enabled adapter (`ext_mcp`, `ext_authz`, the Check API over gRPC and JSON, one schema), each optional | N ≥ 2, stateless; drains in-flight checks on stop | List, show or answer; carry tool traffic; re-encode params; let its core depend on a gateway's types |
-| **Wait server** | `approval_wait` (held, bounded) and Wait Tasks (`tasks/get`; `tasks/cancel` from milestone 4; `tasks/update` refused) | N ≥ 2, stateless; any replica serves any task | Answer; open a wait on another principal's ticket |
+| **Wait server** | `approval_wait` (held, bounded) and Wait Tasks (`tasks/get`; `tasks/cancel` from milestone 4; `tasks/update` refused) | N ≥ 2, stateless; any replica serves any task | Answer; open a wait on another principal's ticket; show or end a wait to anyone but the principal that opened it |
 | **Approvals** | Approval lifecycle, call identity, requirements, answers, deadlines, retention, delivery, audit | N ≥ 2 active-active; clients round-robin over all replicas and servers cap connection age, so new replicas take load and a stopping one sheds it | Run a tool; decide what needs approval |
 
 The desk, Answers API, report and dispatcher stay in Approvals: each needs the Approval aggregate inside its
@@ -74,9 +74,12 @@ commit, and a split would add an internal contract over the same table. Each ser
 
 **The wait route.** The config's `wait_route` names the gateway server that is the wait server and the header that
 carries the attested principal to it. The gate's core recognises that route, one rule for every adapter: its
-calls pass without policy, and the pass carries the attested principal, which each gateway mapping sets as the
-principal header in place of any client copy (a Check API caller sets it itself); the wait server reads the
-header. Each gateway mapping configures the name
+calls pass without policy, and every message on it carries the attested principal, its `tools/call` and every
+message passed unchecked (`tasks/get` and the rest) alike, which each gateway sets as the principal header in place
+of any client copy; on every other route the header is removed. Envoy's mapping writes it from the gate's pass on
+every message; agentgateway's hook sees `tools/call` alone (E3), so its wait target writes the header itself, from
+the same expression as the hook's principal; a Check API caller writes it in its own code. The wait server reads
+the header on every call and task read. Each gateway mapping configures the name
 under which it exposes the wait tool, since gateways may prefix tool names. No real tool server may carry the
 wait route's server name.
 
@@ -85,7 +88,7 @@ wait route's server name.
 | Caller → listener | Credential | Grants |
 |---|---|---|
 | gateway hook → gate (`ext_mcp`, `ext_authz`, Check API) | bearer or mTLS | check; trusted for every principal and server it names |
-| gateway → wait server | bearer or mTLS, plus a principal header on `tools/call` written by the gateway's hook, conformance-tested to replace any client copy | `tools/call approval_wait`, `tasks/get` (`tasks/cancel` later); `initialize`, `tools/list`, `ping` open for discovery |
+| gateway → wait server | bearer or mTLS, plus a principal header on every message of the wait route written by the gateway, conformance-tested to replace any client copy | `tools/call approval_wait`, `tasks/get` (`tasks/cancel` later); `initialize`, `tools/list`, `ping` open for discovery |
 | gate → policy | mTLS or bearer | the policy service's own (it receives arguments) |
 | gate → `:requests` | the gate's | `Request`, `Claim` |
 | wait server → `:requests` | the wait server's | `OpenWait`, `AwaitOutcome` (`CancelWait` later) |
@@ -120,7 +123,8 @@ interface ApprovalRequests {
   request(call: CallRef, requirement: RequirementName): Ticketed | Refused | Rejected | QueueFull | UnknownRequirement; // gate
   claim(call: CallRef, requirement: RequirementName): Claimed | NotApproved | Refused | Rejected | UnknownRequirement; // the only spend
   openWait(principal: string, ticket: Ticket, words?: AgentWords): WaitId | TicketError | WordsError | TooManyWaits;
-  awaitOutcome(wait: WaitId): Stream<WaitStatus>;  // current status first; ends after a terminal one; tasks/get reads one
+  awaitOutcome(wait: WaitId, principal: string): Stream<WaitStatus>;  // current status first; ends after a terminal
+                                    // one; tasks/get reads one; UnknownWait unless principal opened the wait
   // cancelWait(wait: WaitId): ends that wait, the Approval stands. Added (non-breaking) in milestone 4.
 }
 interface CallRef {
@@ -151,8 +155,9 @@ type WaitStatus =
         use deadline = min(stored use_deadline, answered_at + current use_window)
  WAIT                                                 AwaitOutcome ─► approved ─► held wait returns / task completes
  agent ─approval_wait(T, words)─► gateway ─(principal header)─► wait server ─openWait─► Approvals ─► W committed
-   held: stream AwaitOutcome(W) until final or 15 min, keep-alive ─► the outcome as the tool result
-   task: CreateTaskResult{taskId: W, ttlMs, pollIntervalMs} after the commit; tasks/get ─► current status
+   held: stream AwaitOutcome(W, P) until final or 15 min, keep-alive ─► the outcome as the tool result
+   task: CreateTaskResult{taskId: W, ttlMs, pollIntervalMs} after the commit; tasks/get(W) as P ─► current status
+         (P: the principal header on that message; a wait P did not open reads as unknown)
 ```
 
 **One wait model.** A held wait and a Task wait are the same domain process, so both are one wait record; a Task
@@ -161,11 +166,17 @@ ends the old with `still-waiting`) and the per-principal cap one place in Approv
 memory. A wait ends in the commit that ends its Approval's waiting, and keeps that outcome: a terminal Task never
 changes (E7).
 
-**A Wait Task is authorised by its id.** The wait id is 128 random bits made by Approvals; whoever holds it may
-read (and, from milestone 4, cancel) that wait, as SEP-2663 allows. No gateway attests a principal on `tasks/*`
-(E3, E5), so binding a task to a principal would rest on an unproven header. Cost: a leaked id reveals one wait's
-outcome and can cancel that wait; it cannot word, answer or spend anything, because `openWait` and `claim` still
-check the attested principal.
+**A wait is its opener's.** Every wait, held or a Task, is bound to the principal that opened it, which Approvals
+already keeps with the wait (always the Approval's own principal, since `openWait` refuses another's ticket). The
+wait id (128 random bits made by Approvals) only names the wait: `awaitOutcome` carries the principal the gateway
+attested on the reading request, and Approvals answers `UnknownWait` for a wait that principal did not open, the
+same answer as for an id never issued, so the answer tells no one whose a wait is. The wait server sends it on
+every read, so `tasks/get` (and, from milestone 4, `tasks/cancel`) for another principal's task is
+`-32602 Task not found`, and a task read with no principal header is refused before any id is read. This needs the
+principal on every message of the wait route, not only on `tools/call` (the wait route, in
+[the service map](#the-service-map)): behind agentgateway, whose hook never sees `tasks/*` (E3), the wait target's own request transformation
+writes it. Cost: one more field on `AwaitOutcome`, and one gateway setting on agentgateway that the conformance
+suite proves.
 
 **What the shown digest covers:** principal, server, tool, the argument bytes, the agent's words and the
 requirement. Words are fixed once given (the first words win), so a review is never invalidated by later words.
@@ -192,7 +203,10 @@ the integrator's audit sink.
 **Upgrades:** schema, protos, the Check API and event kinds all change expand-then-contract
 ([Parallel Change](https://martinfowler.com/bliki/ParallelChange.html)) across a rolling update: a migration job
 runs expand migrations while old replicas serve; readers ignore event kinds they do not know, and a mapping
-refuses on a verdict kind it does not know. `buf breaking` and a migrations check gate CI.
+refuses on a verdict kind it does not know. `buf breaking` and a migrations check gate CI. One change fails
+closed instead of expanding first: `AwaitOutcome`'s `principal` binds a wait to its opener, so Approvals answers
+a read without one as an unknown wait; while a rolling update still runs a wait server older than Approvals, its
+reads report `unknown-wait` and the agent waits again, rather than any read going unbound.
 
 ## Timing budgets
 
@@ -275,9 +289,9 @@ skipped by name with its reason.
 
 | Gateway | Wiring that the conformance suite proves through it |
 |---|---|
-| agentgateway | Guardrail processor last, fail closed, `tools/call` request phase, reached over TLS with a bearer; parameter bytes as forwarded; server from the route; the principal header replaces any client copy; the agent's `Authorization` and `Cookie` kept from the gate |
-| Envoy family | `ext_authz` last body filter, `with_request_body` with `pack_as_bytes` and room for the params size cap; raised timeout; principal from `jwt_authn` metadata; `disallowed_headers` keeps the agent's credentials from the gate; the adapter refuses any HTTP method but POST and a cut body, then applies the gate's one message rule (`gate.core.messages`, the same behind every gateway): one `tools/call` is checked; a method that only reads as `tools/call` is refused; every other well-formed JSON-RPC message passes on every route, `tasks/*` included; a body that is not one JSON-RPC request or response is refused; the wait route passes with the attested principal header. Long holds behind Envoy arrive in milestone 4 |
-| Check API caller | A caller that asks the gate (gRPC or JSON) and forwards the same params bytes only on `pass` |
+| agentgateway | Guardrail processor last, fail closed, `tools/call` request phase, reached over TLS with a bearer; parameter bytes as forwarded; server from the route; the principal header replaces any client copy, on every message to the wait target (its own request transformation) and removed from every other; another agent's `tasks/get` is answered as an unknown task; the agent's `Authorization` and `Cookie` kept from the gate |
+| Envoy family | `ext_authz` last body filter, `with_request_body` with `pack_as_bytes` and room for the params size cap; raised timeout; principal from `jwt_authn` metadata; `disallowed_headers` keeps the agent's credentials from the gate; the adapter refuses any HTTP method but POST and a cut body, then applies the gate's one message rule (`gate.core.messages`, the same behind every gateway): one `tools/call` is checked; a method that only reads as `tools/call` is refused; every other well-formed JSON-RPC message passes on every route, `tasks/*` included; a body that is not one JSON-RPC request or response is refused; every message on the wait route passes with the attested principal header, so another agent's `tasks/get` is answered as an unknown task. Long holds behind Envoy arrive in milestone 4 |
+| Check API caller | A caller that asks the gate (gRPC or JSON) and forwards the same params bytes only on `pass`; it writes the principal header on every message it forwards to the wait route itself |
 
 ## The executor seam (reserved, not built)
 
@@ -295,7 +309,7 @@ of the snapshot and the current requirement.
 |---|---|---|
 | PEP/PDP, external authorization | The gateway enforces, the gate decides | NIST SP 800-162; Envoy ext_authz; AuthZEN 1.0 |
 | Transactional outbox, idempotent receiver, competing consumers | Events, dispatcher, waker | microservices.io; Enterprise Integration Patterns |
-| Asynchronous request-reply; capability token | Wait Task | SEP-2663; [async request-reply](https://learn.microsoft.com/azure/architecture/patterns/async-request-reply) |
+| Asynchronous request-reply; a handle bound to its creator | Wait Task | SEP-2663; [async request-reply](https://learn.microsoft.com/azure/architecture/patterns/async-request-reply) |
 | Deadline propagation; step-up authentication | Check budget; desk | [gRPC deadlines](https://grpc.io/docs/guides/deadlines/); OIDC `acr_values`, `max_age`, RFC 9470 |
 | Parallel change; ports and adapters, repository, unit of work | Upgrades; inside each service | Fowler; Cockburn |
 
@@ -311,7 +325,8 @@ of the snapshot and the current requirement.
 
 - **Costs:** one Approvals process serves both sides, separated by listener; a hook credential is trusted for
   every principal it names; the policy service sees arguments; a yes is spent before the call runs, so `used`
-  does not mean "ran"; a leaked wait id reveals one outcome; Envoy users must raise two defaults, and cannot read a Wait
+  does not mean "ran"; every gateway must write the principal header on every message of the wait route (on
+  agentgateway, a request transformation on the wait target, since its hook sees `tools/call` alone); Envoy users must raise two defaults, and cannot read a Wait
   Task through Envoy until milestone 4; longer audit is the integrator's sink.
 - **Deferred:** automated review as a member of a requirement; OIDC CIBA; the executor; per-role database users.
 - **Not planned:** hot reload; a policy cache; holding the gated call open.

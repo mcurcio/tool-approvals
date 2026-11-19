@@ -168,6 +168,14 @@ async def test_any_other_route_passes_without_an_attested_principal() -> None:
     assert len(policy.asked) == 1
 
 
+async def test_a_message_passed_on_carries_the_attested_principal_on_the_wait_route_alone() -> None:
+    """Every message on the wait route is attested, not only its tools/call."""
+    core = _core(_Policy(raises=AssertionError("asked policy")), _Requests())
+    assert core.unchecked(PRINCIPAL, ROUTE.server) == Pass(attested=PRINCIPAL)
+    assert core.unchecked(PRINCIPAL, SERVER) == Pass(attested=None)
+    assert core.unchecked(Principal(""), ROUTE.server) == Pass(attested=None)  # nobody to attest: the header goes
+
+
 async def test_the_wait_route_without_a_principal_is_rejected_as_any_call() -> None:
     policy = _Policy(raises=AssertionError("asked policy"))
     context = _context(server=ROUTE.server, principal=Principal(""))
@@ -225,6 +233,9 @@ class _Recording:
     async def check(self, context: GatewayContext, params: bytes) -> CheckVerdict:
         self.seen.append((context, params))
         return Pass()
+
+    def unchecked(self, principal: Principal, server: ServerName) -> Pass:
+        raise AssertionError("the Check API and ext_mcp never pass a message on unchecked")
 
 
 class _RpcContext:

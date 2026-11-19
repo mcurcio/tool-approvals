@@ -1,6 +1,8 @@
 """agentgateway's remote mcpGuardrails processor (`agentgateway.dev.ext_mcp.ExtMcp`), on the tools/call request
 phase, as the last processor, failing closed. agentgateway sends the hook tools/call alone and forwards every other
-method itself, which is the gate's one message rule (`gate.core.messages`): only a tools/call is checked."""
+method itself, which is the gate's one message rule (`gate.core.messages`): only a tools/call is checked. The wait
+route's other messages (tasks/get) never reach this hook, so agentgateway's wait target sets the principal header on
+them itself, from the same expression as the hook's principal (docs/reference/agentgateway.md)."""
 
 from collections.abc import Mapping
 from typing import Final

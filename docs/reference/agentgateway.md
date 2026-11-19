@@ -2,7 +2,8 @@
 
 [agentgateway](https://agentgateway.dev) calls the gate through its MCP guardrails: a **remote processor** speaking
 agentgateway's `ext_mcp` protocol, on the `tools/call` request phase, last in the chain, failing closed. The wait
-server is one more MCP target on the same route. This is the configuration the end-to-end suite runs against
+server is one more MCP target on the same route, which writes the attested principal on every message it sends the
+wait server. This is the configuration the end-to-end suite runs against
 agentgateway v1.7.0 (`tests/e2e/agentgateway.py` renders it), with example names.
 
 ## The gateway
@@ -34,8 +35,16 @@ binds:
                 key: <bearer of the gateway-wait-route entry>
               http:
                 requestTimeout: 960s
+              transformations:
+                request:
+                  set:
+                    x-approvals-principal: jwt.sub
           prefixMode: always
       policies:
+        transformations:
+          request:
+            remove:
+            - x-approvals-principal
         jwtAuth:
           mode: strict
           providers:
@@ -65,7 +74,9 @@ binds:
               - cookie
 ```
 
-**The guardrail processor** (`mcpGuardrails.processors`):
+### The guardrail processor
+
+`mcpGuardrails.processors`:
 
 | Setting | Why |
 |---|---|
@@ -77,12 +88,16 @@ binds:
 | `metadata: {principal: jwt.sub}` | The attested principal, under the key `gate.ext_mcp.principal_key` names. Any CEL expression over what the gateway authenticated works; it must give a non-empty string, or the call is refused as `misconfigured` |
 | `requestHeaders: {disallowed: [authorization, cookie]}` | By default agentgateway sends the processor the agent's request headers, its credentials included. The gate reads no header, and the agent's credentials are not the gate's to see. jwtAuth in strict mode already strips `Authorization`; the filter is what keeps `Cookie` (and `Authorization` under any other authentication) out, and the conformance suite checks it with a cookie (as it checks Envoy's `disallowed_headers`) |
 
-**The wait target** (`targets`):
+### The wait target
+
+`targets`, and the route's `transformations`:
 
 | Setting | Why |
 |---|---|
 | `name` equal to `wait_route.server` | The gate recognises the wait route by this name: it passes its calls without policy (the rule every adapter shares, [configuration](configuration.md#wait_route-the-wait-servers-route-at-the-gateway)) and sets the principal header on them to the attested principal, replacing any copy the client sent. No real tool server may use this name |
 | `backendTLS`, `backendAuth.key` | The wait server needs TLS and a registry bearer granted `wait.call` (the example's `gateway-wait-route` entry). The bearer replaces the agent's `Authorization` on this hop |
+| `transformations.request.set` of `wait_route.principal_header` to the guardrail's principal expression (`jwt.sub`) | The wait server binds every wait to the principal that opened it and reads a task only for that principal, so it needs the attested principal on every message of the wait route. The guardrail is sent `tools/call` alone and can write the header on nothing else, so the target writes it itself, on every message agentgateway sends it (`tasks/get` included). A `set` replaces every copy the client sent; an expression that fails removes the header, and the wait server then refuses. Use the same expression as the guardrail's `metadata` principal, or a task opened as one principal is read as another |
+| The route's `transformations.request.remove` of `wait_route.principal_header` | No other target sees a copy the client sent, on any method: the guardrail removes it from `tools/call` only |
 | `http.requestTimeout` above `wait.max_hold` | A held call sends nothing until the hold ends (up to `wait.max_hold`, 15 minutes in the example), and without this agentgateway gives the response 10 s. The example uses 16 minutes |
 
 `prefixMode: always` names every tool `<target>_<tool>`, so agents see the wait tool as
@@ -129,7 +144,7 @@ gateway can send one on this connection: name the certificate's SHA-256 fingerpr
 | Gate verdict | Through agentgateway |
 |---|---|
 | Pass | The call is forwarded unchanged. The gate removes `wait_route.principal_header` from it, so no tool server sees a copy the client sent |
-| Pass on the wait route | The call is forwarded unchanged but for `wait_route.principal_header`, which the gate sets to the attested principal |
+| Pass on the wait route | The call is forwarded unchanged but for `wait_route.principal_header`, which the gate sets to the attested principal (and the wait target sets again, to the same value) |
 | Any refusal (pending, refused, rejected, queue full, unavailable) | A `tools/call` result with `isError: true` and the refusal's words (the Check API's `agent_text`) as its text. The gate answers `PERMISSION_DENIED` for pending, refused and rejected, `RESOURCE_EXHAUSTED` for queue full and unavailable |
 | The gate cannot be reached | agentgateway's own error for a failed processor (`failClosed`); the call does not run |
 
@@ -137,7 +152,8 @@ So an agent reads "This call needs a person's approval… Call the tool "approva
 ticket "…"" as a failed tool call, calls the wait tool, and repeats the original call once it reports `approved`.
 
 **Other methods and Tasks.** The guardrail is sent `tools/call` alone; agentgateway forwards every other method
-itself, `tasks/*` included. That is the gate's one rule behind every gateway (the Envoy adapter, which sees every
+itself, `tasks/*` included, the wait target writing the principal header on each of the wait route's
+([the wait target](#the-wait-target)). That is the gate's one rule behind every gateway (the Envoy adapter, which sees every
 request, applies it in the gate: [which requests pass](envoy.md#which-requests-pass)), with one gap: the gate never
 sees a method agentgateway does not itself read as `tools/call`, so it cannot refuse one that only reads as it
 (`Tools/call`, `tools/call `, `tools∕call`), as it does behind Envoy. Such a call reaches the server unchecked; it

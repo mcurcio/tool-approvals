@@ -12,7 +12,8 @@ service ApprovalRequestsService {
   // The only spend of a yes.
   rpc Claim(ClaimRequest) returns (ClaimResponse);
   rpc OpenWait(OpenWaitRequest) returns (OpenWaitResponse);
-  // The current status first; the stream ends after a terminal one.
+  // The current status first; the stream ends after a terminal one. Only the wait's own principal follows it:
+  // for any other principal the wait does not exist (UnknownWait), the same answer as for an id never issued.
   rpc AwaitOutcome(AwaitOutcomeRequest) returns (stream AwaitOutcomeResponse);
 }
 
@@ -70,6 +71,8 @@ message OpenWaitResponse {
 
 message AwaitOutcomeRequest {
   string wait_id = 1;
+  // The principal the gateway attested on the request that reads the wait (the wait route's principal header).
+  string principal = 2;
 }
 
 message AwaitOutcomeResponse {

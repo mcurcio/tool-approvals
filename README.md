@@ -167,6 +167,8 @@ With no answer by the answer deadline the approval expires; a yes not spent with
 
 - **Agents can only ask.** The agents' side (gate and wait server) has no method that lists, shows or answers an
   approval, and no credential granted to it can reach one. Agents' words appear to approvers only as quoted text.
+- **A wait is its opener's.** The gateway attests the agent on every message to the wait server, and a wait, held
+  or a Task, is shown only to the agent that opened it; to any other agent its id reads as unknown.
 - **An answer counts only from an allowed surface, at no more than its cap,** from a member of an approver group,
   signed in strongly and recently enough. Every answer records the surface, approver, qualifying group, vouched
   assurance and sign-in moment, and is audited.

@@ -27,17 +27,17 @@ from google.protobuf import timestamp_pb2 as google_dot_protobuf_dot_timestamp__
 from tool_approvals.contract.calls.v1 import calls_pb2 as tool__approvals_dot_contract_dot_calls_dot_v1_dot_calls__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n2tool_approvals/contract/requests/v1/requests.proto\x12#tool_approvals.contract.requests.v1\x1a\x1egoogle/protobuf/duration.proto\x1a\x1fgoogle/protobuf/timestamp.proto\x1a,tool_approvals/contract/calls/v1/calls.proto\"<\n\x07\x43\x61llRef\x12\x11\n\tprincipal\x18\x01 \x01(\t\x12\x0e\n\x06server\x18\x02 \x01(\t\x12\x0e\n\x06params\x18\x03 \x01(\x0c\"a\n\x0eRequestRequest\x12:\n\x04\x63\x61ll\x18\x01 \x01(\x0b\x32,.tool_approvals.contract.requests.v1.CallRef\x12\x13\n\x0brequirement\x18\x02 \x01(\t\"_\n\x0c\x43laimRequest\x12:\n\x04\x63\x61ll\x18\x01 \x01(\x0b\x32,.tool_approvals.contract.requests.v1.CallRef\x12\x13\n\x0brequirement\x18\x02 \x01(\t\"\xc9\x02\n\x0fRequestResponse\x12\x10\n\x06ticket\x18\x01 \x01(\tH\x00\x12<\n\x07refused\x18\x02 \x01(\x0b\x32).tool_approvals.contract.calls.v1.RefusedH\x00\x12>\n\x08rejected\x18\x03 \x01(\x0b\x32*.tool_approvals.contract.calls.v1.RejectedH\x00\x12\x44\n\nqueue_full\x18\x04 \x01(\x0b\x32..tool_approvals.contract.requests.v1.QueueFullH\x00\x12V\n\x13unknown_requirement\x18\x05 \x01(\x0b\x32\x37.tool_approvals.contract.requests.v1.UnknownRequirementH\x00\x42\x08\n\x06result\"\xfa\x02\n\rClaimResponse\x12?\n\x07\x63laimed\x18\x01 \x01(\x0b\x32,.tool_approvals.contract.requests.v1.ClaimedH\x00\x12H\n\x0cnot_approved\x18\x02 \x01(\x0b\x32\x30.tool_approvals.contract.requests.v1.NotApprovedH\x00\x12<\n\x07refused\x18\x03 \x01(\x0b\x32).tool_approvals.contract.calls.v1.RefusedH\x00\x12>\n\x08rejected\x18\x04 \x01(\x0b\x32*.tool_approvals.contract.calls.v1.RejectedH\x00\x12V\n\x13unknown_requirement\x18\x05 \x01(\x0b\x32\x37.tool_approvals.contract.requests.v1.UnknownRequirementH\x00\x42\x08\n\x06result\"x\n\x0fOpenWaitRequest\x12\x11\n\tprincipal\x18\x01 \x01(\t\x12\x0e\n\x06ticket\x18\x02 \x01(\t\x12\x13\n\x06reason\x18\x03 \x01(\tH\x00\x88\x01\x01\x12\x15\n\x08work_ref\x18\x04 \x01(\tH\x01\x88\x01\x01\x42\t\n\x07_reasonB\x0b\n\t_work_ref\"\x8e\x02\n\x10OpenWaitResponse\x12\x11\n\x07wait_id\x18\x01 \x01(\tH\x00\x12H\n\x0cticket_error\x18\x02 \x01(\x0e\x32\x30.tool_approvals.contract.requests.v1.TicketErrorH\x00\x12\x46\n\x0bwords_error\x18\x03 \x01(\x0e\x32/.tool_approvals.contract.requests.v1.WordsErrorH\x00\x12K\n\x0etoo_many_waits\x18\x04 \x01(\x0b\x32\x31.tool_approvals.contract.requests.v1.TooManyWaitsH\x00\x42\x08\n\x06result\"&\n\x13\x41waitOutcomeRequest\x12\x0f\n\x07wait_id\x18\x01 \x01(\t\"\xc0\x05\n\x14\x41waitOutcomeResponse\x12?\n\x07waiting\x18\x01 \x01(\x0b\x32,.tool_approvals.contract.requests.v1.WaitingH\x00\x12\x41\n\x08\x61pproved\x18\x02 \x01(\x0b\x32-.tool_approvals.contract.requests.v1.ApprovedH\x00\x12<\n\x07refused\x18\x03 \x01(\x0b\x32).tool_approvals.contract.calls.v1.RefusedH\x00\x12?\n\x07\x65xpired\x18\x04 \x01(\x0b\x32,.tool_approvals.contract.requests.v1.ExpiredH\x00\x12\x39\n\x04used\x18\x05 \x01(\x0b\x32).tool_approvals.contract.requests.v1.UsedH\x00\x12\x43\n\tcancelled\x18\x06 \x01(\x0b\x32..tool_approvals.contract.requests.v1.CancelledH\x00\x12J\n\rstill_waiting\x18\x07 \x01(\x0b\x32\x31.tool_approvals.contract.requests.v1.StillWaitingH\x00\x12H\n\x0cunknown_wait\x18\x08 \x01(\x0b\x32\x30.tool_approvals.contract.requests.v1.UnknownWaitH\x00\x12-\n\topened_at\x18\t \x01(\x0b\x32\x1a.google.protobuf.Timestamp\x12.\n\nupdated_at\x18\n \x01(\x0b\x32\x1a.google.protobuf.Timestamp\x12&\n\x03ttl\x18\x0b \x01(\x0b\x32\x19.google.protobuf.DurationB\x08\n\x06status\"\x0b\n\tQueueFull\"\x14\n\x12UnknownRequirement\"\t\n\x07\x43laimed\"\r\n\x0bNotApproved\"\x0e\n\x0cTooManyWaits\"\t\n\x07Waiting\"\n\n\x08\x41pproved\"\t\n\x07\x45xpired\"\x06\n\x04Used\"\x0b\n\tCancelled\"\x0e\n\x0cStillWaiting\"\r\n\x0bUnknownWait*n\n\x0bTicketError\x12\x1c\n\x18TICKET_ERROR_UNSPECIFIED\x10\x00\x12\x1f\n\x1bTICKET_ERROR_UNKNOWN_TICKET\x10\x01\x12 \n\x1cTICKET_ERROR_NOT_YOUR_TICKET\x10\x02*^\n\nWordsError\x12\x1b\n\x17WORDS_ERROR_UNSPECIFIED\x10\x00\x12\x18\n\x14WORDS_ERROR_TOO_LONG\x10\x01\x12\x19\n\x15WORDS_ERROR_MALFORMED\x10\x02\x32\x80\x04\n\x17\x41pprovalRequestsService\x12t\n\x07Request\x12\x33.tool_approvals.contract.requests.v1.RequestRequest\x1a\x34.tool_approvals.contract.requests.v1.RequestResponse\x12n\n\x05\x43laim\x12\x31.tool_approvals.contract.requests.v1.ClaimRequest\x1a\x32.tool_approvals.contract.requests.v1.ClaimResponse\x12w\n\x08OpenWait\x12\x34.tool_approvals.contract.requests.v1.OpenWaitRequest\x1a\x35.tool_approvals.contract.requests.v1.OpenWaitResponse\x12\x85\x01\n\x0c\x41waitOutcome\x12\x38.tool_approvals.contract.requests.v1.AwaitOutcomeRequest\x1a\x39.tool_approvals.contract.requests.v1.AwaitOutcomeResponse0\x01\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n2tool_approvals/contract/requests/v1/requests.proto\x12#tool_approvals.contract.requests.v1\x1a\x1egoogle/protobuf/duration.proto\x1a\x1fgoogle/protobuf/timestamp.proto\x1a,tool_approvals/contract/calls/v1/calls.proto\"<\n\x07\x43\x61llRef\x12\x11\n\tprincipal\x18\x01 \x01(\t\x12\x0e\n\x06server\x18\x02 \x01(\t\x12\x0e\n\x06params\x18\x03 \x01(\x0c\"a\n\x0eRequestRequest\x12:\n\x04\x63\x61ll\x18\x01 \x01(\x0b\x32,.tool_approvals.contract.requests.v1.CallRef\x12\x13\n\x0brequirement\x18\x02 \x01(\t\"_\n\x0c\x43laimRequest\x12:\n\x04\x63\x61ll\x18\x01 \x01(\x0b\x32,.tool_approvals.contract.requests.v1.CallRef\x12\x13\n\x0brequirement\x18\x02 \x01(\t\"\xc9\x02\n\x0fRequestResponse\x12\x10\n\x06ticket\x18\x01 \x01(\tH\x00\x12<\n\x07refused\x18\x02 \x01(\x0b\x32).tool_approvals.contract.calls.v1.RefusedH\x00\x12>\n\x08rejected\x18\x03 \x01(\x0b\x32*.tool_approvals.contract.calls.v1.RejectedH\x00\x12\x44\n\nqueue_full\x18\x04 \x01(\x0b\x32..tool_approvals.contract.requests.v1.QueueFullH\x00\x12V\n\x13unknown_requirement\x18\x05 \x01(\x0b\x32\x37.tool_approvals.contract.requests.v1.UnknownRequirementH\x00\x42\x08\n\x06result\"\xfa\x02\n\rClaimResponse\x12?\n\x07\x63laimed\x18\x01 \x01(\x0b\x32,.tool_approvals.contract.requests.v1.ClaimedH\x00\x12H\n\x0cnot_approved\x18\x02 \x01(\x0b\x32\x30.tool_approvals.contract.requests.v1.NotApprovedH\x00\x12<\n\x07refused\x18\x03 \x01(\x0b\x32).tool_approvals.contract.calls.v1.RefusedH\x00\x12>\n\x08rejected\x18\x04 \x01(\x0b\x32*.tool_approvals.contract.calls.v1.RejectedH\x00\x12V\n\x13unknown_requirement\x18\x05 \x01(\x0b\x32\x37.tool_approvals.contract.requests.v1.UnknownRequirementH\x00\x42\x08\n\x06result\"x\n\x0fOpenWaitRequest\x12\x11\n\tprincipal\x18\x01 \x01(\t\x12\x0e\n\x06ticket\x18\x02 \x01(\t\x12\x13\n\x06reason\x18\x03 \x01(\tH\x00\x88\x01\x01\x12\x15\n\x08work_ref\x18\x04 \x01(\tH\x01\x88\x01\x01\x42\t\n\x07_reasonB\x0b\n\t_work_ref\"\x8e\x02\n\x10OpenWaitResponse\x12\x11\n\x07wait_id\x18\x01 \x01(\tH\x00\x12H\n\x0cticket_error\x18\x02 \x01(\x0e\x32\x30.tool_approvals.contract.requests.v1.TicketErrorH\x00\x12\x46\n\x0bwords_error\x18\x03 \x01(\x0e\x32/.tool_approvals.contract.requests.v1.WordsErrorH\x00\x12K\n\x0etoo_many_waits\x18\x04 \x01(\x0b\x32\x31.tool_approvals.contract.requests.v1.TooManyWaitsH\x00\x42\x08\n\x06result\"9\n\x13\x41waitOutcomeRequest\x12\x0f\n\x07wait_id\x18\x01 \x01(\t\x12\x11\n\tprincipal\x18\x02 \x01(\t\"\xc0\x05\n\x14\x41waitOutcomeResponse\x12?\n\x07waiting\x18\x01 \x01(\x0b\x32,.tool_approvals.contract.requests.v1.WaitingH\x00\x12\x41\n\x08\x61pproved\x18\x02 \x01(\x0b\x32-.tool_approvals.contract.requests.v1.ApprovedH\x00\x12<\n\x07refused\x18\x03 \x01(\x0b\x32).tool_approvals.contract.calls.v1.RefusedH\x00\x12?\n\x07\x65xpired\x18\x04 \x01(\x0b\x32,.tool_approvals.contract.requests.v1.ExpiredH\x00\x12\x39\n\x04used\x18\x05 \x01(\x0b\x32).tool_approvals.contract.requests.v1.UsedH\x00\x12\x43\n\tcancelled\x18\x06 \x01(\x0b\x32..tool_approvals.contract.requests.v1.CancelledH\x00\x12J\n\rstill_waiting\x18\x07 \x01(\x0b\x32\x31.tool_approvals.contract.requests.v1.StillWaitingH\x00\x12H\n\x0cunknown_wait\x18\x08 \x01(\x0b\x32\x30.tool_approvals.contract.requests.v1.UnknownWaitH\x00\x12-\n\topened_at\x18\t \x01(\x0b\x32\x1a.google.protobuf.Timestamp\x12.\n\nupdated_at\x18\n \x01(\x0b\x32\x1a.google.protobuf.Timestamp\x12&\n\x03ttl\x18\x0b \x01(\x0b\x32\x19.google.protobuf.DurationB\x08\n\x06status\"\x0b\n\tQueueFull\"\x14\n\x12UnknownRequirement\"\t\n\x07\x43laimed\"\r\n\x0bNotApproved\"\x0e\n\x0cTooManyWaits\"\t\n\x07Waiting\"\n\n\x08\x41pproved\"\t\n\x07\x45xpired\"\x06\n\x04Used\"\x0b\n\tCancelled\"\x0e\n\x0cStillWaiting\"\r\n\x0bUnknownWait*n\n\x0bTicketError\x12\x1c\n\x18TICKET_ERROR_UNSPECIFIED\x10\x00\x12\x1f\n\x1bTICKET_ERROR_UNKNOWN_TICKET\x10\x01\x12 \n\x1cTICKET_ERROR_NOT_YOUR_TICKET\x10\x02*^\n\nWordsError\x12\x1b\n\x17WORDS_ERROR_UNSPECIFIED\x10\x00\x12\x18\n\x14WORDS_ERROR_TOO_LONG\x10\x01\x12\x19\n\x15WORDS_ERROR_MALFORMED\x10\x02\x32\x80\x04\n\x17\x41pprovalRequestsService\x12t\n\x07Request\x12\x33.tool_approvals.contract.requests.v1.RequestRequest\x1a\x34.tool_approvals.contract.requests.v1.RequestResponse\x12n\n\x05\x43laim\x12\x31.tool_approvals.contract.requests.v1.ClaimRequest\x1a\x32.tool_approvals.contract.requests.v1.ClaimResponse\x12w\n\x08OpenWait\x12\x34.tool_approvals.contract.requests.v1.OpenWaitRequest\x1a\x35.tool_approvals.contract.requests.v1.OpenWaitResponse\x12\x85\x01\n\x0c\x41waitOutcome\x12\x38.tool_approvals.contract.requests.v1.AwaitOutcomeRequest\x1a\x39.tool_approvals.contract.requests.v1.AwaitOutcomeResponse0\x01\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'tool_approvals.contract.requests.v1.requests_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
-  _globals['_TICKETERROR']._serialized_start=2478
-  _globals['_TICKETERROR']._serialized_end=2588
-  _globals['_WORDSERROR']._serialized_start=2590
-  _globals['_WORDSERROR']._serialized_end=2684
+  _globals['_TICKETERROR']._serialized_start=2497
+  _globals['_TICKETERROR']._serialized_end=2607
+  _globals['_WORDSERROR']._serialized_start=2609
+  _globals['_WORDSERROR']._serialized_end=2703
   _globals['_CALLREF']._serialized_start=202
   _globals['_CALLREF']._serialized_end=262
   _globals['_REQUESTREQUEST']._serialized_start=264
@@ -53,33 +53,33 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_OPENWAITRESPONSE']._serialized_start=1296
   _globals['_OPENWAITRESPONSE']._serialized_end=1566
   _globals['_AWAITOUTCOMEREQUEST']._serialized_start=1568
-  _globals['_AWAITOUTCOMEREQUEST']._serialized_end=1606
-  _globals['_AWAITOUTCOMERESPONSE']._serialized_start=1609
-  _globals['_AWAITOUTCOMERESPONSE']._serialized_end=2313
-  _globals['_QUEUEFULL']._serialized_start=2315
-  _globals['_QUEUEFULL']._serialized_end=2326
-  _globals['_UNKNOWNREQUIREMENT']._serialized_start=2328
-  _globals['_UNKNOWNREQUIREMENT']._serialized_end=2348
-  _globals['_CLAIMED']._serialized_start=2350
-  _globals['_CLAIMED']._serialized_end=2359
-  _globals['_NOTAPPROVED']._serialized_start=2361
-  _globals['_NOTAPPROVED']._serialized_end=2374
-  _globals['_TOOMANYWAITS']._serialized_start=2376
-  _globals['_TOOMANYWAITS']._serialized_end=2390
-  _globals['_WAITING']._serialized_start=2392
-  _globals['_WAITING']._serialized_end=2401
-  _globals['_APPROVED']._serialized_start=2403
-  _globals['_APPROVED']._serialized_end=2413
-  _globals['_EXPIRED']._serialized_start=2415
-  _globals['_EXPIRED']._serialized_end=2424
-  _globals['_USED']._serialized_start=2426
-  _globals['_USED']._serialized_end=2432
-  _globals['_CANCELLED']._serialized_start=2434
-  _globals['_CANCELLED']._serialized_end=2445
-  _globals['_STILLWAITING']._serialized_start=2447
-  _globals['_STILLWAITING']._serialized_end=2461
-  _globals['_UNKNOWNWAIT']._serialized_start=2463
-  _globals['_UNKNOWNWAIT']._serialized_end=2476
-  _globals['_APPROVALREQUESTSSERVICE']._serialized_start=2687
-  _globals['_APPROVALREQUESTSSERVICE']._serialized_end=3199
+  _globals['_AWAITOUTCOMEREQUEST']._serialized_end=1625
+  _globals['_AWAITOUTCOMERESPONSE']._serialized_start=1628
+  _globals['_AWAITOUTCOMERESPONSE']._serialized_end=2332
+  _globals['_QUEUEFULL']._serialized_start=2334
+  _globals['_QUEUEFULL']._serialized_end=2345
+  _globals['_UNKNOWNREQUIREMENT']._serialized_start=2347
+  _globals['_UNKNOWNREQUIREMENT']._serialized_end=2367
+  _globals['_CLAIMED']._serialized_start=2369
+  _globals['_CLAIMED']._serialized_end=2378
+  _globals['_NOTAPPROVED']._serialized_start=2380
+  _globals['_NOTAPPROVED']._serialized_end=2393
+  _globals['_TOOMANYWAITS']._serialized_start=2395
+  _globals['_TOOMANYWAITS']._serialized_end=2409
+  _globals['_WAITING']._serialized_start=2411
+  _globals['_WAITING']._serialized_end=2420
+  _globals['_APPROVED']._serialized_start=2422
+  _globals['_APPROVED']._serialized_end=2432
+  _globals['_EXPIRED']._serialized_start=2434
+  _globals['_EXPIRED']._serialized_end=2443
+  _globals['_USED']._serialized_start=2445
+  _globals['_USED']._serialized_end=2451
+  _globals['_CANCELLED']._serialized_start=2453
+  _globals['_CANCELLED']._serialized_end=2464
+  _globals['_STILLWAITING']._serialized_start=2466
+  _globals['_STILLWAITING']._serialized_end=2480
+  _globals['_UNKNOWNWAIT']._serialized_start=2482
+  _globals['_UNKNOWNWAIT']._serialized_end=2495
+  _globals['_APPROVALREQUESTSSERVICE']._serialized_start=2706
+  _globals['_APPROVALREQUESTSSERVICE']._serialized_end=3218
 # @@protoc_insertion_point(module_scope)

@@ -33,3 +33,4 @@ class WaitTarget:
     ca_file: str
     bearer: str  # a registry caller granted wait.call
     request_timeout: timedelta  # how long the gateway lets one held call run; above the wait's max_hold
+    principal_header: str  # `wait_route.principal_header`: the gateway attests the principal in it

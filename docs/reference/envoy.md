@@ -152,17 +152,18 @@ rule it applies behind every gateway: it checks `tools/call` and nothing else.
 | A body Envoy cut (`x-envoy-auth-partial-body: true`) | Refused (`too-large`) |
 | A body that is neither one JSON-RPC request nor one JSON-RPC response: a batch, duplicate keys, trailing data, no method and no `result` or `error` | Refused (`malformed`) |
 | `POST` of a client's JSON-RPC response (its answer to a server's request: sampling, elicitation, roots) | Passed |
-| `POST` of a single `tools/call` | Checked like any call, on the params' exact bytes ([the Check API](check-api.md#the-verdict)); on the wait route, passed without policy ([the wait route](#the-wait-route)) |
+| `POST` of a single `tools/call` | Checked like any call, on the params' exact bytes ([the Check API](check-api.md#the-verdict)); on the wait route, passed without policy, with the attested principal header ([the wait route](#the-wait-route)) |
 | `POST` of a `notifications/*` method carrying an `id` (an MCP notification has none) | Refused (`malformed`) |
 | `POST` of a method that is not `tools/call` but reads as it once Unicode-normalised (NFKC), casefolded and stripped of whitespace and invisible format characters, with a confusable slash (fraction, division, fullwidth, big solidus, box-drawing diagonal) read as `/`: `Tools/call`, `tools/call `, `tools∕call` | Refused (`malformed`) |
-| `POST` of any other request or notification, whatever its method (`initialize`, `tools/list`, `tasks/*`, `ping`, one the server does not serve) | Passed, on every route |
+| `POST` of any other request or notification, whatever its method (`initialize`, `tools/list`, `tasks/*`, `ping`, one the server does not serve) | Passed, on every route; on the wait route with the attested principal header, as every message there |
 
 The rule is the gate's, not Envoy's, and is not configured: behind agentgateway, whose guardrail is sent
 `tools/call` alone, every other method passes too, a lookalike of `tools/call` included: agentgateway forwards
 whatever it does not itself read as `tools/call` without asking the gate, so only a server that matches method
 names exactly is safe behind it. `tasks/*` needs no check of its own: the gate refuses every
 `tools/call` that asks to run as a task (`task-requested`), so no task follows a call it let through, and a Wait
-Task is authorised by its id at the wait server ([MCP Tasks](wait.md#mcp-tasks)). A refusal answers the request's
+Task is read only by the principal that opened it, at the wait server ([MCP Tasks](wait.md#mcp-tasks)), from the
+principal header the gate sets on every message of the wait route. A refusal answers the request's
 own `id` when the gate could read one, and `null` when it could read no message. A refused notification (a
 message with a `method` and no `id`, whatever refused it: a checked `tools/call` or a lookalike of one) is
 answered as MCP's Streamable HTTP transport asks: HTTP 400, its JSON-RPC error carrying no `id` member. A route that names no server, or a request with no principal at `principal_path`, is
@@ -189,17 +190,19 @@ These are the codes agentgateway v1.7.0 uses for its own refusals (through agent
 reaches the agent as a failed tool result instead: [agentgateway](agentgateway.md#what-the-agent-sees)). A pass
 forwards the request with one change: the OK response lists `wait_route.principal_header` (`x-approvals-principal`
 in the example) in `headers_to_remove`, so no tool behind Envoy sees a principal header an agent sent. On the wait
-route the OK response sets that header instead, to the attested principal. Envoy applies both; nothing in the
+route the OK response sets that header instead, to the attested principal, on every message: the checked
+`tools/call` and every message passed unchecked (`tasks/get`, `initialize`, a notification) alike. Envoy applies both; nothing in the
 bootstrap needs to ask for them.
 
 ## The wait route
 
 The wait server is one more MCP route, whose `context_extensions` server is `wait_route.server`. The gate passes
 its `tools/call` requests without policy (and its `tasks/get`, as on every route, so Wait Tasks work behind
-Envoy) and sets `wait_route.principal_header` to the principal at
+Envoy), and on every message of the route sets `wait_route.principal_header` to the principal at
 `principal_path`, overwriting every copy the agent sent (an OK response header with `append: false`, which Envoy's
 ext_authz reads for these headers, and `append_action: OVERWRITE_IF_EXISTS_OR_ADD`, the field that replaces it);
-the wait server reads the principal from that header alone. The route authenticates to the wait server itself,
+the wait server reads the principal from that header alone, and shows a wait only to the principal that opened
+it, so another agent's `tasks/get` is answered as for an unknown task. The route authenticates to the wait server itself,
 with a registry bearer granted `wait.call`, in place of the agent's `Authorization` (which `jwt_authn` does not
 forward):
 
