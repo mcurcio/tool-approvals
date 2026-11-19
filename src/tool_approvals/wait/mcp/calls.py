@@ -13,7 +13,7 @@ from tool_approvals.auth.asgi import authenticate
 from tool_approvals.auth.registry import Registry
 from tool_approvals.kernel.calls import TASKS_PREFIX, TOOLS_CALL
 from tool_approvals.kernel.methods import Method
-from tool_approvals.kernel.names import Principal, Ticket
+from tool_approvals.kernel.names import Principal, Ticket, is_principal
 from tool_approvals.kernel.requests import WaitReport
 from tool_approvals.kernel.words import AgentWords
 from tool_approvals.wait.core.wording import NO_PRINCIPAL, next_step, refusal
@@ -50,13 +50,21 @@ class WaitCallGuard:
 
 
 def principal_of(ctx: ServerRequestContext[Any, Any], header: str) -> Principal | None:
-    """The attested principal from the request's `header` (set by the gate on the wait route, never by the
-    client): a single non-empty value, else None (the call is refused)."""
+    """The attested principal from the request's `header` (set by the gateway on the wait route, never by the
+    client): a single value, UTF-8 (as every adapter writes it), that is a principal by the gate's own rule
+    (`kernel.names.is_principal`); else None, and the call is refused as having no principal."""
     request = ctx.request
     if not isinstance(request, Request):
         return None
     values = request.headers.getlist(header)
-    return Principal(values[0]) if len(values) == 1 and values[0] else None
+    if len(values) != 1:
+        return None
+    try:
+        # Starlette reads header bytes as Latin-1; the gateway wrote the principal's UTF-8 bytes.
+        text = values[0].encode("latin-1").decode("utf-8")
+    except UnicodeError:
+        return None
+    return Principal(text) if is_principal(text) else None
 
 
 def wait_call(

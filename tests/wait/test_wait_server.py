@@ -33,6 +33,7 @@ from tests.wait.harness import (
     TaskHandle,
     client,
     get_task,
+    in_process_client,
     report,
     wait_server,
 )
@@ -42,6 +43,7 @@ from tool_approvals.kernel.methods import Method
 from tool_approvals.kernel.names import CallerName, Principal, Ticket, WaitId
 from tool_approvals.kernel.requests import TicketError, TooManyWaits, WaitReport, WaitState
 from tool_approvals.kernel.words import MAX_REASON_CHARS, AgentWords, WordsError
+from tool_approvals.wait.core.wording import NO_PRINCIPAL, NO_PRINCIPAL_TASK
 
 TICKET = "dGlja2V0LTAxMjM0NTY3ODk"
 AGENT_1: Final = Principal("agent-1")  # the principal the test client's gateway attests
@@ -337,6 +339,45 @@ async def test_a_call_without_the_attested_principal_is_refused(tls: TlsFiles) -
             assert result.is_error
             assert _text(result).startswith("The gateway did not say who is calling")
     assert script.calls == []
+
+
+# A header no HTTP/1.1 parser passes, and two that it does (an inner tab, the UTF-8 of a C1 control character), and
+# bytes that are not UTF-8: each is no principal, by the gate's own rule (`kernel.names.is_principal`).
+_NOT_A_PRINCIPAL = ["agent\r\nx-injected: 1", "agent\x00", " agent", "agent ", "agent\tone", "agent\u0085", "\udcff"]
+
+
+@pytest.mark.parametrize("principal", _NOT_A_PRINCIPAL)
+async def test_a_principal_header_that_is_no_principal_gets_the_no_principal_answer(
+    tls: TlsFiles, principal: str
+) -> None:
+    """The held tool, a task's opening and tasks/get, before any id or Approvals is read."""
+    headers = {
+        b"authorization": f"Bearer {GATEWAY_BEARER}".encode(),
+        PRINCIPAL_HEADER.encode(): principal.encode("utf-8", "surrogateescape"),
+    }
+    async with in_process_client(tls, headers, mode="legacy") as legacy:
+        held = await legacy.call_tool(TOOL, {"ticket": TICKET})
+    async with in_process_client(tls, headers, tasks=True) as mcp:
+        opened = await mcp.session.call_tool(TOOL, {"ticket": TICKET}, allow_claimed=True)
+        with pytest.raises(MCPError) as read:
+            await get_task(mcp.session, WAIT)
+    for result in (held, opened):
+        assert isinstance(result, CallToolResult)
+        assert result.is_error
+        assert _text(result) == NO_PRINCIPAL
+    assert (read.value.code, read.value.message) == (INVALID_REQUEST, NO_PRINCIPAL_TASK)
+
+
+@pytest.mark.parametrize("principal", ["agent-1", "agent one", "agënt-7"])
+async def test_a_principal_header_that_is_a_principal_is_read(tls: TlsFiles, principal: str) -> None:
+    """The control: the same path reads a principal, non-ASCII as the UTF-8 the gateway wrote, and Approvals is
+    asked for exactly that principal."""
+    headers = {b"authorization": f"Bearer {GATEWAY_BEARER}".encode(), PRINCIPAL_HEADER.encode(): principal.encode()}
+    script = Script(open_wait=[WAIT], reports={WAIT: [report(WaitState.APPROVED)]})
+    async with in_process_client(tls, headers, mode="legacy", script=script) as legacy:
+        held = await legacy.call_tool(TOOL, {"ticket": TICKET})
+    assert held.structured_content == {"state": "approved"}, held
+    assert script.calls[0] == ("open_wait", (Principal(principal), Ticket(TICKET), None))
 
 
 # What the agent is told when no wait can be opened.

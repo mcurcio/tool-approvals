@@ -29,7 +29,9 @@ later ones are ignored, so a review is never changed under the person reading it
 gateway's bearer, or its client certificate on a `wait.listeners.mcp` with `tls.client_ca`; never the agent's. The
 principal is read only from `wait_route.principal_header`, which the gateway sets on every message of the wait route
 ([agentgateway](agentgateway.md#the-wait-target), [Envoy](envoy.md#the-wait-route),
-[Check API gateways](check-api.md#the-wait-through-your-gateway)); without it no wait opens and no task is read. A
+[Check API gateways](check-api.md#the-wait-through-your-gateway)), as UTF-8; without it no wait opens and no task
+is read. A value the gate would not attest (a control character, CR, LF, NUL and tab included, a leading or
+trailing space, or bytes that are not UTF-8) counts as no principal, by the same rule. A
 principal can wait only on its own tickets, and read only its own waits.
 
 ## A held call
