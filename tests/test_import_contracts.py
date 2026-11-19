@@ -2,6 +2,7 @@
 
 import tomllib
 from pathlib import Path
+from typing import Any
 
 PYPROJECT = Path(__file__).resolve().parents[1] / "pyproject.toml"
 
@@ -24,10 +25,11 @@ def test_the_kernel_and_the_cores_forbid_the_same_io_modules() -> None:
     assert {"socket", "asyncio", "subprocess", "opentelemetry", "grpc_health"} <= set(kernel_io)
 
 
-def _contract(contract_id: str) -> dict[str, object]:
+def _contract(contract_id: str) -> dict[str, Any]:
     config = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
     (contract,) = [c for c in config["tool"]["importlinter"]["contracts"] if c["id"] == contract_id]
-    return contract
+    found: dict[str, Any] = contract
+    return found
 
 
 def test_every_channel_adapter_is_independent_and_reached_only_from_main() -> None:
@@ -38,7 +40,7 @@ def test_every_channel_adapter_is_independent_and_reached_only_from_main() -> No
     )
     independent = _contract("C11-independent")
     assert independent["type"] == "independence"
-    assert sorted(independent["modules"]) == channels  # type: ignore[call-overload]
+    assert sorted(independent["modules"]) == channels
     protected = _contract("C11-protected")
     assert protected["type"] == "protected"
     assert protected["protected_modules"] == ["tool_approvals.approvals.infra.channels"]
