@@ -17,7 +17,7 @@ from typing import Any, Final
 
 import psycopg.errors
 import sqlalchemy.exc
-from sqlalchemy import func, insert, select, text
+from sqlalchemy import and_, func, insert, or_, select, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.exc import TimeoutError as PoolTimeout
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -274,7 +274,31 @@ class _SqlApprovals:
     async def waiting_for(
         self, groups_by_requirement: Mapping[RequirementName, frozenset[GroupRef]], limit: int
     ) -> list[Approval]:
-        raise NotImplementedError
+        # Per requirement name: the snapshot's approver_groups (a JSONB array of {"claim", "value"}) contains one
+        # of that name's groups.
+        matches = [
+            and_(
+                approvals.c.requirement_name == name,
+                or_(
+                    *(
+                        approvals.c.requirement["approver_groups"].contains([{"claim": g.claim, "value": g.value}])
+                        for g in sorted(groups)
+                    )
+                ),
+            )
+            for name, groups in sorted(groups_by_requirement.items())
+            if groups
+        ]
+        if not matches:
+            return []
+        query = (
+            select(Approval)
+            .where(approvals.c.state == State.WAITING, or_(*matches))
+            .order_by(approvals.c.answer_deadline, approvals.c.ticket)
+            .limit(limit)
+        )
+        await self._session.flush()
+        return list((await self._session.scalars(query)).all())
 
     def add(self, approval: Approval) -> None:
         self._session.add(approval)

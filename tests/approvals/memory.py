@@ -20,6 +20,7 @@ from tool_approvals.approvals.app.ports import (
     ApprovalRepository,
     ConcurrentChange,
     PushSubscriptionRepository,
+    StoreUnavailable,
     UnitOfWork,
 )
 from tool_approvals.approvals.domain.approval import Actor, Approval, EventKind, State
@@ -134,6 +135,8 @@ class MemoryStore:
         # Run once each, at the next commit, after that unit's reads and before its checks: a rival's chance.
         self.before_commit: list[Callable[[], Awaitable[object]]] = []
         self._approvals: dict[Ticket, Approval] = {}
+        self.push_audit: dict[str, Audit] = {}
+        self._push: dict[str, PushSubscription] = {}
 
     def unit_of_work(self, by: Actor) -> "MemoryUnitOfWork":
         """Satisfies `UnitOfWorkFactory`."""
@@ -146,6 +149,10 @@ class MemoryStore:
 
     def tickets(self) -> set[Ticket]:
         return set(self._approvals)
+
+    def subscriptions(self) -> dict[str, PushSubscription]:
+        """Copies of the committed push subscriptions, by endpoint, for a test to read."""
+        return copy.deepcopy(self._push)
 
 
 class MemoryUnitOfWork:
@@ -160,6 +167,9 @@ class MemoryUnitOfWork:
         self._loaded: dict[Ticket, tuple[Approval, int, _Snapshot]] = {}
         self._added: dict[Ticket, Approval] = {}
         self._deleted: set[Ticket] = set()
+        self._push_loaded: dict[str, PushSubscription] = {}
+        self._push_added: dict[str, PushSubscription] = {}
+        self._push_deleted: set[str] = set()
         self._read = False
         self._committed = False
 
@@ -199,6 +209,7 @@ class MemoryUnitOfWork:
             result[ticket] = approval
         _check_one_live(result.values())
         self._write(result, changed)
+        self._write_push()
 
     def _write(self, result: dict[Ticket, Approval], changed: dict[Ticket, Approval]) -> None:
         store, now, by = self._store, self.now, str(self._by)
@@ -223,6 +234,28 @@ class MemoryUnitOfWork:
         store._approvals = result
         store.commits += 1
         store.feed.changed(set(changed) | set(self._added) | self._deleted)
+
+    def _write_push(self) -> None:
+        store, now, by = self._store, self.now, str(self._by)
+        for endpoint in self._push_deleted:
+            store._push.pop(endpoint, None)
+            store.push_audit.pop(endpoint, None)
+        for endpoint, subscription in self._push_added.items():
+            subscription._created_at = subscription._updated_at = now
+            store._push[endpoint] = copy.deepcopy(subscription)
+            store.push_audit[endpoint] = Audit(now, by, now, by)
+
+    def _push_view(self) -> dict[str, PushSubscription]:
+        """Every subscription as this unit sees it: its copies of the committed ones (taken on first sight), less
+        its deletions, plus its own additions."""
+        for endpoint, subscription in self._store._push.items():
+            self._push_loaded.setdefault(endpoint, copy.deepcopy(subscription))
+        kept = {
+            endpoint: subscription
+            for endpoint, subscription in self._push_loaded.items()
+            if endpoint in self._store._push and endpoint not in self._push_deleted
+        }
+        return kept | self._push_added
 
     # The repository's reads, over this unit's own copies where it holds them.
 
@@ -308,7 +341,20 @@ class _MemoryApprovals:
     async def waiting_for(
         self, groups_by_requirement: Mapping[RequirementName, frozenset[GroupRef]], limit: int
     ) -> list[Approval]:
-        raise NotImplementedError
+        def keep(approval: Approval) -> bool:
+            groups = groups_by_requirement.get(approval.requirement.name)
+            return (
+                approval.state is State.WAITING
+                and groups is not None
+                and bool(groups & approval.requirement.approver_groups)
+            )
+
+        found = sorted(
+            (approval for approval in self._unit._view() if keep(approval)),
+            key=lambda approval: (approval.answer_deadline, approval.ticket),
+        )
+        loaded = [self._unit._load(approval.ticket) for approval in found[:limit]]
+        return [approval for approval in loaded if approval is not None]
 
     def add(self, approval: Approval) -> None:
         self._unit._read = True
@@ -320,22 +366,27 @@ class _MemoryApprovals:
 
 
 class _MemoryPushSubscriptions:
-    """Satisfies `PushSubscriptionRepository`."""
+    """Satisfies `PushSubscriptionRepository`, keyed by endpoint. Changes are this unit's own until its commit,
+    which writes them with their audit fields (`MemoryStore.push_audit`)."""
 
     def __init__(self, unit: MemoryUnitOfWork) -> None:
         self._unit = unit
 
     async def get(self, endpoint: str) -> PushSubscription | None:
-        raise NotImplementedError
+        return self._unit._push_view().get(endpoint)
 
     async def routed_to(self, groups: frozenset[GroupRef]) -> list[PushSubscription]:
-        raise NotImplementedError
+        view = self._unit._push_view()
+        return [view[endpoint] for endpoint in sorted(view) if view[endpoint].routes(groups)]
 
     def add(self, subscription: PushSubscription) -> None:
-        raise NotImplementedError
+        assert subscription.endpoint not in self._unit._push_view(), "delete the endpoint's row before adding one"
+        self._unit._push_added[subscription.endpoint] = subscription
 
     async def delete(self, subscription: PushSubscription) -> None:
-        raise NotImplementedError
+        assert self._unit._push_view().get(subscription.endpoint) is subscription, "delete what this unit read"
+        self._unit._push_added.pop(subscription.endpoint, None)
+        self._unit._push_deleted.add(subscription.endpoint)
 
 
 def next_due_at(approval: Approval) -> datetime:
@@ -387,3 +438,18 @@ def _check_one_live(approvals: Iterable[Approval]) -> None:
         live_waits = [wait for wait in approval.waits if wait.outcome is None]
         if len(live_waits) > 1:
             raise ConcurrentChange(approval.ticket)
+
+
+class _StoreDown:
+    """A unit of work that cannot start: the database does not answer."""
+
+    async def __aenter__(self) -> UnitOfWork:
+        raise StoreUnavailable("the database connection failed")
+
+    async def __aexit__(self, *_: object) -> None:
+        return None  # pragma: no cover - never entered
+
+
+def store_down(_by: Actor) -> _StoreDown:
+    """Satisfies `UnitOfWorkFactory`: every unit of work raises StoreUnavailable on entry."""
+    return _StoreDown()

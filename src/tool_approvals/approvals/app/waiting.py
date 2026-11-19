@@ -11,8 +11,9 @@ from typing import Final
 
 from tool_approvals.approvals.app.ports import UnitOfWorkFactory
 from tool_approvals.approvals.app.rules import Rules
+from tool_approvals.approvals.domain.approval import Actor, ActorKind, Approval
 from tool_approvals.kernel.names import Principal, RequirementName, ServerName, Ticket, ToolName
-from tool_approvals.kernel.requirements import GroupRef, SurfaceRule
+from tool_approvals.kernel.requirements import GroupRef, SurfaceRule, stricter
 
 LIST_LIMIT: Final = 100  # Approvals one list shows at most, earliest answer deadline first
 
@@ -41,4 +42,33 @@ class WaitingList:
         """The Waiting Approvals `viewer` may answer here, at most LIST_LIMIT, earliest answer deadline first: every
         one whose effective requirement allows this surface and holds a group of `viewer`. Reads only; raises
         StoreUnavailable when the store does not answer."""
-        raise NotImplementedError
+        surface = self._surface.name
+        groups_by_requirement = {
+            name: viewer & current.approver_groups
+            for name, current in self._rules.requirements.items()
+            if surface in current.allowed_surfaces and viewer & current.approver_groups
+        }
+        if not groups_by_requirement:
+            return []
+        async with self._uow(Actor(ActorKind.APPROVER, None, surface)) as unit:  # reads only
+            found = await unit.approvals.waiting_for(groups_by_requirement, LIST_LIMIT)
+        return [_summary(approval) for approval in found if self._answerable(viewer, approval)]
+
+    def _answerable(self, viewer: frozenset[GroupRef], approval: Approval) -> bool:
+        """AnswerService.review's rule: the effective requirement allows this surface and holds a viewer group."""
+        current = self._rules.requirements.get(approval.requirement.name)
+        if current is None:
+            return False
+        effective = stricter(approval.requirement, current, self._rules.scale)
+        return self._surface.name in effective.allowed_surfaces and bool(viewer & effective.approver_groups)
+
+
+def _summary(approval: Approval) -> WaitingSummary:
+    return WaitingSummary(
+        ticket=approval.ticket,
+        principal=approval.call.principal,
+        server=approval.call.server,
+        tool=approval.call.tool,
+        requirement=approval.requirement.name,
+        answer_deadline=approval.answer_deadline,
+    )

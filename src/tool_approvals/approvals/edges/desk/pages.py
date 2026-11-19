@@ -10,20 +10,26 @@ value is."""
 
 import json
 import unicodedata
+from collections.abc import Sequence
+from dataclasses import dataclass
 from importlib.resources import files
 from typing import Final
 
 from jinja2 import Environment, PackageLoader
 
 from tool_approvals.approvals.app.answers import ApprovalDetail
+from tool_approvals.approvals.app.waiting import WaitingSummary
 
 _PACKAGE: Final = "tool_approvals.approvals.edges.desk"
 
 STYLESHEET: Final = files(_PACKAGE).joinpath("desk.css").read_bytes()
+SCRIPT: Final = files(_PACKAGE).joinpath("desk.js").read_bytes()  # the list page's push registration
+SERVICE_WORKER: Final = files(_PACKAGE).joinpath("desk-sw.js").read_bytes()  # shows the push notices
 _HIDDEN_CATEGORIES: Final = frozenset({"Cc", "Cf", "Zl", "Zp"})
 _COMBINING: Final = "Mn"  # a nonspacing mark: hidden only where nothing visible carries it
 _KEPT: Final = frozenset("\n")
 _TITLE: Final = "Review a tool call"
+_LIST_TITLE: Final = "Waiting for your answer"
 
 
 def visible(text: str) -> str:
@@ -45,6 +51,18 @@ _ENVIRONMENT: Final = Environment(loader=PackageLoader(_PACKAGE), autoescape=Tru
 _ENVIRONMENT.filters["visible"] = visible
 _REVIEW: Final = _ENVIRONMENT.get_template("review.html")
 _MESSAGE: Final = _ENVIRONMENT.get_template("message.html")
+_LIST: Final = _ENVIRONMENT.get_template("list.html")
+
+
+@dataclass(frozen=True, slots=True)
+class PushOffer:
+    """What the list page's script needs to register this browser for push notices: none of it agent-supplied."""
+
+    script: str  # the URL of desk.js
+    service_worker: str  # the URL of desk-sw.js
+    subscriptions: str  # the URL of /push/subscriptions
+    application_server_key: str  # the VAPID public key, base64url
+    token: str  # the push token of this session
 
 
 def review_page(detail: ApprovalDetail, *, stylesheet: str, action: str, digest: str, form_token: str | None) -> str:
@@ -66,6 +84,12 @@ def _rerendered(arguments_json: bytes) -> str:
     if not arguments_json:
         return ""
     return json.dumps(json.loads(arguments_json), indent=2, sort_keys=True, ensure_ascii=False)
+
+
+def list_page(rows: Sequence[WaitingSummary], *, stylesheet: str, review_base: str, push: PushOffer | None) -> str:
+    """The Waiting Approvals the viewer may answer, each linking to `review_base`/<ticket>; with the push offer
+    (and its script) when `push` is given, and no script otherwise."""
+    return _LIST.render(title=_LIST_TITLE, stylesheet=stylesheet, rows=rows, review_base=review_base, push=push)
 
 
 def message_page(title: str, message: str, *, stylesheet: str) -> str:

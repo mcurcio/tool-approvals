@@ -4,9 +4,10 @@ The desk is the built-in page where a person reviews one Approval and answers it
 `approvals.listeners.approvers`, signs people in with your OpenID Provider, and answers as the native surface
 `approvals.desk.surface`. Agents never reach it: keep that listener off every network an agent can reach.
 
-**Built now:** one Approval per page, reached by its link. **Planned (milestone 3):** a list of waiting Approvals,
-notices to approvers (CloudEvents webhooks, Web Push), and integrated answer surfaces. Until notices exist, the
-link has to reach approvers some other way; it is `<public_url>/approvals/<ticket>`.
+**Built now:** one Approval per page, reached by its link (`<public_url>/approvals/<ticket>`); the list of the
+Approvals waiting for the signed-in approver (`<public_url>/approvals`); and, when a Web Push channel is
+configured, registering a browser for push notices from that list. Notices to approvers by CloudEvents webhooks
+and the Web Push sending itself are configured as channels ([configuration](configuration.md)).
 
 ## A person answering
 
@@ -42,6 +43,48 @@ The requirement used is the stricter of the one the Approval was asked under and
 | Not an approver; surface not allowed; level too low or above the surface's cap; sign-in too old; a form token from another page | 403 |
 | The identity provider did not answer | 502 |
 | The answer could not be stored just now | 503 |
+
+## The list
+
+`GET /approvals` shows every Waiting Approval the signed-in person may answer at the desk, earliest answer deadline
+first, at most 100. `GET /` redirects to it. Each row links to the Approval's review and shows the principal,
+server, tool, requirement and answer deadline, as escaped text with control and direction-changing characters
+shown as visible escapes; never the arguments or the agent's words.
+
+An Approval is listed when it is Waiting and its effective requirement (the stricter of the one it was asked under
+and the one configured now) allows the desk and names one of the person's groups: the same rule the review
+applies. A requirement changed in configuration to drop a group, or to disallow the desk, takes its Approvals off
+the list at once; an answered or expired Approval is never listed.
+
+The list answers nothing, so it needs a sign-in but no step-up: without one, the desk signs the person in plainly
+(`/login?next=list`, no `acr_values` or `max_age`) and comes back to the list. A review opened from it asks for
+the requirement's level as usual. The list is sent with `Cache-Control: no-store`.
+
+## Push notices from the list
+
+With a Web Push channel configured, the list page offers **Notify this browser** (and **Stop notifying this
+browser**). It loads one first-party script, `/desk.js`, which registers the service worker `/desk-sw.js`, asks
+the browser for a push subscription with the channel's VAPID public key, and sends it to the desk. The key and the
+other values the script needs are data attributes on the page; there is no inline script. The service worker shows
+a notification for `approval.waiting` with a link to the review, replaces it (the same tag: the ticket) for
+`approval.resolved`, and opens the link on a click; a link that is not the desk's own opens the list instead.
+
+| Request | Body | Answer |
+|---|---|---|
+| `POST /push/subscriptions` | JSON: `endpoint`, `keys.p256dh`, `keys.auth` (base64url), `form_token` | 204 kept; 400 malformed; 403 not an approver, an endpoint outside the push origins, or a bad token; 415 not `application/json`; 503 not stored just now |
+| `DELETE /push/subscriptions` | JSON: `endpoint`, `form_token` | 204 removed; 404 not a subscription this approver registered; 403 a bad token; 415; 503 |
+
+- **Only an approver registers.** The sign-in must hold a group some requirement names; the subscription keeps
+  the approver's subject and only those groups, which decide which notices it receives.
+- **Only the push origins.** The endpoint must be an `https` URL of at most 2048 characters that starts with one
+  of the channel's `push_origins` followed by `/`. `https://push.example.com.attacker.test/...` does not match
+  `https://push.example.com`.
+- **Well-formed keys.** `p256dh` is an uncompressed P-256 point (65 bytes, starting `0x04`); `auth` is 16 bytes.
+- **CSRF.** The request must be `Content-Type: application/json` and carry the page's push token, an HMAC with
+  `desk.form_key` over the session and the word `push`.
+- Registering an endpoint again replaces its subscription; an approver removes only their own.
+
+Without a Web Push channel these routes and both scripts answer 404, and the list page links no script.
 
 ## What the desk checks in the ID token
 
@@ -87,7 +130,7 @@ Map each `acr` value your provider issues to a level in `assurance`, weakest fir
 | Form token | An HMAC with `desk.form_key` over the session, the ticket and the shown digest: the CSRF defence, and the binding of an answer to the page that showed it |
 | Both keys | At least 32 bytes each, separate, and the same on every replica |
 | HTTPS | The cookie is `Secure`, so serve `public_url` over HTTPS: a TLS-terminating proxy in front of the plain-HTTP approvers listener |
-| Content-Security-Policy | `default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'` on every response |
+| Content-Security-Policy | `default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'` on every response. The review page holds no script. The push scripts also need `script-src 'self'; worker-src 'self'; connect-src 'self'`; until the policy adds them, browsers refuse `/desk.js` and the push offer does nothing |
 
 Every answer is stored with the surface, the approver's subject, the group through which they qualified, the
 level the surface vouched, and the sign-in moment.

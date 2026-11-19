@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block head %}{% if push %}<script src="{{ push.script }}" defer></script>
+{% endif %}{% endblock %}
+{% block main %}
+<h1>{{ title }}</h1>
+{% if rows %}
+<table>
+<thead><tr><th>Approval</th><th>Agent</th><th>Server</th><th>Tool</th><th>Requirement</th><th>Answer by</th></tr></thead>
+<tbody>
+{% for row in rows %}
+<tr>
+<td><a href="{{ review_base }}/{{ row.ticket }}">Review</a></td>
+<td><code>{{ row.principal | visible }}</code></td>
+<td><code>{{ row.server | visible }}</code></td>
+<td><code>{{ row.tool | visible }}</code></td>
+<td>{{ row.requirement | visible }}</td>
+<td>{{ row.answer_deadline.isoformat(timespec="seconds") }}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+{% else %}
+<p>Nothing is waiting for you.</p>
+{% endif %}
+{% if push %}
+<section id="push" data-application-server-key="{{ push.application_server_key }}" data-push-token="{{ push.token }}" data-subscriptions="{{ push.subscriptions }}" data-service-worker="{{ push.service_worker }}">
+<h2>Notices</h2>
+<p>
+<button type="button" id="push-on" hidden>Notify this browser</button>
+<button type="button" id="push-off" hidden>Stop notifying this browser</button>
+</p>
+<p id="push-status" role="status"></p>
+</section>
+{% endif %}
+{% endblock %}
