@@ -1,0 +1,129 @@
+# Every value is described in docs/reference/helm.md.
+
+image:
+  repository: ghcr.io/mcurcio/tool-approvals
+  tag: "" # default: the chart's appVersion, which the release sets to its own version
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Required: the tool-approvals configuration file, as a YAML object (docs/reference/configuration.md). It is
+# rendered to a ConfigMap and mounted at /etc/tool-approvals/config.yaml; the chart reads every listener's port from
+# it. Secrets are never inline: the file names files under /etc/tool-approvals/secrets (or env variables).
+config: {}
+
+# Names of Secrets you already created, each mounted read-only at /etc/tool-approvals/secrets in that service's pods.
+# The migration Job mounts only `migrate`'s, which holds only the database DSN.
+secrets:
+  gate: ""
+  wait: ""
+  approvals: ""
+  migrate: ""
+
+# Names of Secrets holding TLS files (certificates, keys, CAs), mounted read-only at /etc/tool-approvals/tls.
+tls:
+  gate: ""
+  wait: ""
+  approvals: ""
+
+# Extra container env per service, for example a secretKeyRef for a `{env: NAME}` secret in the config.
+env:
+  gate: []
+  wait: []
+  approvals: []
+  migrate: []
+
+gate:
+  enabled: true
+  replicas: 2
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAnnotations: {}
+  podLabels: {}
+  podDisruptionBudget:
+    maxUnavailable: 1
+  topologySpreadConstraints: [] # empty: one spread over kubernetes.io/hostname, whenUnsatisfiable ScheduleAnyway
+  terminationGracePeriodSeconds: 15
+
+wait:
+  enabled: true
+  replicas: 2
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAnnotations: {}
+  podLabels: {}
+  podDisruptionBudget:
+    maxUnavailable: 1
+  topologySpreadConstraints: []
+  terminationGracePeriodSeconds: 15
+
+approvals:
+  enabled: true
+  replicas: 2
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAnnotations: {}
+  podLabels: {}
+  podDisruptionBudget:
+    maxUnavailable: 1
+  topologySpreadConstraints: []
+  terminationGracePeriodSeconds: 15
+
+# The schema migration, run as a pre-install and pre-upgrade hook before the services roll.
+migrate:
+  backoffLimit: 1
+  activeDeadlineSeconds: 300
+  resources: {}
+
+service:
+  type: ClusterIP
+  annotations: {}
+
+# One NetworkPolicy per listener. Each list holds NetworkPolicyPeers admitted to that listener; an empty list admits
+# nothing but what the chart adds (this release's gate and wait pods on approvals' requests listener).
+networkPolicy:
+  enabled: false
+  ingress:
+    gate:
+      check-api-grpc: []
+      check-api-json: []
+      ext-mcp: []
+      ext-authz: []
+      health: []
+    wait:
+      mcp: []
+      health: []
+    approvals:
+      requests: []
+      approvers: []
+      answers-grpc: []
+      answers-json: []
+      admin: []
+      health: []
+
+serviceAccount:
+  create: true
+  name: ""
+  automountServiceAccountToken: false
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: [ALL]

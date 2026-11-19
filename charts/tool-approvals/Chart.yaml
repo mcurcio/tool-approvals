@@ -1,0 +1,13 @@
+apiVersion: v2
+name: tool-approvals
+description: A pluggable human-approval guardrail for MCP tool calls (the gate, the wait server and Approvals)
+type: application
+# Placeholders, never edited by hand: the release job packages the chart with the release tag's version as both
+# (`helm package --version V --app-version V`), and the image tag defaults to the appVersion.
+version: 0.0.0
+appVersion: 0.0.0
+home: https://github.com/mcurcio/tool-approvals
+sources:
+  - https://github.com/mcurcio/tool-approvals
+license: MIT
+keywords: [mcp, approvals, guardrail, gateway]

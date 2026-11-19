@@ -21,3 +21,6 @@ htmlcov/
 
 # Node (release tooling)
 node_modules/
+
+# Helm (a packaged chart; the release packages it in CI)
+*.tgz

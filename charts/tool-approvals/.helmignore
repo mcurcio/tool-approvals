@@ -1,0 +1,5 @@
+# Left out of the packaged chart.
+ci/
+.DS_Store
+*.tmp
+*.orig

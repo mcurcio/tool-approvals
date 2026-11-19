@@ -1,0 +1,101 @@
+# tool-approvals with Docker Compose: Postgres, the schema migration, then Approvals, the gate and the wait server.
+# deploy/compose/README.md walks through it. Before the first `docker compose up`, create every file under secrets/
+# (gitignored) and edit config.yaml (names, policy, the identity provider, the desk's public URL).
+#
+#   docker compose -f deploy/compose/compose.yaml up -d
+#
+# TOOL_APPROVALS_IMAGE picks the image (default: the published one); TOOL_APPROVALS_VERSION its tag (default: latest).
+
+x-tool-approvals: &tool-approvals
+  image: ${TOOL_APPROVALS_IMAGE:-ghcr.io/mcurcio/tool-approvals}:${TOOL_APPROVALS_VERSION:-latest}
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  restart: unless-stopped
+  stop_grace_period: 15s # above drain + the longest grace (docs/operations.md, Stopping)
+  volumes:
+    - ./config.yaml:/etc/tool-approvals/config.yaml:ro
+
+# Ready once /readyz answers 200 on the health listener (port 8081 in config.yaml).
+x-ready: &ready
+  test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/readyz')"]
+  interval: 5s
+  timeout: 3s
+  retries: 12
+
+services:
+  postgres:
+    image: postgres:18.7-alpine@sha256:b6972e1115a4ff8eba5d7f7d19184926d1e16d7d1136ae1e1a7ebf286da0f015
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: approvals
+      POSTGRES_DB: approvals
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres-password
+    secrets: [postgres-password]
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "approvals", "-d", "approvals"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  # Brings the schema to this release's revision, then exits. Expand-only: the previous release may still serve.
+  migrate:
+    <<: *tool-approvals
+    command: [--config, /etc/tool-approvals/config.yaml, approvals, migrate]
+    restart: "no"
+    secrets: [approvals-dsn] # only the DSN
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  approvals:
+    <<: *tool-approvals
+    command: [--config, /etc/tool-approvals/config.yaml, approvals, serve]
+    secrets: [approvals-dsn, idp-client-secret, desk-session-key, desk-form-key, approvals.pem, approvals-key.pem]
+    healthcheck: *ready
+    ports:
+      - "8080:8080" # the desk (approvers): put a TLS-terminating proxy at its public_url in front of it
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+
+  gate:
+    <<: *tool-approvals
+    command: [--config, /etc/tool-approvals/config.yaml, gate]
+    secrets: [gate-approvals-bearer, ca.pem, gate.pem, gate-key.pem]
+    healthcheck: *ready
+    ports:
+      - "9443:9443" # the Check API (gRPC)
+      - "9444:9444" # the agentgateway hook (ext_mcp)
+    depends_on:
+      approvals: { condition: service_healthy }
+
+  wait:
+    <<: *tool-approvals
+    command: [--config, /etc/tool-approvals/config.yaml, wait]
+    secrets: [wait-approvals-bearer, ca.pem, wait.pem, wait-key.pem]
+    healthcheck: *ready
+    ports:
+      - "8443:8443" # the wait server (MCP), the gateway's wait route
+    depends_on:
+      approvals: { condition: service_healthy }
+
+# Each a file you create under secrets/ (README.md); mounted read-only at /run/secrets/<name>.
+secrets:
+  postgres-password: { file: ./secrets/postgres-password }
+  approvals-dsn: { file: ./secrets/approvals-dsn }
+  idp-client-secret: { file: ./secrets/idp-client-secret }
+  desk-session-key: { file: ./secrets/desk-session-key }
+  desk-form-key: { file: ./secrets/desk-form-key }
+  gate-approvals-bearer: { file: ./secrets/gate-approvals-bearer }
+  wait-approvals-bearer: { file: ./secrets/wait-approvals-bearer }
+  ca.pem: { file: ./secrets/ca.pem }
+  approvals.pem: { file: ./secrets/approvals.pem }
+  approvals-key.pem: { file: ./secrets/approvals-key.pem }
+  gate.pem: { file: ./secrets/gate.pem }
+  gate-key.pem: { file: ./secrets/gate-key.pem }
+  wait.pem: { file: ./secrets/wait.pem }
+  wait-key.pem: { file: ./secrets/wait-key.pem }
+
+volumes:
+  postgres-data:

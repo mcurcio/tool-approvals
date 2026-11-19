@@ -1,0 +1,75 @@
+{{- /*
+The schema migration, as a pre-install and pre-upgrade hook: it runs (expand-only migrations) before any pod of
+this release rolls. It reads its own copy of the configuration (the release's ConfigMap does not exist yet on
+install) and mounts only secrets.migrate, which holds only the database DSN. On install the release's
+ServiceAccount does not exist yet either, so the Job runs as the namespace's default account, or as the account
+serviceAccount.name names when the chart does not create one; it mounts no token.
+*/}}
+{{- if .Values.approvals.enabled }}
+{{- $name := printf "%s-migrate" (include "tool-approvals.fullname" .) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "tool-approvals.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migrate
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-1"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+data:
+  config.yaml: |
+    {{- include "tool-approvals.config" . | nindent 4 }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "tool-approvals.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migrate
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.migrate.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.migrate.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "tool-approvals.labels" . | nindent 8 }}
+        app.kubernetes.io/component: migrate
+    spec:
+      restartPolicy: Never
+      {{- if not .Values.serviceAccount.create }}
+      serviceAccountName: {{ include "tool-approvals.serviceAccountName" . }}
+      {{- end }}
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: migrate
+          image: {{ include "tool-approvals.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: {{ include "tool-approvals.args" "migrate" }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          {{- with .Values.env.migrate }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.migrate.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            {{- include "tool-approvals.volumeMounts" (dict "secret" .Values.secrets.migrate) | nindent 12 }}
+      volumes:
+        {{- include "tool-approvals.volumes" (dict "configMap" $name "secret" .Values.secrets.migrate) | nindent 8 }}
+{{- end }}

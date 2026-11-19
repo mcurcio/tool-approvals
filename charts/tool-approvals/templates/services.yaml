@@ -1,0 +1,60 @@
+{{- /*
+One Service per service, one port per configured listener. Approvals' requests listener is served only by the
+headless <fullname>-approvals-requests Service: the gate and the wait server resolve every replica and round-robin
+over them on the client side, which one virtual IP would defeat.
+*/}}
+{{- $root := . }}
+{{- range $component := list "gate" "wait" "approvals" }}
+{{- $values := get $root.Values $component }}
+{{- if $values.enabled }}
+{{- $listeners := (include "tool-approvals.listeners" (dict "root" $root "service" $component) | fromYaml).items }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "tool-approvals.fullname" $root }}-{{ $component }}
+  labels:
+    {{- include "tool-approvals.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $component }}
+  {{- with $root.Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ $root.Values.service.type }}
+  selector:
+    {{- include "tool-approvals.selectorLabels" (dict "root" $root "component" $component) | nindent 4 }}
+  ports:
+    {{- range $listeners }}
+    {{- if ne .name "requests" }}
+    - name: {{ .name }}
+      port: {{ .port }}
+      targetPort: {{ .name }}
+      protocol: TCP
+    {{- end }}
+    {{- end }}
+{{- if eq $component "approvals" }}
+{{- range $listeners }}
+{{- if eq .name "requests" }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "tool-approvals.fullname" $root }}-approvals-requests
+  labels:
+    {{- include "tool-approvals.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: approvals
+spec:
+  clusterIP: None
+  selector:
+    {{- include "tool-approvals.selectorLabels" (dict "root" $root "component" "approvals") | nindent 4 }}
+  ports:
+    - name: requests
+      port: {{ .port }}
+      targetPort: requests
+      protocol: TCP
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

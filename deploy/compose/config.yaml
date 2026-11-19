@@ -1,0 +1,97 @@
+# The configuration compose.yaml mounts at /etc/tool-approvals/config.yaml, read by every service. An example to
+# edit: replace the registry hashes with your own (`credentials issue`), name your requirements and policy, and point
+# idp and desk at your identity provider and the desk's public URL. Every secret is a file under /run/secrets, which
+# compose mounts from secrets/ (README.md). Every section is described in docs/reference/configuration.md.
+version: 1
+
+registry:
+  - name: gateway-hook # your gateway's hook into the gate
+    kind: caller
+    credential: { bearer_sha256: 1f0b6c6e2a2d4b5f8e9a0c1d2e3f405162738495a6b7c8d9e0f1a2b3c4d5e6f7 }
+    grants: [check]
+  - name: gate # the gate asking Approvals: the hash of secrets/gate-approvals-bearer
+    kind: caller
+    credential: { bearer_sha256: 2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f70819 }
+    grants: [requests.request, requests.claim]
+  - name: wait-server # the wait server asking Approvals: the hash of secrets/wait-approvals-bearer
+    kind: caller
+    credential: { bearer_sha256: 3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b }
+    grants: [requests.open_wait, requests.await_outcome]
+  - name: gateway-wait-route # your gateway calling the wait tool for an agent
+    kind: caller
+    credential: { bearer_sha256: 4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c }
+    grants: [wait.call]
+
+assurance:
+  - name: password
+    acr: ["1"]
+  - name: passkey
+    acr: ["2"]
+
+floor:
+  min_assurance: passkey
+  max_sign_in_age: 5m
+
+requirements:
+  reviewed:
+    approver_groups: [{ claim: groups, value: approvers }]
+    allowed_surfaces: [desk]
+    min_assurance: passkey
+    max_sign_in_age: 3m
+    answer_deadline: 2h
+    use_window: 15m
+
+surfaces:
+  - name: desk
+    kind: native
+    cap: passkey
+
+wait_route:
+  server: approvals-wait
+  principal_header: x-approvals-principal
+
+gate:
+  listeners:
+    health: { host: 0.0.0.0, port: 8081 }
+  approvals:
+    address: dns:///approvals:9443 # compose's name for every Approvals replica
+    ca: /run/secrets/ca.pem
+    credential: { file: /run/secrets/gate-approvals-bearer }
+  check_api:
+    grpc: { host: 0.0.0.0, port: 9443, tls: { cert: /run/secrets/gate.pem, key: /run/secrets/gate-key.pem } }
+    exposed_wait_tool: approvals-wait_approval_wait
+  ext_mcp:
+    listener: { host: 0.0.0.0, port: 9444, tls: { cert: /run/secrets/gate.pem, key: /run/secrets/gate-key.pem } }
+    principal_key: principal
+    exposed_wait_tool: approvals-wait_approval_wait
+  policy:
+    kind: rules
+    rules:
+      - { server: files, tool: "delete_*", require: reviewed }
+    default: none
+
+wait:
+  listeners:
+    mcp: { host: 0.0.0.0, port: 8443, tls: { cert: /run/secrets/wait.pem, key: /run/secrets/wait-key.pem } }
+    health: { host: 0.0.0.0, port: 8081 }
+  approvals:
+    address: dns:///approvals:9443
+    ca: /run/secrets/ca.pem
+    credential: { file: /run/secrets/wait-approvals-bearer }
+
+approvals:
+  listeners:
+    requests: { host: 0.0.0.0, port: 9443, tls: { cert: /run/secrets/approvals.pem, key: /run/secrets/approvals-key.pem } }
+    approvers: { host: 0.0.0.0, port: 8080 } # the desk, behind a TLS-terminating proxy at public_url
+    health: { host: 0.0.0.0, port: 8081 }
+  database:
+    dsn: { file: /run/secrets/approvals-dsn } # postgresql://approvals:PASSWORD@postgres/approvals
+  idp:
+    issuer: https://id.example.com
+    client_id: approvals-desk
+    client_secret: { file: /run/secrets/idp-client-secret }
+  desk:
+    surface: desk
+    public_url: https://approvals.example.com
+    session_key: { file: /run/secrets/desk-session-key }
+    form_key: { file: /run/secrets/desk-form-key }
