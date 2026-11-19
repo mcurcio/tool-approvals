@@ -152,6 +152,9 @@
     - gate.ext_authz.listener.tls
     - wait.listeners.mcp.tls
     - approvals.listeners.requests.tls
+    - approvals.listeners.answers_grpc.tls
+    - approvals.listeners.answers_json.tls
+    - approvals.listeners.admin.tls
   expect:
     - "gate.check_api.grpc: carries registry bearers, so it needs tls"
     - "gate.check_api.json: carries registry bearers, so it needs tls"
@@ -159,6 +162,78 @@
     - "gate.ext_authz.listener: carries registry bearers, so it needs tls"
     - "wait.listeners.mcp: carries registry bearers, so it needs tls"
     - "approvals.listeners.requests: carries registry bearers, so it needs tls"
+    - "approvals.listeners.answers_grpc: carries registry bearers, so it needs tls"
+    - "approvals.listeners.answers_json: carries registry bearers, so it needs tls"
+    - "approvals.listeners.admin: carries registry bearers, so it needs tls"
+
+# ---- registry kinds and integrated surfaces (the Answers API) ----
+
+- name: a caller granted an answers method
+  set: { registry.0.grants: [check, answers.answer] }
+  expect: ["registry.gateway-hook: kind caller may not be granted answers.answer"]
+
+- name: a caller granted the audit report
+  set: { registry.1.grants: [requests.request, requests.claim, admin.audit] }
+  expect: ["registry.gate: kind caller may not be granted admin.audit"]
+
+- name: a surface granted check
+  set: { registry.4.grants: [answers.review, answers.answer, check] }
+  expect: ["registry.ticketing: kind surface may not be granted check"]
+
+- name: an operator granted an answers method
+  set: { registry.5.grants: [admin.audit, answers.review] }
+  expect: ["registry.auditor: kind operator may not be granted answers.review"]
+
+- name: a registry kind that is not caller, surface or operator
+  set: { registry.4.kind: desk }
+  expect: ["registry[4].kind: Input should be 'caller', 'surface' or 'operator'"]
+
+- name: a surface entry naming no integrated surface
+  set:
+    registry.6:
+      name: chat
+      kind: surface
+      credential: { bearer_sha256: 8192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f70 }
+      grants: [answers.review, answers.answer]
+  expect: ["registry.chat: kind surface, but no integrated surface is named 'chat'"]
+
+- name: a surface entry naming a native surface
+  set: { registry.4.name: desk }
+  expect:
+    - "registry.desk: kind surface, but no integrated surface is named 'desk'"
+    - "surfaces.ticketing: an integrated surface with no registry entry of kind surface"
+
+- name: an integrated surface with no registry entry
+  delete: [registry.4]
+  expect: ["surfaces.ticketing: an integrated surface with no registry entry of kind surface"]
+
+- name: an integrated surface whose entry is a caller
+  set: { registry.4.kind: caller, registry.4.grants: [check] }
+  expect: ["surfaces.ticketing: an integrated surface with no registry entry of kind surface"]
+
+- name: one integrated surface with two surface entries
+  set:
+    registry.6:
+      name: ticketing
+      kind: surface
+      credential: { bearer_sha256: 8192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f70 }
+      grants: [answers.review]
+  expect: ["registry: the name 'ticketing' is on two entries"]
+
+- name: the Answers API and admin listeners without tls
+  delete: [approvals.listeners.answers_grpc.tls, approvals.listeners.answers_json.tls, approvals.listeners.admin.tls]
+  expect:
+    - "approvals.listeners.answers_grpc: carries registry bearers, so it needs tls"
+    - "approvals.listeners.answers_json: carries registry bearers, so it needs tls"
+    - "approvals.listeners.admin: carries registry bearers, so it needs tls"
+
+- name: the Answers API's JSON listener alone without tls
+  delete: [approvals.listeners.answers_json.tls]
+  expect: ["approvals.listeners.answers_json: carries registry bearers, so it needs tls"]
+
+- name: desk.surface naming an integrated surface
+  set: { approvals.desk.surface: ticketing }
+  expect: ["approvals.desk.surface: 'ticketing' is not a native surface"]
 
 - name: check_budget not below the ext_mcp hook timeout
   set: { gate.check_budget: 10s }
@@ -179,11 +254,15 @@
   expect: ["approvals.database.lock_timeout: more than 1/4 of gate.check_budget"]
 
 - name: retention below the longest answer deadline
-  set: { approvals.retention: 30m }
+  set: { approvals.retention: 30m, approvals.delivery.give_up_after: 30m } # a delivery horizon within retention
   expect: ["approvals.retention: below the longest answer_deadline + use_window"]
 
 - name: retention at the answer deadline but below it plus the use window
-  set: { approvals.retention: 1h, requirements.reviewed.answer_deadline: 1h, requirements.reviewed.use_window: 15m }
+  set:
+    approvals.retention: 1h
+    approvals.delivery.give_up_after: 1h
+    requirements.reviewed.answer_deadline: 1h
+    requirements.reviewed.use_window: 15m
   expect: ["approvals.retention: below the longest answer_deadline + use_window"]
 
 - name: an inline secret
@@ -213,12 +292,6 @@
 - name: an approver group under a claim the IdP does not send as groups
   set: { requirements.reviewed.approver_groups: [{ claim: roles, value: approvers }] }
   expect: ["requirements.reviewed.approver_groups[0].claim: 'roles', but approvals.idp.groups_claim is 'groups'"]
-
-- name: a requirement the desk cannot answer
-  set:
-    surfaces.1: { name: chat, kind: native, cap: passkey }
-    requirements.reviewed.allowed_surfaces: [chat]
-  expect: ["requirements.reviewed.allowed_surfaces: does not allow approvals.desk.surface 'desk'"]
 
 - name: an unknown key
   set: { gate.listeners.metrics: { host: 0.0.0.0, port: 9090 } }

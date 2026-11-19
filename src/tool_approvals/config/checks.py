@@ -18,7 +18,7 @@ from tool_approvals.config.sections import (
     ClientCertCredential,
     Listener,
 )
-from tool_approvals.kernel.methods import Method
+from tool_approvals.kernel.methods import CALLER_METHODS, OPERATOR_METHODS, SURFACE_METHODS, Method
 from tool_approvals.kernel.names import AssuranceName
 from tool_approvals.kernel.requirements import meets_floor
 
@@ -30,6 +30,8 @@ if TYPE_CHECKING:
 # lock is refused by Approvals as unavailable (and logged there as a lock wait) well before the gate's budget runs
 # out mid-commit.
 LOCK_WAITS_PER_CHECK: Final = 4
+# The grants each registry entry kind may hold.
+_KIND_METHODS: Final = {"caller": CALLER_METHODS, "surface": SURFACE_METHODS, "operator": OPERATOR_METHODS}
 
 
 def problems(cfg: "ConfigFile") -> list[str]:
@@ -72,7 +74,7 @@ def _surfaces(cfg: "ConfigFile") -> Iterator[str]:
     for surface in surfaces:
         where = f"surfaces.{surface.name}"
         yield from _level(cfg, f"{where}.cap", surface.cap)
-        if not surface.binds_digest:  # every surface is native (unit 3 adds integrated ones)
+        if surface.kind == "native" and not surface.binds_digest:
             yield f"{where}: a native surface must bind the digest (binds_digest: true)"
     if cfg.floor is not None:
         yield from _level(cfg, "floor.min_assurance", cfg.floor.min_assurance)
@@ -124,7 +126,32 @@ def _registry(cfg: "ConfigFile") -> Iterator[str]:
         for repeated in _repeated([digest.hex() for _, digest in named]):
             names = ", ".join(name for name, digest in named if digest.hex() == repeated)
             yield f"registry: one {what} on two entries ({names})"
+    yield from _grants_by_kind(cfg)
+    yield from _surface_entries(cfg)
     yield from _client_certificates(cfg)
+
+
+def _grants_by_kind(cfg: "ConfigFile") -> Iterator[str]:
+    """Each entry holds only the grants its kind may: no `caller` reaches an answers or admin method, a `surface`
+    only answers, an `operator` only reads the audit report."""
+    for entry in cfg.registry or ():
+        for grant in entry.grants:
+            if grant not in _KIND_METHODS[entry.kind]:
+                yield f"registry.{entry.name}: kind {entry.kind} may not be granted {grant}"
+
+
+def _surface_entries(cfg: "ConfigFile") -> Iterator[str]:
+    """Each integrated surface has exactly one registry entry of kind `surface` with its name, and each such entry
+    names an integrated surface."""
+    integrated = {surface.name for surface in cfg.surfaces or () if surface.kind == "integrated"}
+    entries = [entry.name for entry in cfg.registry or () if entry.kind == "surface"]
+    for name in _repeated(entries):
+        yield f"registry: the name {name!r} is on two entries"
+    for name in dict.fromkeys(entries):
+        if name not in integrated:
+            yield f"registry.{name}: kind surface, but no integrated surface is named {name!r}"
+    for name in sorted(integrated - set(entries)):
+        yield f"surfaces.{name}: an integrated surface with no registry entry of kind surface"
 
 
 # The grants a client-certificate credential may carry, and the listeners that serve each (question 10): the calls
@@ -171,7 +198,14 @@ def _bearer_listeners(cfg: "ConfigFile") -> Iterator[tuple[str, Listener]]:
     if cfg.wait is not None:
         yield "wait.listeners.mcp", cfg.wait.listeners.mcp
     if cfg.approvals is not None:
-        yield "approvals.listeners.requests", cfg.approvals.listeners.requests
+        listeners = cfg.approvals.listeners
+        yield "approvals.listeners.requests", listeners.requests
+        if listeners.answers_grpc is not None:
+            yield "approvals.listeners.answers_grpc", listeners.answers_grpc
+        if listeners.answers_json is not None:
+            yield "approvals.listeners.answers_json", listeners.answers_json
+        if listeners.admin is not None:
+            yield "approvals.listeners.admin", listeners.admin
 
 
 def _listeners(cfg: "ConfigFile") -> Iterator[str]:
@@ -227,9 +261,12 @@ def _approvals(cfg: "ConfigFile") -> Iterator[str]:
     approvals = cfg.approvals
     if approvals is None:
         return
-    # Every surface is native until unit 3 adds integrated ones, so a known name is a native surface.
-    if approvals.desk.surface not in {surface.name for surface in cfg.surfaces or ()}:
-        yield f"approvals.desk.surface: unknown surface {approvals.desk.surface!r}"
+    kinds = {surface.name: surface.kind for surface in cfg.surfaces or ()}
+    desk = approvals.desk.surface
+    if desk not in kinds:
+        yield f"approvals.desk.surface: unknown surface {desk!r}"
+    elif kinds[desk] != "native":
+        yield f"approvals.desk.surface: {desk!r} is not a native surface"
     # A Wait Task lives (its ttl) until the answer deadline plus the use window: retention keeps the Approval that
     # long at least, so a task is never told its wait is unknown while it may still be followed.
     lifetimes = [section.answer_deadline + section.use_window for section in (cfg.requirements or {}).values()]
@@ -249,12 +286,11 @@ def _lock_waits(cfg: "ConfigFile") -> Iterator[str]:
 
 
 def _answerable(cfg: "ConfigFile") -> Iterator[str]:
-    """Every requirement answerable at this Approvals: its groups read from the claim the desk's IdP sends, and
-    the desk's surface among those it allows (the desk is the one surface that answers until milestone 3)."""
+    """Every requirement's approver groups read from the claim the desk's IdP sends."""
     approvals = cfg.approvals
     if approvals is None:
         return
-    claim, desk = approvals.idp.groups_claim, approvals.desk.surface
+    claim = approvals.idp.groups_claim
     for name, section in (cfg.requirements or {}).items():
         where = f"requirements.{name}"
         for index, group in enumerate(section.approver_groups):
@@ -263,6 +299,3 @@ def _answerable(cfg: "ConfigFile") -> Iterator[str]:
                     f"{where}.approver_groups[{index}].claim: {group.claim!r}, but approvals.idp.groups_claim is "
                     f"{claim!r}, so no sign-in can carry it"
                 )
-        known_desk = desk in {surface.name for surface in cfg.surfaces or ()}  # an unknown one is reported once
-        if known_desk and section.allowed_surfaces and desk not in section.allowed_surfaces:
-            yield f"{where}.allowed_surfaces: does not allow approvals.desk.surface {desk!r}, so no one can answer it"

@@ -37,6 +37,7 @@ from tests.e2e.agents import AUDIENCE, ISSUER, AgentKeys
 from tests.e2e.clients import HttpMcpGateway
 from tests.e2e.hook_recorder import HookCall, HookRecorder
 from tests.e2e.relay import SlowRelay
+from tests.e2e.surface import IntegratedSurface
 from tests.e2e.wiring import AgentJwt, Hook, WaitTarget
 from tests.fixtures.certs import tls_files
 from tests.fixtures.echo_tool import EchoTool
@@ -70,6 +71,10 @@ WAIT_REQUEST_TIMEOUT: Final = timedelta(seconds=60)
 REQUIREMENT: Final = "reviewed"
 GATED_TOOL: Final = "delete_file"  # on `files`, the one call the policy sends for approval
 DESK_SURFACE: Final = "desk"
+INTEGRATED_SURFACE: Final = "ticketing"  # an integrated surface: its registry entry answers through the Answers API
+# The assurance levels, weakest first: the requirement's minimum and both surfaces' cap is passkey, so `hardware-key`
+# is a level a surface may not vouch.
+PASSWORD_ACR, PASSKEY_ACR, HARDWARE_KEY_ACR = "1", "2", "3"
 IDP_CLIENT_ID: Final = "approvals-desk"
 APPROVER_GROUP: Final = "approvers"
 APPROVER: Final = "approver-1"  # the IdP subject the desk driver signs in as
@@ -81,6 +86,8 @@ GATE_EXT_AUTHZ_PORT: Final = 9445
 WAIT_MCP_PORT: Final = 8443
 APPROVALS_REQUESTS_PORT: Final = 9443
 APPROVALS_DESK_PORT: Final = 8080
+APPROVALS_ANSWERS_GRPC_PORT: Final = 9446
+APPROVALS_ANSWERS_JSON_PORT: Final = 8446
 HEALTH_PORT: Final = 8081
 ECHO_PORT: Final = 8080
 POSTGRES_PORT: Final = 5432
@@ -90,6 +97,7 @@ POSTGRES_PORT: Final = 5432
 PUBLISHED: Final[Mapping[str, tuple[int, ...]]] = {
     "postgres": (POSTGRES_PORT,),
     "gate": (GATE_CHECK_JSON_PORT, GATE_CHECK_GRPC_PORT, GATE_EXT_MCP_PORT, GATE_EXT_AUTHZ_PORT),
+    "approvals": (APPROVALS_ANSWERS_GRPC_PORT, APPROVALS_ANSWERS_JSON_PORT),  # an integrated surface's view
     "echo": (ECHO_PORT,),
     "agentgateway": (agentgateway.PORT, agentgateway.READINESS_PORT),
     "envoy": (envoy.PORT, envoy.ADMIN_PORT),
@@ -156,6 +164,7 @@ class Stack:
     ext_mcp_hook: HookProbe
     ext_authz_hook: HookProbe  # every call Envoy made to the gate's ext_authz hook
     agents: AgentKeys  # the agents' identity provider: a token for any principal, or one attesting none
+    surface: IntegratedSurface  # INTEGRATED_SURFACE, calling the Answers API with its own bearer
 
 
 class ComposeError(RuntimeError):
@@ -211,6 +220,7 @@ class Rendered:
     agents: AgentKeys
     gate_hook_bearer: str  # the gateways' bearer to the gate's hooks
     check_api_bearer: str
+    surface_bearer: str  # INTEGRATED_SURFACE's bearer to the Answers API
     postgres_password: str
     desk_port: int  # where the desk is published on the host (its public URL)
     idp_port: int  # where the scripted IdP must listen on the host (the issuer names it)
@@ -242,20 +252,21 @@ def render(  # noqa: PLR0913 (every setting a case varies)
     agents = AgentKeys()
     agents.write_jwks(mounted / "jwks.json")
 
-    callers = {
-        "gateway-hook": (Method.CHECK,),  # both gateways' hook calls into the gate
-        "check-client": (Method.CHECK,),  # a plain HTTP Check API caller
-        "gate": (Method.REQUEST, Method.CLAIM),
-        "wait-server": (Method.OPEN_WAIT, Method.AWAIT_OUTCOME),
-        "gateway-wait-route": (Method.WAIT_CALL,),
+    entries: dict[str, tuple[str, tuple[Method, ...]]] = {
+        "gateway-hook": ("caller", (Method.CHECK,)),  # both gateways' hook calls into the gate
+        "check-client": ("caller", (Method.CHECK,)),  # a plain HTTP Check API caller
+        "gate": ("caller", (Method.REQUEST, Method.CLAIM)),
+        "wait-server": ("caller", (Method.OPEN_WAIT, Method.AWAIT_OUTCOME)),
+        "gateway-wait-route": ("caller", (Method.WAIT_CALL,)),
+        INTEGRATED_SURFACE: ("surface", (Method.ANSWERS_REVIEW, Method.ANSWERS_ANSWER)),
     }
     bearers: dict[str, str] = {}
     registry = []
-    for name, grants in callers.items():
+    for name, (kind, grants) in entries.items():
         bearer, sha256_hex = issue_bearer()
         bearers[name] = bearer
         registry.append(
-            {"name": name, "kind": "caller", "credential": {"bearer_sha256": sha256_hex}, "grants": list(grants)}
+            {"name": name, "kind": kind, "credential": {"bearer_sha256": sha256_hex}, "grants": list(grants)}
         )
     postgres_password = secrets.token_urlsafe(24)
     desk_port = free_port()
@@ -324,6 +335,7 @@ def render(  # noqa: PLR0913 (every setting a case varies)
         agents=agents,
         gate_hook_bearer=hook_bearer,
         check_api_bearer=bearers["check-client"],
+        surface_bearer=bearers[INTEGRATED_SURFACE],
         postgres_password=postgres_password,
         desk_port=desk_port,
         idp_port=idp_port,
@@ -336,11 +348,9 @@ def render(  # noqa: PLR0913 (every setting a case varies)
 
 def _ports(desk_port: int) -> dict[str, object]:
     """PORTS_FILE: PUBLISHED, and the desk on `desk_port` (the host port its public URL names)."""
-    services: dict[str, object] = {
-        name: {"ports": [f"127.0.0.1::{port}" for port in ports]} for name, ports in PUBLISHED.items()
-    }
-    services["approvals"] = {"ports": [f"127.0.0.1:{desk_port}:{APPROVALS_DESK_PORT}"]}
-    return {"services": services}
+    ports = {name: [f"127.0.0.1::{port}" for port in published] for name, published in PUBLISHED.items()}
+    ports.setdefault("approvals", []).append(f"127.0.0.1:{desk_port}:{APPROVALS_DESK_PORT}")
+    return {"services": {name: {"ports": entries} for name, entries in ports.items()}}
 
 
 def _service_config(
@@ -360,19 +370,26 @@ def _service_config(
     return {
         "version": 1,
         "registry": list(registry),
-        "assurance": [{"name": "password", "acr": ["1"]}, {"name": "passkey", "acr": ["2"]}],
+        "assurance": [
+            {"name": "password", "acr": [PASSWORD_ACR]},
+            {"name": "passkey", "acr": [PASSKEY_ACR]},
+            {"name": "hardware-key", "acr": [HARDWARE_KEY_ACR]},
+        ],
         "floor": {"min_assurance": "passkey", "max_sign_in_age": "5m"},
         "requirements": {
             REQUIREMENT: {
                 "approver_groups": [{"claim": "groups", "value": APPROVER_GROUP}],
-                "allowed_surfaces": [DESK_SURFACE],
+                "allowed_surfaces": [DESK_SURFACE, INTEGRATED_SURFACE],
                 "min_assurance": "passkey",
                 "max_sign_in_age": "5m",
                 "answer_deadline": "1h",
                 "use_window": "15m",
             }
         },
-        "surfaces": [{"name": DESK_SURFACE, "kind": "native", "cap": "passkey", "binds_digest": True}],
+        "surfaces": [
+            {"name": DESK_SURFACE, "kind": "native", "cap": "passkey", "binds_digest": True},
+            {"name": INTEGRATED_SURFACE, "kind": "integrated", "cap": "passkey", "binds_digest": True},
+        ],
         "wait_route": {"server": WAIT_SERVER, "principal_header": PRINCIPAL_HEADER},
         "gate": {
             "listeners": {"health": health},
@@ -429,6 +446,8 @@ def _service_config(
                 "requests": listener(APPROVALS_REQUESTS_PORT),
                 "approvers": {"host": "0.0.0.0", "port": APPROVALS_DESK_PORT},  # noqa: S104 (inside its container)
                 "health": health,
+                "answers_grpc": listener(APPROVALS_ANSWERS_GRPC_PORT),
+                "answers_json": listener(APPROVALS_ANSWERS_JSON_PORT),
             },
             "drain": DRAIN,
             "database": {"dsn": secret("approvals-dsn")},
@@ -709,6 +728,12 @@ async def _stack(tmp: Path, max_hold: timedelta, wait_request_timeout: timedelta
                 ext_mcp_hook=recorders[GATE_EXT_MCP_PORT],
                 ext_authz_hook=recorders[GATE_EXT_AUTHZ_PORT],
                 agents=rendered.agents,
+                surface=IntegratedSurface(
+                    grpc_target=f"127.0.0.1:{await compose.port('approvals', APPROVALS_ANSWERS_GRPC_PORT)}",
+                    json_url=f"https://127.0.0.1:{await compose.port('approvals', APPROVALS_ANSWERS_JSON_PORT)}",
+                    bearer=rendered.surface_bearer,
+                    ca=rendered.ca,
+                ),
             )
     finally:
         for recorder in recorders.values():

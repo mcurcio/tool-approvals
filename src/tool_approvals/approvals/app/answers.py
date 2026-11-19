@@ -57,16 +57,20 @@ class AnswerService:
         """The detail for this service's integrated surface, which vouches for its own approvers: UNKNOWN_TICKET,
         UNKNOWN_REQUIREMENT, or SURFACE_NOT_ALLOWED when the effective requirement does not allow the surface; no
         viewer-group check (the answer's vouched groups are checked when it is recorded)."""
-        raise NotImplementedError
+        async with self._uow(Actor(ActorKind.APPROVER, None, self._surface.name)) as unit:  # reads only
+            approval = await unit.approvals.get(ticket)
+            return AnswerError.UNKNOWN_TICKET if approval is None else self._detail(None, approval)
 
-    def _detail(self, viewer: frozenset[GroupRef], approval: Approval) -> ApprovalDetail | AnswerError:
+    def _detail(self, viewer: frozenset[GroupRef] | None, approval: Approval) -> ApprovalDetail | AnswerError:
+        """The detail under the effective requirement; `viewer` None skips the group check (an integrated surface
+        vouches for its own approvers)."""
         current = self._current(approval)
         if current is None:
             return AnswerError.UNKNOWN_REQUIREMENT
         effective = stricter(approval.requirement, current, self._rules.scale)
         if self._surface.name not in effective.allowed_surfaces:
             return AnswerError.SURFACE_NOT_ALLOWED
-        if not viewer & effective.approver_groups:
+        if viewer is not None and not viewer & effective.approver_groups:
             return AnswerError.NOT_AN_APPROVER
         return ApprovalDetail(
             ticket=approval.ticket,

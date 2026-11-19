@@ -139,3 +139,42 @@ async def test_of_two_answers_one_wins_and_the_other_is_already_answered() -> No
     stored = world.store.stored(T1)
     assert stored is not None
     assert stored.state is State.REFUSED
+
+
+async def test_a_surface_review_shows_the_call_without_a_viewer_group_check() -> None:
+    world = requiring(min_assurance=PASSKEY)
+    chat = World(rules=world.rules, surface=CHAT_RULE, store=world.store)
+    await requested(world)
+    assert await chat.answers.review_as_surface(T1) == ApprovalDetail(
+        ticket=T1,
+        call=CALL,
+        words=None,
+        effective=STRONG,
+        state=State.WAITING,
+        answer_deadline=world.store.clock + HUMAN.answer_deadline,
+        digest=DIGEST,
+    )
+
+
+async def test_a_surface_review_is_only_of_a_known_ticket_under_a_known_requirement_that_allows_it() -> None:
+    world = World(surface=CHAT_RULE)
+    await requested(world)
+    assert await world.answers.review_as_surface(Ticket("nope")) is AnswerError.UNKNOWN_TICKET
+    desk_only = World(rules=requiring(allowed_surfaces=frozenset({DESK})).rules, surface=CHAT_RULE, store=world.store)
+    assert await desk_only.answers.review_as_surface(T1) is AnswerError.SURFACE_NOT_ALLOWED
+    dropped = World(rules=replace(RULES, requirements={}), surface=CHAT_RULE, store=world.store)
+    assert await dropped.answers.review_as_surface(T1) is AnswerError.UNKNOWN_REQUIREMENT
+
+
+async def test_a_surface_review_changes_nothing() -> None:
+    world = World(surface=CHAT_RULE)
+    await requested(world)
+
+    def seen() -> tuple[object, ...]:
+        stored = world.store.stored(T1)
+        assert stored is not None
+        return stored.version, stored.state, len(world.store.events), world.store.audit[T1]
+
+    before = seen()
+    assert isinstance(await world.answers.review_as_surface(T1), ApprovalDetail)
+    assert seen() == before
