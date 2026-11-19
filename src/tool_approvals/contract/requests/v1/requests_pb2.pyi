@@ -304,6 +304,12 @@ class AwaitOutcomeResponse(_message.Message):
     OPENED_AT_FIELD_NUMBER: _builtins.int
     UPDATED_AT_FIELD_NUMBER: _builtins.int
     TTL_FIELD_NUMBER: _builtins.int
+    BOUND_FIELD_NUMBER: _builtins.int
+    bound: _builtins.bool
+    """Always true: this report was read for the request's principal, so a wait it did not open was UnknownWait. A
+    reply without it comes from an Approvals that ignores the principal (an older release, mid-upgrade): the wait
+    server reads none, so a wait is never followed unbound.
+    """
     @_builtins.property
     def waiting(self) -> Global___Waiting: ...
     @_builtins.property
@@ -340,10 +346,11 @@ class AwaitOutcomeResponse(_message.Message):
         opened_at: _timestamp_pb2.Timestamp | None = ...,
         updated_at: _timestamp_pb2.Timestamp | None = ...,
         ttl: _duration_pb2.Duration | None = ...,
+        bound: _builtins.bool = ...,
     ) -> None: ...
     _HasFieldArgType: _TypeAlias = _typing.Literal["approved", b"approved", "cancelled", b"cancelled", "expired", b"expired", "opened_at", b"opened_at", "refused", b"refused", "status", b"status", "still_waiting", b"still_waiting", "ttl", b"ttl", "unknown_wait", b"unknown_wait", "updated_at", b"updated_at", "used", b"used", "waiting", b"waiting"]  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["approved", b"approved", "cancelled", b"cancelled", "expired", b"expired", "opened_at", b"opened_at", "refused", b"refused", "status", b"status", "still_waiting", b"still_waiting", "ttl", b"ttl", "unknown_wait", b"unknown_wait", "updated_at", b"updated_at", "used", b"used", "waiting", b"waiting"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["approved", b"approved", "bound", b"bound", "cancelled", b"cancelled", "expired", b"expired", "opened_at", b"opened_at", "refused", b"refused", "status", b"status", "still_waiting", b"still_waiting", "ttl", b"ttl", "unknown_wait", b"unknown_wait", "updated_at", b"updated_at", "used", b"used", "waiting", b"waiting"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
     _WhichOneofReturnType_status: _TypeAlias = _typing.Literal["waiting", "approved", "refused", "expired", "used", "cancelled", "still_waiting", "unknown_wait"]  # noqa: Y015
     _WhichOneofArgType_status: _TypeAlias = _typing.Literal["status", b"status"]  # noqa: Y015

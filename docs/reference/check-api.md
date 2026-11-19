@@ -120,7 +120,7 @@ The gate rejects, before any Approval exists:
 |---|---|
 | `REASON_TOO_LARGE` | `params` over 16384 bytes |
 | `REASON_TASK_REQUESTED` | A `task` member, or `_meta["io.modelcontextprotocol/clientCapabilities"].extensions` naming `io.modelcontextprotocol/tasks`: a task's follow-up requests would escape the approved call ([MCP Tasks](wait.md#mcp-tasks)) |
-| `REASON_MALFORMED` | Not UTF-8 JSON; not an object; a top-level key other than `name`, `arguments`, `_meta`; a duplicate key at any depth; no `name` or an empty one; `arguments` not an object; `_meta` not an object; nesting deeper than 32; a number too large for a float; a NUL or lone surrogate in a name, key or string; an empty principal or server |
+| `REASON_MALFORMED` | Not UTF-8 JSON; not an object; a top-level key other than `name`, `arguments`, `_meta`; a duplicate key at any depth; no `name` or an empty one; `arguments` not an object; `_meta` not an object; nesting deeper than 32; a number too large for a float; a NUL or lone surrogate in a name, key or string; an empty principal or server; a principal that cannot be an HTTP header value (a control character, or a leading or trailing space) |
 
 ## The wait, through your gateway
 
@@ -128,7 +128,9 @@ A `pending` refusal tells the agent to call the wait tool, which your gateway mu
 any MCP server ([the wait tool](wait.md)). The gate has one rule for the wait route, the same through every
 adapter: a call whose `server` is `wait_route.server` is `pass` (with an empty `agent_text`), without parsing its
 params and without asking policy or Approvals; the wait server reads its own calls. A non-empty `principal` is
-still required. So a gateway using the Check API may ask about the wait route's calls like any other, and gets
+still required, and one that cannot be an HTTP header value as it stands (a control character, CR, LF, NUL and
+tab included, or a leading or trailing space) counts as none, on every route, so no gateway is ever asked to write
+it in a header. So a gateway using the Check API may ask about the wait route's calls like any other, and gets
 `pass`, or skip asking.
 
 What the first-party agentgateway and Envoy wiring does, a gateway using the Check API does itself: on the route

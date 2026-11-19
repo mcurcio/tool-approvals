@@ -262,7 +262,38 @@ class _Unset(requests_pb2_grpc.ApprovalRequestsServiceServicer):
         return requests_pb2.OpenWaitResponse()
 
     async def AwaitOutcome(self, request: Any, context: grpc.aio.ServicerContext[Any, Any]) -> AsyncIterator[Any]:
-        yield requests_pb2.AwaitOutcomeResponse()
+        yield requests_pb2.AwaitOutcomeResponse(bound=True)  # bound, so only the unset status is unreadable
+
+
+class _Reports(_Unset):
+    """AwaitOutcome answering an approved report for anyone, with `bound` as given: False is an Approvals from
+    before waits were bound, which never reads the request's principal (proto3 drops a field it does not know)."""
+
+    def __init__(self, bound: bool) -> None:
+        self._bound = bound
+
+    async def AwaitOutcome(self, request: Any, context: grpc.aio.ServicerContext[Any, Any]) -> AsyncIterator[Any]:
+        yield requests_pb2.AwaitOutcomeResponse(approved=requests_pb2.Approved(), bound=self._bound)
+
+
+@pytest.mark.parametrize("bound", [True, False])
+async def test_a_report_not_read_for_the_principal_is_unavailable(tls: TlsFiles, bearer: str, bound: bool) -> None:
+    """Mid-upgrade, a new wait server may reach an Approvals that ignores the principal: its reports are refused
+    (fail closed) rather than followed unbound; the same report marked bound is read."""
+    port = free_port()
+    server = grpc_server(ListenerView("localhost", port, TlsView(tls.cert, tls.key, None)), [])
+    requests_pb2_grpc.add_ApprovalRequestsServiceServicer_to_server(_Reports(bound), server)
+    await server.start()
+    client = RequestsClient.connect(RequestsClientView(f"dns:///localhost:{port}", tls.ca, bearer))
+    try:
+        if bound:
+            assert (await anext(client.await_outcome(WAIT, AGENT))).state is WaitState.APPROVED
+        else:
+            with pytest.raises(RequestsUnavailable, match="not read for the principal"):
+                await anext(client.await_outcome(WAIT, AGENT))
+    finally:
+        await client.close()
+        await server.stop(None)
 
 
 @pytest.mark.parametrize("servicer", [_Unreadable, _Unset])

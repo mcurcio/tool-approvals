@@ -220,6 +220,16 @@ async def test_the_wait_route_replaces_every_client_copy_of_the_principal_header
     assert_allowed(await ext_authz(gate, request), attested=PRINCIPAL)
 
 
+@pytest.mark.parametrize("principal", ["agent\r\nx-injected: 1", "agent\x00", " agent"], ids=["crlf", "nul", "space"])
+async def test_a_principal_that_cannot_be_a_header_value_is_never_stamped(gate: Gate, principal: str) -> None:
+    """The core treats it as no principal: a message passed on the wait route goes without the header, and a
+    tools/call there is rejected."""
+    request = authz_request(_rpc("tasks/get", b'"t-1"'), server=ROUTE.server, principal=principal)
+    assert_allowed(await ext_authz(gate, request))
+    checked = authz_request(tools_call(GATED), server=ROUTE.server, principal=principal)
+    assert_denied(await ext_authz(gate, checked), MALFORMED, b"7")
+
+
 async def test_another_route_removes_a_client_principal_header(gate: Gate) -> None:
     request = authz_request(tools_call(FREE), headers={ROUTE.principal_header: "forged"})
     assert_allowed(await ext_authz(gate, request))

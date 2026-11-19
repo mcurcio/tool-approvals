@@ -48,7 +48,8 @@ Without Tasks, the call is held open until the Approval has an outcome, for at m
 Each principal holds at most one live wait per ticket (a new one ends the old with `still-waiting`) and at most
 `approvals.caps.live_waits_per_principal` live waits in all. When no wait can be opened (an unknown ticket,
 another principal's ticket, words too long, too many waits, Approvals unreachable or not configured) the result has
-`isError: true` and says why and whether waiting again can help.
+`isError: true` and says why and whether waiting again can help. Another principal's ticket gets exactly the
+result an unknown ticket gets, held or as a task, through every gateway: the answer never says whose a ticket is.
 
 ## MCP Tasks
 

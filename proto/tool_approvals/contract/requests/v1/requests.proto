@@ -89,6 +89,10 @@ message AwaitOutcomeResponse {
   google.protobuf.Timestamp opened_at = 9;
   google.protobuf.Timestamp updated_at = 10;
   google.protobuf.Duration ttl = 11;
+  // Always true: this report was read for the request's principal, so a wait it did not open was UnknownWait. A
+  // reply without it comes from an Approvals that ignores the principal (an older release, mid-upgrade): the wait
+  // server reads none, so a wait is never followed unbound.
+  bool bound = 12;
 }
 
 message QueueFull {}

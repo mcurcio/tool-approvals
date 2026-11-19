@@ -6,7 +6,7 @@ from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Final
+from typing import Final, Literal
 
 from tool_approvals.kernel.names import Principal, Ticket, WaitId, is_ticket
 from tool_approvals.kernel.requests import RequestsUnavailable, TicketError, TooManyWaits, WaitReport, WaitState
@@ -31,7 +31,10 @@ class WaitUnavailable:
     """Approvals is unreachable, or the wait server has no Approvals configured."""
 
 
-type HoldResult = Held | TicketError | WordsError | TooManyWaits | WaitUnavailable
+# The one ticket error an agent is told: another principal's ticket is answered as one never issued (`_open`), so
+# no answer tells "not yours" from "unknown", whichever gateway carried the call.
+type UnknownTicket = Literal[TicketError.UNKNOWN_TICKET]
+type HoldResult = Held | UnknownTicket | WordsError | TooManyWaits | WaitUnavailable
 type OpenTaskResult = TaskOpened | HoldResult  # Held when the first report is already terminal
 
 _OpenRefused: Final = (TicketError, WordsError, TooManyWaits)  # StrEnums are strs too: test the refusals
@@ -121,12 +124,14 @@ class WaitCore:
 
 async def _open(
     requests: WaitRequests, principal: Principal, ticket: Ticket, words: AgentWords | None
-) -> WaitId | TicketError | WordsError | TooManyWaits:
+) -> WaitId | UnknownTicket | WordsError | TooManyWaits:
     """OpenWait; text that cannot be a ticket at all names no ticket and never reaches Approvals
-    (`kernel.names.is_ticket`)."""
+    (`kernel.names.is_ticket`). Approvals' NOT_YOUR_TICKET is UNKNOWN_TICKET here: to anyone but its principal a
+    ticket does not exist, as a wait does not (`await_outcome`), so the agent's answer is the same either way."""
     if not is_ticket(ticket):
         return TicketError.UNKNOWN_TICKET
-    return await requests.open_wait(principal, ticket, words)
+    opened = await requests.open_wait(principal, ticket, words)
+    return TicketError.UNKNOWN_TICKET if isinstance(opened, TicketError) else opened
 
 
 async def _first(requests: WaitRequests, wait: WaitId, principal: Principal) -> WaitReport:

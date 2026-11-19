@@ -1,7 +1,8 @@
 """The gate's one use case: should this call run now?"""
 
 import logging
-from dataclasses import dataclass
+import unicodedata
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import Final, Protocol, assert_never
 
@@ -24,6 +25,9 @@ _log: Final = logging.getLogger(__name__)
 
 # Kept back from the gateway's deadline so the verdict still reaches the gateway before its hook gives up.
 REPLY_RESERVE: Final = timedelta(milliseconds=250)
+# Whitespace an HTTP field value may hold inside but neither start nor end with (RFC 9110 §5.5).
+_FIELD_WHITESPACE: Final = " \t"
+_CONTROL: Final = "Cc"  # Unicode's control characters: C0 (NUL, tab, LF, CR and the rest), DEL and C1
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +94,8 @@ class CheckCore:
         the limit passing → Unavailable. The whole check runs within `budget`, or within the gateway's deadline
         less REPLY_RESERVE when that is sooner; no time left at all → Unavailable without asking policy or
         Approvals."""
+        if not _attestable(context.principal):
+            context = replace(context, principal=Principal(""))  # no principal, which parse_call rejects
         if self._on_wait_route(context.principal, context.server):
             return Pass(attested=context.principal)
         parsed = parse_call(context.principal, context.server, params)
@@ -117,8 +123,9 @@ class CheckCore:
         return Pass(attested=principal) if self._on_wait_route(principal, server) else Pass()
 
     def _on_wait_route(self, principal: Principal, server: ServerName) -> bool:
-        """The one test of the wait route: the gateway routed the message to `wait_server`, and attested who."""
-        return server == self._wait_server and bool(principal)
+        """The one test of the wait route: the gateway routed the message to `wait_server`, and attested who, as a
+        principal an adapter can write in a header (`_attestable`); any other principal is none."""
+        return server == self._wait_server and _attestable(principal)
 
     def _limit(self, deadline: timedelta | None) -> timedelta:
         """check_budget, or the gateway's deadline less REPLY_RESERVE when that is sooner."""
@@ -162,6 +169,18 @@ class CheckCore:
                 return _drift(requirement)
             case _:
                 assert_never(requested)
+
+
+def _attestable(principal: Principal) -> bool:
+    """Whether `principal` is one the gate attests: non-empty, and a valid HTTP field value as it stands (RFC 9110
+    §5.5: no control character, so no CR, LF, NUL or tab; no leading or trailing space), so every adapter can write
+    it in the wait route's principal header and the wait server reads it back unchanged. The gate treats any other
+    principal as none, whatever the gateway, so no adapter ever stamps it."""
+    return (
+        bool(principal)
+        and principal == principal.strip(_FIELD_WHITESPACE)
+        and not any(unicodedata.category(char) == _CONTROL for char in principal)
+    )
 
 
 def _drift(requirement: RequirementName) -> Unavailable:

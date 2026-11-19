@@ -15,7 +15,7 @@ import httpx
 
 from tests.conformance.gateways import GatewayUnderTest
 from tests.e2e.agents import AgentKeys
-from tests.e2e.clients import GatewayError, HttpMcpGateway, jsonrpc_message
+from tests.e2e.clients import GatewayError, HttpMcpGateway, jsonrpc_body, jsonrpc_message
 from tool_approvals.kernel.calls import CLIENT_CAPABILITIES_META_KEY, TASKS_EXTENSION
 
 PROTOCOL: Final = "2026-07-28"
@@ -43,12 +43,11 @@ class ModernMcp:
         """tasks/get's result: the task, with `result` once it completed."""
         return await self._request("tasks/get", {"taskId": task_id}, task_id)
 
-    async def task_error(self, task_id: str) -> dict[str, Any]:
-        """tasks/get's JSON-RPC error, as the agent reads it; AssertionError if the task was read."""
-        message = await self._message("tasks/get", {"taskId": task_id}, task_id)
-        assert "error" in message, message
-        error: dict[str, Any] = message["error"]
-        return error
+    async def task_answer(self, task_id: str) -> tuple[int, dict[str, Any]]:
+        """tasks/get's HTTP status and JSON-RPC message, whatever the status (the wait server answers a JSON-RPC
+        error with 400): all an agent can read of the answer."""
+        response = await self._post("tasks/get", {"taskId": task_id}, task_id)
+        return response.status_code, jsonrpc_body(response)
 
     async def _request(self, method: str, params: dict[str, object], name: str) -> dict[str, Any]:
         message = await self._message(method, params, name)
@@ -58,6 +57,9 @@ class ModernMcp:
         return result
 
     async def _message(self, method: str, params: dict[str, object], name: str) -> dict[str, Any]:
+        return jsonrpc_message(await self._post(method, params, name))
+
+    async def _post(self, method: str, params: dict[str, object], name: str) -> httpx.Response:
         headers = {
             **self._headers,
             "authorization": f"Bearer {self._token}",
@@ -69,8 +71,7 @@ class ModernMcp:
         }
         body = {"jsonrpc": "2.0", "id": 1, "method": method, "params": {**params, "_meta": self._meta}}
         async with httpx.AsyncClient(timeout=_TIMEOUT_S) as http:
-            response = await http.post(self._url, headers=headers, content=json.dumps(body))
-        return jsonrpc_message(response)
+            return await http.post(self._url, headers=headers, content=json.dumps(body))
 
 
 def modern_client(  # noqa: PLR0913 (the client, and where and as whom it sends)

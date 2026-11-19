@@ -204,9 +204,11 @@ the integrator's audit sink.
 ([Parallel Change](https://martinfowler.com/bliki/ParallelChange.html)) across a rolling update: a migration job
 runs expand migrations while old replicas serve; readers ignore event kinds they do not know, and a mapping
 refuses on a verdict kind it does not know. `buf breaking` and a migrations check gate CI. One change fails
-closed instead of expanding first: `AwaitOutcome`'s `principal` binds a wait to its opener, so Approvals answers
-a read without one as an unknown wait; while a rolling update still runs a wait server older than Approvals, its
-reads report `unknown-wait` and the agent waits again, rather than any read going unbound.
+closed instead of expanding first, in either order of a rolling update: `AwaitOutcome`'s `principal` binds a wait
+to its opener. Approvals answers a read without one as an unknown wait, so a wait server older than Approvals reads
+`unknown-wait` and the agent waits again. Approvals marks every report it reads for the principal `bound`, and the
+wait server reads no report without that mark, so a wait server newer than Approvals (whose `principal` the older
+Approvals drops unread) reports Approvals unavailable and the agent waits again later. No read goes unbound.
 
 ## Timing budgets
 

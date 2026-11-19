@@ -61,6 +61,7 @@ AGENT_COOKIE: Final = {"cookie": "agent-session=not-the-gates"}
 FORWARDED: Final = ("x-agent-note", "seen")  # a header of the agent's that each hook is sent (case 13's control)
 METHOD_NOT_FOUND: Final = -32601  # the echo tool's answer to a method it does not serve
 INVALID_PARAMS: Final = -32602  # the wait server's answer to a tasks/get for a task that is not the caller's
+HTTP_BAD_REQUEST: Final = 400  # the HTTP status the wait server answers that JSON-RPC error with
 _NOT_THROUGH: Final = re.compile(r"^\s*Not through ([a-z-]+): (.+)$")
 
 type Case = Callable[[Stack, GatewayUnderTest], Awaitable[object]]
@@ -173,7 +174,7 @@ async def case_5_principal_header_reaches_no_tool_and_wait_sees_the_attested(
     owner = f"{gateway.name}-2"  # case 2's principal, whose approval is used
     wait = ("approval_wait", json.dumps({"ticket": owned_ticket}).encode())
     claimed = await gateway.call(principal, WAIT_SERVER, *wait, headers={PRINCIPAL_HEADER: owner})
-    assert claimed.text == refusal(TicketError.NOT_YOUR_TICKET), claimed
+    assert claimed.text == refusal(TicketError.UNKNOWN_TICKET), claimed  # another's ticket reads as unknown
     own = await gateway.call(owner, WAIT_SERVER, *wait, headers={PRINCIPAL_HEADER: principal})
     assert own.structured == {"state": "used"}, own
 
@@ -396,9 +397,11 @@ async def case_15_a_wait_task_is_read_only_by_the_agent_that_opened_it(st: Stack
     forging = modern_client(
         gateway, st.agents, other, tasks=True, server=WAIT_SERVER, headers={PRINCIPAL_HEADER: owner}
     )
-    theirs = await forging.task_error(task_id)
-    assert theirs == await forging.task_error(never_issued), theirs
-    assert theirs["code"] == INVALID_PARAMS, theirs
+    # The whole answer an agent can read, HTTP status and JSON-RPC message, is the never-issued id's.
+    theirs = await forging.task_answer(task_id)
+    assert theirs == await forging.task_answer(never_issued), theirs
+    status, message = theirs
+    assert (status, message["error"]["code"]) == (HTTP_BAD_REQUEST, INVALID_PARAMS), theirs
     assert (await opener.get_task(task_id))["status"] == "working"
 
 

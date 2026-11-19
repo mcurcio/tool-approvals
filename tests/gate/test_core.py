@@ -182,6 +182,32 @@ async def test_the_wait_route_without_a_principal_is_rejected_as_any_call() -> N
     assert await _core(policy).check(context, GATED) == Rejected(RejectReason.MALFORMED)
 
 
+# A principal no adapter could write in the wait route's principal header (RFC 9110 field value) is no principal.
+_NOT_A_HEADER_VALUE = ["a\rb", "a\nb", "a\x00b", "a\tb", "a\x1bb", "a\x7fb", "a\x85b", " agent", "agent "]
+
+
+@pytest.mark.parametrize("principal", _NOT_A_HEADER_VALUE)
+async def test_a_principal_that_cannot_be_a_header_value_is_none_on_every_route(principal: str) -> None:
+    """The gate core, not an adapter, decides it, so no adapter ever stamps such a principal: on the wait route a
+    message passed on is not attested (its adapter removes the header) and a tools/call is rejected, as with no
+    principal; elsewhere the call is rejected before policy."""
+    policy = _Policy(raises=AssertionError("asked policy"))
+    core = _core(policy)
+    assert core.unchecked(Principal(principal), ROUTE.server) == Pass(attested=None)
+    for server in (ROUTE.server, SERVER):
+        context = _context(server=server, principal=Principal(principal))
+        assert await core.check(context, GATED) == Rejected(RejectReason.MALFORMED), server
+
+
+@pytest.mark.parametrize("principal", ["agent one", "agënt-7", "spiffe://example.org/agent"])
+async def test_a_principal_that_is_a_header_value_is_attested(principal: str) -> None:
+    """An inner space and non-ASCII text (sent as UTF-8, which HTTP carries as field octets) are kept."""
+    core = _core(_Policy(raises=AssertionError("asked policy")))
+    assert core.unchecked(Principal(principal), ROUTE.server) == Pass(attested=Principal(principal))
+    context = _context(server=ROUTE.server, principal=Principal(principal))
+    assert await core.check(context, GATED) == Pass(attested=Principal(principal))
+
+
 # ---- the time limit: check_budget, or the gateway's deadline less REPLY_RESERVE ----
 
 

@@ -347,7 +347,6 @@ async def test_a_call_without_the_attested_principal_is_refused(tls: TlsFiles) -
     ("answer", "words"),
     [
         (TicketError.UNKNOWN_TICKET, "No wait was opened. The ticket is not known."),
-        (TicketError.NOT_YOUR_TICKET, "No wait was opened. The ticket belongs to another caller."),
         (WordsError.TOO_LONG, "No wait was opened. The reason may be at most"),
         (TooManyWaits(), "No wait was opened: you already have as many waits open as allowed."),
     ],
@@ -361,6 +360,21 @@ async def test_approvals_refusing_the_wait_is_a_tool_error(
     assert isinstance(result, CallToolResult)
     assert result.is_error
     assert _text(result).startswith(words)
+
+
+@pytest.mark.parametrize("tasks", [False, True])
+async def test_another_principals_ticket_is_answered_as_an_unknown_one(tls: TlsFiles, tasks: bool) -> None:
+    """Approvals tells NOT_YOUR_TICKET from UNKNOWN_TICKET; the agent is told neither apart: the whole result,
+    byte for byte, is the same, held or as a task."""
+    answers = []
+    for answer in (TicketError.NOT_YOUR_TICKET, TicketError.UNKNOWN_TICKET):
+        script = Script(open_wait=[answer])
+        async with wait_server(script, tls) as running, client(running, tasks=tasks) as mcp:
+            result = await mcp.session.call_tool(TOOL, {"ticket": TICKET}, allow_claimed=True)
+        assert isinstance(result, CallToolResult)
+        answers.append(result.model_dump_json(by_alias=True))
+    assert answers[0] == answers[1]
+    assert "The ticket is not known." in answers[0]
 
 
 @pytest.mark.parametrize("tasks", [False, True])

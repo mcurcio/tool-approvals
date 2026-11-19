@@ -123,9 +123,15 @@ class GatewayError(Exception):
 
 
 def jsonrpc_message(response: httpx.Response) -> dict[str, Any]:
-    """The JSON-RPC response in a JSON or an SSE body (the last `data:` event)."""
+    """The JSON-RPC response in a JSON or an SSE body (the last `data:` event), from a success status only."""
     if response.status_code >= 300:
         raise GatewayError(response.status_code, response.content)
+    return jsonrpc_body(response)
+
+
+def jsonrpc_body(response: httpx.Response) -> dict[str, Any]:
+    """The JSON-RPC response in a JSON or an SSE body (the last `data:` event), whatever the HTTP status: a
+    server may answer a JSON-RPC error with an error status (the MCP SDK answers a tasks/get error with 400)."""
     text = response.text
     if response.headers.get("content-type", "").startswith("text/event-stream"):
         events = [line[5:].strip() for line in text.splitlines() if line.startswith("data:")]
