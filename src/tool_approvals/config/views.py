@@ -195,7 +195,7 @@ class DeskView:
 @dataclass(frozen=True, slots=True)
 class DeliveryView:
     attempt_timeout: timedelta = timedelta(seconds=5)  # one webhook or push attempt
-    give_up_after: timedelta = timedelta(hours=24)  # a paused channel dead-letters an event older than this
+    give_up_after: timedelta = timedelta(hours=24)  # failing longer than this, a channel dead-letters older events
 
 
 @dataclass(frozen=True, slots=True)

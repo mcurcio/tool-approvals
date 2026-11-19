@@ -24,15 +24,29 @@ from starlette.requests import Request
 from starlette.responses import Response
 from starlette.routing import Route
 
-from tests.approvals.domain.examples import CALL_REF, DESK, DESK_RULE, HOOK, HUMAN, PASSKEY, RULES, SCALE
+from tests.approvals.delivery.test_web_push import VAPID_PEM
+from tests.approvals.domain.examples import (
+    APPROVERS,
+    CALL_REF,
+    DESK,
+    DESK_RULE,
+    HOOK,
+    HUMAN,
+    NOW,
+    PASSKEY,
+    RULES,
+    SCALE,
+)
+from tests.approvals.memory import MemoryStore
 from tests.approvals.store.postgres import empty_database
 from tests.approvals.store.world import store_world
 from tests.fixtures.certs import tls_files
 from tests.fixtures.ports import free_port
 from tool_approvals.approvals.app.deadlines import DeadlineWaker
 from tool_approvals.approvals.app.ports import StoreUnavailable
+from tool_approvals.approvals.app.push import SubscriptionKeys
 from tool_approvals.approvals.domain.answer import Verdict
-from tool_approvals.approvals.main import EXIT_OK, _supervise, _supervise_delivery, migrate, serve_until
+from tool_approvals.approvals.main import EXIT_OK, _push_desk, _supervise, _supervise_delivery, migrate, serve_until
 from tool_approvals.auth.registry import issue_bearer
 from tool_approvals.config.views import (
     ApprovalsView,
@@ -47,9 +61,10 @@ from tool_approvals.config.views import (
     RequestsClientView,
     TlsView,
     WebhookChannelView,
+    WebPushChannelView,
 )
 from tool_approvals.kernel.methods import Method
-from tool_approvals.kernel.names import CallerName
+from tool_approvals.kernel.names import ApproverId, CallerName
 from tool_approvals.kernel.requests import Ticketed
 from tool_approvals.kernel.requirements import Floor
 from tool_approvals.kernel.timeouts import StopSignal
@@ -381,3 +396,17 @@ async def test_a_programming_error_under_a_delivery_loop_is_never_swallowed() ->
     delivery = _ScriptedDelivery([(True, TypeError("a bug"))])
     with pytest.raises(TypeError):
         await _supervise_delivery(delivery, asyncio.Event(), timedelta(milliseconds=10))  # type: ignore[arg-type]
+
+
+async def test_the_desk_push_registrations_write_the_desk_surface_as_via(tmp_path: Path) -> None:
+
+    view = replace(
+        _view("postgresql://unused.invalid/db", tmp_path, "bearer"),
+        web_push=WebPushChannelView("push", VAPID_PEM, "mailto:ops@example.com", ("https://push.example.com",)),
+    )
+    store = MemoryStore(NOW)
+    desk = _push_desk(view, store.unit_of_work)
+    assert desk is not None
+    keys = SubscriptionKeys("https://push.example.com/send/abc", b"\x04" + bytes(64), bytes(16))
+    assert await desk.registrations.register(ApproverId("alice"), frozenset({APPROVERS}), keys) is None
+    assert store.push_audit[keys.endpoint].created_by == f"approver:alice via {DESK}"

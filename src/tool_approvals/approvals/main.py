@@ -260,7 +260,7 @@ def _push_desk(view: ApprovalsView, uow: UnitOfWorkFactory) -> PushDesk | None:
         return None
     approver_groups = frozenset(group for r in view.requirements.values() for group in r.approver_groups)
     return PushDesk(
-        PushRegistrations(uow, view.web_push.push_origins, approver_groups),
+        PushRegistrations(uow, view.web_push.push_origins, approver_groups, surface=view.desk.surface.name),
         application_server_key(view.web_push.vapid_private_key),
     )
 
