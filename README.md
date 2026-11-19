@@ -201,7 +201,7 @@ Task has a reserved place in the contracts and needs no breaking change.
 | 1 | Tracer: Check API (gRPC and JSON), `ext_mcp` and minimal `ext_authz` mappings, rules-file policy, config with floor and registry, Approvals on Postgres, held wait and Wait Task create and get, minimal desk with step-up | Built |
 | 2 | Gateway breadth: gateways as optional adapters behind one port, full `ext_authz` classification, gateway-attribute policy, mTLS, inbound deadlines, one conformance suite for every adapter, the answer's moment re-checked at claim | Built |
 | 3 | Approvers' side: complete desk, Answers API for integrated surfaces, audit report, event delivery to channels, Web Push, retention, compose file and Helm chart. **The first deployable release** | Planned |
-| 4 | Wait Tasks complete: cancel, replacement, caps, time to live, the Envoy wait route | Planned |
+| 4 | Wait Tasks complete: cancel, replacement, caps, time to live, long holds through Envoy | Planned |
 | 5 | AuthZEN and OPA policy adapters | Planned |
 
 ## Contributing
