@@ -79,7 +79,8 @@ class ApprovalRequestsServiceServicer:
         raise NotImplementedError('Method not implemented!')
 
     def AwaitOutcome(self, request, context):
-        """The current status first; the stream ends after a terminal one.
+        """The current status first; the stream ends after a terminal one. Only the wait's own principal follows it:
+        for any other principal the wait does not exist (UnknownWait), the same answer as for an id never issued.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')

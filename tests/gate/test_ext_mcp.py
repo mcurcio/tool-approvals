@@ -53,12 +53,15 @@ async def test_a_principal_that_is_not_a_non_empty_string_is_refused(gate: Gate,
     _assert_misconfigured(await ext_mcp(gate, mcp_request(FREE, principal=principal)))
 
 
-async def test_the_wait_route_passes_with_the_attested_principal_and_no_policy(gate: Gate) -> None:
-    # The policy's default would require a yes for any tool: the wait route is never sent to it.
-    result = await ext_mcp(gate, mcp_request(b'{"name":"approval_wait","arguments":{}}', server=ROUTE.server))
-    assert result.WhichOneof("result") == "pass"
-    assert [(h.key, h.value) for h in result.header_mutation.set] == [(ROUTE.principal_header, PRINCIPAL.encode())]
-    assert list(result.header_mutation.remove) == []
+# The policy's default would require a yes for any tool, and a `task` member is rejected on any other route: the
+# wait route is never parsed or sent to policy (CheckCore.check).
+@pytest.mark.parametrize(
+    "params", [b'{"name":"approval_wait","arguments":{}}', b'{"name":"approval_wait","arguments":{},"task":{}}']
+)
+async def test_the_wait_route_passes_with_the_attested_principal_and_no_policy(gate: Gate, params: bytes) -> None:
+    # mcp_request carries a client's forged principal header; the set replaces it.
+    result = await ext_mcp(gate, mcp_request(params, server=ROUTE.server))
+    assert_ext_mcp_shows(result, Pass(attested=PRINCIPAL))
 
 
 async def test_tool_route_strips_client_principal_header(tls: TlsFiles) -> None:
@@ -66,7 +69,7 @@ async def test_tool_route_strips_client_principal_header(tls: TlsFiles) -> None:
     async with running_gate(script, tls) as gate:
         for params in (FREE, GATED):  # a pass without a yes, and a pass on a claimed yes
             result = await ext_mcp(gate, mcp_request(params))
-            assert_ext_mcp_shows(result, Pass())
+            assert_ext_mcp_shows(result, Pass(attested=None))
             assert ROUTE.principal_header in result.header_mutation.remove
             assert all(header.key != ROUTE.principal_header for header in result.header_mutation.set)
 

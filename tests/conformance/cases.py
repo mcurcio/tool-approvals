@@ -19,8 +19,9 @@ from typing import Final
 
 from tests.conformance.gateways import CallOutcome, CheckApiGateway, GatewayUnderTest
 from tests.e2e import agentgateway, envoy
+from tests.e2e.clients import HttpMcpGateway
 from tests.e2e.hook_recorder import HookCall
-from tests.e2e.modern import modern_client, result_text
+from tests.e2e.modern import ModernMcp, modern_client, result_text
 from tests.e2e.stack import (
     ATTRIBUTE_GATED,
     EXT_AUTHZ_TIMEOUT,
@@ -58,6 +59,9 @@ TASKS_META: Final[dict[str, object]] = {CLIENT_CAPABILITIES_META_KEY: {"extensio
 SLOWER_THAN_THE_HOOKS: Final = EXT_AUTHZ_TIMEOUT + timedelta(seconds=2)
 AGENT_COOKIE: Final = {"cookie": "agent-session=not-the-gates"}
 FORWARDED: Final = ("x-agent-note", "seen")  # a header of the agent's that each hook is sent (case 13's control)
+METHOD_NOT_FOUND: Final = -32601  # the echo tool's answer to a method it does not serve
+INVALID_PARAMS: Final = -32602  # the wait server's answer to a tasks/get for a task that is not the caller's
+HTTP_BAD_REQUEST: Final = 400  # the HTTP status the wait server answers that JSON-RPC error with
 _NOT_THROUGH: Final = re.compile(r"^\s*Not through ([a-z-]+): (.+)$")
 
 type Case = Callable[[Stack, GatewayUnderTest], Awaitable[object]]
@@ -156,7 +160,8 @@ async def case_5_principal_header_reaches_no_tool_and_wait_sees_the_attested(
     st: Stack, gateway: GatewayUnderTest, owned_ticket: str | None
 ) -> None:
     """A principal header a client sends reaches no tool, ungated or approved. With `owned_ticket` (a gateway
-    that routes the wait server; Envoy does not yet, milestone 4), the wait server sees the attested principal.
+    that routes the wait server), the wait server sees the attested principal, never the client's copy: the gate
+    passes the wait route without policy and sets the header, whichever adapter carried the call.
 
     Not through check-api: a Check API request carries no headers, so the gate has none to replace; what a caller
     forwards to its tools is the caller's own code."""
@@ -169,7 +174,7 @@ async def case_5_principal_header_reaches_no_tool_and_wait_sees_the_attested(
     owner = f"{gateway.name}-2"  # case 2's principal, whose approval is used
     wait = ("approval_wait", json.dumps({"ticket": owned_ticket}).encode())
     claimed = await gateway.call(principal, WAIT_SERVER, *wait, headers={PRINCIPAL_HEADER: owner})
-    assert claimed.text == refusal(TicketError.NOT_YOUR_TICKET), claimed
+    assert claimed.text == refusal(TicketError.UNKNOWN_TICKET), claimed  # another's ticket reads as unknown
     own = await gateway.call(owner, WAIT_SERVER, *wait, headers={PRINCIPAL_HEADER: principal})
     assert own.structured == {"state": "used"}, own
 
@@ -257,10 +262,14 @@ async def case_10_no_principal_is_refused(st: Stack, gateway: GatewayUnderTest) 
             assert is_rejected(sent.outcome, RejectReason.MALFORMED), sent
 
 
-async def case_11_envoy_denies_what_is_not_one_tools_call(st: Stack, gateway: GatewayUnderTest) -> None:
+async def case_11_envoy_checks_tools_call_alone(st: Stack, gateway: GatewayUnderTest) -> None:
     """Every row of the ext_authz classification table Envoy can carry, through Envoy (tests/gate/test_ext_authz.py
     has each row through the gate alone). A body Envoy would cut it refuses itself (413), so the gate's TOO_LARGE row
-    is the gate's alone; the wait server's row waits on Envoy routing the wait server (milestone 4).
+    is the gate's alone; the wait route's tools/call is case 5's. The gate's one message rule (gate.core.messages):
+    every method but tools/call passes to the tool unchecked, tasks/* and methods the tool does not serve included,
+    as behind every gateway; a notification and a client's response reach it and are answered 202 with no body,
+    never with an id of the gate's; a notifications/* message carrying an id is refused as a request. On the wait
+    route a Wait Task opens and its tasks/get reaches the wait server.
 
     Not through agentgateway: it hands the gate tools/call only, already parsed; nothing else reaches the hook.
     Not through check-api: a Check API caller asks about tools/call params only; it classifies its own traffic."""
@@ -270,8 +279,11 @@ async def case_11_envoy_denies_what_is_not_one_tools_call(st: Stack, gateway: Ga
     def request(method: str, params: object, request_id: object = 9) -> bytes:
         return json.dumps({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}).encode()
 
+    def notification(method: str, params: object) -> bytes:
+        return json.dumps({"jsonrpc": "2.0", "method": method, "params": params}).encode()
+
     call = request("tools/call", {"name": "echo", "arguments": {}})
-    malformed, tasks = RejectReason.MALFORMED, RejectReason.TASK_REQUESTED
+    malformed = RejectReason.MALFORMED
     denied: dict[str, tuple[str, bytes | None, RejectReason, object]] = {
         "GET": ("GET", None, malformed, None),
         "DELETE": ("DELETE", None, malformed, None),
@@ -279,14 +291,12 @@ async def case_11_envoy_denies_what_is_not_one_tools_call(st: Stack, gateway: Ga
         "duplicate keys": ("POST", b'{"jsonrpc":"2.0","id":9,"method":"tools/call","method":"ping"}', malformed, None),
         "trailing data": ("POST", call + b" {}", malformed, None),
         "no method": ("POST", b'{"jsonrpc":"2.0","id":9,"params":{}}', malformed, None),
-        "a client response": ("POST", b'{"jsonrpc":"2.0","id":9,"result":{}}', malformed, None),
-        "tasks/get": ("POST", request("tasks/get", {"taskId": "t"}, "t-1"), tasks, "t-1"),
-        "resources/read": ("POST", request("resources/read", {"uri": "file:///etc/hosts"}), malformed, 9),
+        "a notification with an id": ("POST", request("notifications/initialized", {}), malformed, 9),
     }
     for what, (method, body, reason, request_id) in denied.items():
         raw = await gateway.raw(principal, method, body)  # type: ignore[arg-type]
-        assert raw.status == 200, (what, raw)
         answer = json.loads(raw.body)
+        assert raw.status == 200, (what, raw)
         assert answer["id"] == request_id, (what, raw)
         error = answer["error"]
         assert error["code"] == PERMISSION_DENIED_CODE, (what, raw)
@@ -295,14 +305,40 @@ async def case_11_envoy_denies_what_is_not_one_tools_call(st: Stack, gateway: Ga
     padding = b" " * envoy.MAX_REQUEST_BYTES
     oversized = await gateway.raw(principal, "POST", call[:-1] + padding + b"}")
     assert oversized.status == 413, oversized  # Envoy's own: a body it would have to cut never reaches the gate
-    for method in ("initialize", "tools/list", "ping"):  # the pass methods: forwarded to the tool unchecked
+    for method in ("initialize", "tools/list", "ping"):  # forwarded to the tool unchecked, and answered by it
         passed = await gateway.raw(principal, "POST", request(method, {}))
         assert passed.status == 200, (method, passed)
         assert "error" not in json.loads(passed.body), (method, passed)
+    listed = await gateway.raw(principal, "POST", request("prompts/list", {}))
+    assert (listed.status, json.loads(listed.body)) == (200, {"jsonrpc": "2.0", "id": 9, "result": {"prompts": []}})
+    # The echo tool answers a method it does not serve itself: the gate let it through.
+    for unserved_request in (
+        request("resources/read", {"uri": "file:///a"}),
+        request("tasks/get", {"taskId": "t"}, "t-1"),
+        request("sampling/createMessage", {}),
+    ):
+        unserved = await gateway.raw(principal, "POST", unserved_request)
+        assert json.loads(unserved.body)["error"]["code"] == METHOD_NOT_FOUND, unserved
+    for what, body in {
+        "notifications/cancelled": notification("notifications/cancelled", {"requestId": 3, "reason": "stop"}),
+        "an unknown notification": notification("unknown/thing", {}),
+        "a tasks notification": notification("tasks/cancel", {"taskId": "t"}),
+        "a client response": b'{"jsonrpc":"2.0","id":9,"result":{}}',
+    }.items():
+        accepted = await gateway.raw(principal, "POST", body)
+        assert (accepted.status, accepted.body) == (202, b""), (what, accepted)  # the tool's, not the gate's
     assert len(st.echo.received()) == before
     ran = await gateway.raw(principal, "POST", call)  # a tools/call is checked, and this one passes
     assert ran.status == 200, ran
     assert len(st.echo.received()) == before + 1
+    # A Wait Task on the wait route: the gate passes its tasks/get as any route's, and the wait server answers it.
+    ticket = ticket_of(await gateway.call(principal, GATED_SERVER, GATED_TOOL, b"{}"))
+    assert isinstance(gateway, HttpMcpGateway), gateway
+    waiting = ModernMcp(gateway.url_of(WAIT_SERVER), st.agents.token(principal), tasks=True)
+    task = await waiting.call_tool("approval_wait", {"ticket": ticket})
+    assert (task["resultType"], task["status"]) == ("task", "working"), task
+    read = await waiting.get_task(task["taskId"])
+    assert read["status"] == "working", read
 
 
 async def case_12_gateway_attributes_reach_policy(st: Stack, gateway: GatewayUnderTest) -> None:
@@ -338,6 +374,37 @@ async def case_13_agent_credentials_never_reach_the_gate(st: Stack, gateway: Gat
             assert call.header(header) == [], (header, call)
 
 
+async def case_15_a_wait_task_is_read_only_by_the_agent_that_opened_it(st: Stack, gateway: GatewayUnderTest) -> None:
+    """A Wait Task is bound to the agent that opened it. Another agent's tasks/get
+    for it, even sending a principal header that names the opener, gets exactly the answer an id never issued gets
+    (no oracle for whose a task is); the opener reads it. So the gateway attests the principal on every message of
+    the wait route, not only the tools/call: Envoy through the gate's ext_authz (`CheckCore.unchecked`), agentgateway
+    through the wait target's own request transformation, since its guardrail hook sees tools/call alone.
+
+    Not through check-api: a Check API caller forwards tasks/get itself and sets the principal header in its own
+    code; the gate never sees it."""
+    owner, other = f"{gateway.name}-15", f"{gateway.name}-15-other"
+    assert isinstance(gateway, HttpMcpGateway), gateway
+    wait_tool = gateway.tool_of(WAIT_SERVER, "approval_wait")
+    ticket = ticket_of(await gateway.call(owner, GATED_SERVER, GATED_TOOL, b'{"n":15}'))
+    opener = modern_client(gateway, st.agents, owner, tasks=True, server=WAIT_SERVER)
+    task = await opener.call_tool(wait_tool, {"ticket": ticket})
+    assert (task["resultType"], task["status"]) == ("task", "working"), task
+    task_id: str = task["taskId"]
+    # agentgateway names a task `<target>+<id>`; the wait server's ids are base64url, which has no "+".
+    routed, _, _ = task_id.rpartition("+")
+    never_issued = f"{routed}+bm8tc3VjaC13YWl0LWlk" if routed else "bm8tc3VjaC13YWl0LWlk"
+    forging = modern_client(
+        gateway, st.agents, other, tasks=True, server=WAIT_SERVER, headers={PRINCIPAL_HEADER: owner}
+    )
+    # The whole answer an agent can read, HTTP status and JSON-RPC message, is the never-issued id's.
+    theirs = await forging.task_answer(task_id)
+    assert theirs == await forging.task_answer(never_issued), theirs
+    status, message = theirs
+    assert (status, message["error"]["code"]) == (HTTP_BAD_REQUEST, INVALID_PARAMS), theirs
+    assert (await opener.get_task(task_id))["status"] == "working"
+
+
 GOLDEN: Final[tuple[tuple[str, str, str, bytes, str], ...]] = (
     # name, principal suffix, server, params, the verdict both bindings give
     ("no approval needed", "", OTHER_SERVER, b'{"name":"echo","arguments":{"x":1}}', "pass"),
@@ -352,6 +419,8 @@ GOLDEN: Final[tuple[tuple[str, str, str, bytes, str], ...]] = (
         "rejected",
     ),
     ("gated by an attribute", ATTRIBUTE_GATED, OTHER_SERVER, b'{"name":"echo"}', "pending"),
+    # The wait server's route: pass without policy, as through every adapter, even for params rejected elsewhere.
+    ("the wait route", "", WAIT_SERVER, b'{"name":"approval_wait","arguments":{},"task":{}}', "pass"),
 )
 
 

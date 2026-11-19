@@ -1,5 +1,8 @@
 """agentgateway's remote mcpGuardrails processor (`agentgateway.dev.ext_mcp.ExtMcp`), on the tools/call request
-phase, as the last processor, failing closed."""
+phase, as the last processor, failing closed. agentgateway sends the hook tools/call alone and forwards every other
+method itself, which is the gate's one message rule (`gate.core.messages`): only a tools/call is checked. The wait
+route's other messages (tasks/get) never reach this hook, so agentgateway's wait target sets the principal header on
+them itself, from the same expression as the hook's principal (docs/reference/agentgateway.md)."""
 
 from collections.abc import Mapping
 from typing import Final
@@ -7,7 +10,7 @@ from typing import Final
 import grpc.aio
 from google.protobuf import struct_pb2
 
-from tool_approvals.config.views import ExtMcpView, WaitRouteView
+from tool_approvals.config.views import ExtMcpView
 from tool_approvals.contract.agentgateway import ext_mcp_pb2, ext_mcp_pb2_grpc
 from tool_approvals.gate.core.check import Checker, Pass
 from tool_approvals.gate.core.ports import GatewayContext
@@ -36,16 +39,16 @@ _CODES: Final[Mapping[int, _Code.ValueType]] = {
 
 class ExtMcpServicer(ext_mcp_pb2_grpc.ExtMcpServicer):
     """Behind GrpcAuth. A method other than tools/call, or service_names not exactly one: PERMISSION_DENIED
-    "misconfigured". The principal is metadata_context[principal_key], a non-empty string, else refused. The wait
-    route (`route.server`): pass, setting `route.principal_header` to the principal, no policy. Any other server:
-    the checker decides, given only the attributes `view.attributes` maps out of metadata_context and the RPC's
-    deadline; a pass removes `route.principal_header` so no tool sees a client-sent one. A refusal is an
+    "misconfigured". The principal is metadata_context[principal_key], a non-empty string, else refused. The checker
+    decides, given only the attributes `view.attributes` maps out of metadata_context and the RPC's deadline. A pass
+    on the wait route (`Pass.attested`) sets `principal_header` to the attested principal, replacing any copy the
+    client sent; any other pass removes `principal_header`, so no tool sees a client-sent one. A refusal is an
     AuthorizationError (PERMISSION_DENIED or RESOURCE_EXHAUSTED, mappings.errors) with agent_text as its reason."""
 
-    def __init__(self, checker: Checker, view: ExtMcpView, route: WaitRouteView) -> None:
+    def __init__(self, checker: Checker, view: ExtMcpView, principal_header: str) -> None:
         self._checker: Final = checker
         self._view: Final = view
-        self._route: Final = route
+        self._principal_header: Final = principal_header
 
     async def CheckRequest(
         self,
@@ -55,22 +58,16 @@ class ExtMcpServicer(ext_mcp_pb2_grpc.ExtMcpServicer):
         principal = struct_string(request.metadata_context, (self._view.principal_key,))
         if request.method != TOOLS_CALL or len(request.service_names) != 1 or not principal:
             return _misconfigured()
-        server = ServerName(request.service_names[0])
-        if server == self._route.server:
-            # The wait server's route: no policy; the attested principal replaces any header the client sent.
-            header = ext_mcp_pb2.McpHeader(key=self._route.principal_header, value=principal.encode())
-            return _passing(ext_mcp_pb2.HeaderMutation(set=[header]))
         gateway = GatewayContext(
-            Principal(principal), server, self._attributes(request.metadata_context), inbound_deadline(context)
+            Principal(principal),
+            ServerName(request.service_names[0]),
+            self._attributes(request.metadata_context),
+            inbound_deadline(context),
         )
         verdict = await self._checker.check(gateway, request.mcp_request)
-        match verdict:
-            case Pass():
-                # No tool ever sees a principal header a client sent: only the wait route carries the gateway's.
-                strip = ext_mcp_pb2.HeaderMutation(remove=[self._route.principal_header])
-                return _passing(strip)
-            case _:
-                return _refused(verdict, agent_text(verdict, self._view.exposed_wait_tool))
+        if isinstance(verdict, Pass):
+            return _passing(_principal_mutation(self._principal_header, verdict.attested))
+        return _refused(verdict, agent_text(verdict, self._view.exposed_wait_tool))
 
     def _attributes(self, metadata: struct_pb2.Struct) -> Mapping[str, str]:
         """Each attribute `view.attributes` names, read at its key path; a missing or non-string one is left out."""
@@ -85,6 +82,14 @@ class ExtMcpServicer(ext_mcp_pb2_grpc.ExtMcpServicer):
         result = ext_mcp_pb2.McpResponseResult()
         getattr(result, "pass").SetInParent()  # `pass` is a Python keyword
         return result
+
+
+def _principal_mutation(principal_header: str, attested: Principal | None) -> ext_mcp_pb2.HeaderMutation:
+    """With `attested` (the wait route), the principal header set to it, replacing any copy the client sent;
+    without, the header removed: no tool ever sees a principal header a client sent."""
+    if attested is None:
+        return ext_mcp_pb2.HeaderMutation(remove=[principal_header])
+    return ext_mcp_pb2.HeaderMutation(set=[ext_mcp_pb2.McpHeader(key=principal_header, value=attested.encode())])
 
 
 def _passing(mutation: ext_mcp_pb2.HeaderMutation) -> ext_mcp_pb2.McpRequestResult:

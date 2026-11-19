@@ -1,11 +1,12 @@
 """What the agent is told to do next after a wait report: the one home of the wait server's wording."""
 
+from collections.abc import Mapping
 from typing import Final, assert_never
 
 from tool_approvals.kernel.requests import TicketError, TooManyWaits, WaitReport, WaitState
 from tool_approvals.kernel.wording import comment_sentence
 from tool_approvals.kernel.words import MAX_REASON_CHARS, MAX_WORK_REF_CHARS, WordsError
-from tool_approvals.wait.core.hold import WaitUnavailable
+from tool_approvals.wait.core.hold import UnknownTicket, WaitUnavailable
 
 _STATES: Final = {
     WaitState.WAITING: "No person has answered yet. Ask again later.",
@@ -26,9 +27,9 @@ _STATES: Final = {
     ),
     WaitState.UNKNOWN_WAIT: "This wait is not known. Wait again with the ticket the refused call gave you.",
 }
-_TICKET_ERRORS: Final = {
+# UNKNOWN_TICKET alone: another principal's ticket reaches here as unknown too (`hold.UnknownTicket`).
+_TICKET_ERRORS: Final[Mapping[UnknownTicket, str]] = {
     TicketError.UNKNOWN_TICKET: "The ticket is not known. Use the ticket the refused call gave you.",
-    TicketError.NOT_YOUR_TICKET: "The ticket belongs to another caller. Use the ticket the refused call gave you.",
 }
 _WORDS_ERRORS: Final = {
     WordsError.TOO_LONG: (
@@ -44,6 +45,10 @@ _WORDS_ERRORS: Final = {
 NO_PRINCIPAL: Final = (
     "The gateway did not say who is calling, so no wait was opened. Calling again unchanged fails too."
 )
+# The same for a task read: no wait is read for a caller no gateway named.
+NO_PRINCIPAL_TASK: Final = (
+    "The gateway did not say who is asking, so no task was read. Asking again unchanged fails too."
+)
 
 
 def next_step(report: WaitReport) -> str:
@@ -55,7 +60,7 @@ def next_step(report: WaitReport) -> str:
     return _STATES[report.state]
 
 
-def refusal(error: TicketError | WordsError | TooManyWaits | WaitUnavailable) -> str:
+def refusal(error: UnknownTicket | WordsError | TooManyWaits | WaitUnavailable) -> str:
     """Plain words for the agent when no wait could be opened or read: why, and whether waiting again can help."""
     match error:
         case TicketError():

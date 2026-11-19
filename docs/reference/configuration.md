@@ -165,10 +165,12 @@ wait_route:
   principal_header: x-approvals-principal
 ```
 
-`server` is the gateway's name for the wait server's route (agentgateway: the target's `name`). On that route the
-`ext_mcp` hook passes every `tools/call` without asking policy and sets `principal_header` to the principal the
-gateway attested; on every other route it removes that header from a call it passes, so no tool server sees a
-copy a client sent.
+`server` is the gateway's name for the wait server's route (agentgateway: the target's `name`; Envoy: the route's
+`context_extensions` server). On that route the gate passes every `tools/call` without asking policy, one rule
+for every adapter (`ext_mcp`, `ext_authz` and the Check API, which answers `pass`). The `ext_mcp` and `ext_authz`
+mappings set `principal_header` to the principal the gateway attested, replacing any copy the client sent; on
+every other route they remove that header from a request they pass, so no tool server sees a copy a client sent.
+A Check API caller does both itself ([the Check API](check-api.md#the-wait-through-your-gateway)).
 
 **Naming rule:** no real tool server may use the name in `wait_route.server`. A tool server routed under that name
 would have every call passed without policy.
@@ -201,7 +203,7 @@ gate:
     hook_timeout: 70s # no default: raise Envoy's ext_authz timeout to match
     principal_path: [envoy.filters.http.jwt_authn, payload, sub] # filter name, then keys
     server_key: server # default; the route's context_extensions key naming its server
-    exposed_wait_tool: approvals-wait_approval_wait
+    exposed_wait_tool: approval_wait # Envoy does not prefix tool names
     attributes: # name: exactly one of metadata (filter name, then keys) or context_extension (a key)
       tenant: { metadata: [envoy.filters.http.jwt_authn, payload, tenant] }
       zone: { context_extension: zone }
@@ -226,7 +228,8 @@ gate:
 | `policy` | `kind: rules` is the built-in policy; AuthZEN and OPA adapters are planned (milestone 5). A rule is considered when its principal, server and tool patterns all match; it then matches when each of its `attributes` patterns matches the gateway attribute of that name. The first matching rule decides; with none matching, `default` does. A considered rule naming an attribute the call does not carry refuses the call as `unavailable`. `require` names a requirement, or `none` for no approval |
 
 Each mapping listener is optional; a gate serves the ones present. `exposed_wait_tool` is the wait tool's name as
-agents see it through that gateway: with agentgateway's `prefixMode: always` it is `<wait_route.server>_<tool>`.
+agents see it through that gateway: with agentgateway's `prefixMode: always` it is `<wait_route.server>_<tool>`;
+Envoy routes each server on its own path and does not prefix, so there it is `wait.tool` itself.
 Every mapping is an optional adapter in front of one gateway-neutral core: the core sees only the principal, the
 server, the gateway attributes and the hook's deadline, never a gateway's own keys.
 Gateway attributes are the gate's own names for values a gateway attested: each mapping copies only the

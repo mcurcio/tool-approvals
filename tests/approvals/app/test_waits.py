@@ -87,14 +87,31 @@ async def test_a_wait_on_an_answered_approval_ends_at_once_and_does_not_count() 
     await requested(world)
     await answer(world, Verdict.APPROVE)
     wait = await opened(world)
-    assert [report.state async for report in world.waits.await_outcome(wait)] == [WaitState.APPROVED]
+    assert [report.state async for report in world.waits.await_outcome(wait, AGENT)] == [WaitState.APPROVED]
 
 
 async def test_an_unknown_wait_gets_one_unknown_report() -> None:
     world = World()
-    assert [report async for report in world.waits.await_outcome(WaitId("nope"))] == [
+    assert [report async for report in world.waits.await_outcome(WaitId("nope"), AGENT)] == [
         WaitReport(WaitState.UNKNOWN_WAIT, None, None, None, None)
     ]
+
+
+async def test_only_the_principal_that_opened_a_wait_follows_it() -> None:
+    """A wait is bound to its opener; to anyone else it is exactly an unknown id,
+    so the answer tells no one whose a wait is, and nothing is watched for them."""
+    world = World()
+    await requested(world)
+    wait = await opened(world)
+    unknown = [report async for report in world.waits.await_outcome(WaitId("nope"), AGENT)]
+    assert [report async for report in world.waits.await_outcome(wait, OTHER_AGENT)] == unknown
+    assert world.store.feed.subscribers == 0
+    owners = world.waits.await_outcome(wait, AGENT)
+    assert (await next_report(owners)).state is WaitState.WAITING
+    await answer(world, Verdict.APPROVE)
+    assert [report async for report in world.waits.await_outcome(wait, OTHER_AGENT)] == unknown
+    assert (await next_report(owners)).state is WaitState.APPROVED
+    assert [report async for report in owners] == []
 
 
 async def next_report(reports: AsyncIterator[WaitReport]) -> WaitReport:
@@ -105,7 +122,7 @@ async def test_a_followed_wait_reports_now_then_each_change_until_the_outcome() 
     world = World()
     await requested(world)
     wait = await opened(world)
-    reports = world.waits.await_outcome(wait)
+    reports = world.waits.await_outcome(wait, AGENT)
     first = await next_report(reports)
     assert (first.state, first.opened_at, first.updated_at) == (WaitState.WAITING, world.store.clock, world.store.clock)
     assert first.ttl == HUMAN.answer_deadline + HUMAN.use_window
@@ -121,7 +138,7 @@ async def test_a_refusal_reaches_the_follower_with_its_comment() -> None:
     world = World()
     await requested(world)
     wait = await opened(world)
-    reports = world.waits.await_outcome(wait)
+    reports = world.waits.await_outcome(wait, AGENT)
     assert (await next_report(reports)).state is WaitState.WAITING
     await answer(world, Verdict.REFUSE, "not now")
     refused = await next_report(reports)
@@ -133,7 +150,7 @@ async def test_a_lost_feed_ends_the_stream_without_an_outcome() -> None:
     world = World()
     await requested(world)
     wait = await opened(world)
-    reports = world.waits.await_outcome(wait)
+    reports = world.waits.await_outcome(wait, AGENT)
     assert (await next_report(reports)).state is WaitState.WAITING
     world.store.feed.lose()
     assert [report async for report in reports] == []
@@ -159,4 +176,4 @@ async def test_a_wait_on_an_answered_approval_keeps_no_words() -> None:
     assert stored is not None
     assert stored.words is None
     assert EventKind.WORDED not in [event.kind for event in world.store.events]
-    assert [report.state async for report in world.waits.await_outcome(wait)] == [WaitState.APPROVED]
+    assert [report.state async for report in world.waits.await_outcome(wait, AGENT)] == [WaitState.APPROVED]

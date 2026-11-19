@@ -131,7 +131,9 @@ def open_wait_response(result: OpenWaitResult) -> requests_pb2.OpenWaitResponse:
 
 
 def await_outcome_response(report: WaitReport) -> requests_pb2.AwaitOutcomeResponse:
-    message = requests_pb2.AwaitOutcomeResponse()
+    """`report` on the wire, marked `bound`: Approvals reads every wait for the request's principal (another's wait
+    is UNKNOWN_WAIT), and says so, so a reader can tell its reports from an Approvals that ignores the principal."""
+    message = requests_pb2.AwaitOutcomeResponse(bound=True)
     if report.state is WaitState.REFUSED:
         message.refused.CopyFrom(refused_message(Refused(report.comment)))
     else:
@@ -207,6 +209,10 @@ def open_wait_result(reply: requests_pb2.OpenWaitResponse) -> OpenWaitResult:
 
 
 def wait_report(reply: requests_pb2.AwaitOutcomeResponse) -> WaitReport:
+    """The report; UnknownReply for one not marked `bound`: an Approvals that ignores the principal (an older
+    release mid-upgrade) would show anyone's wait, so its reports are never read, whatever order a rollout takes."""
+    if not reply.bound:
+        raise UnknownReply("a wait report not read for the principal (an Approvals that does not bind waits)")
     kind = reply.WhichOneof("status")
     if kind is None:
         raise UnknownReply("a wait status of a kind it does not know")

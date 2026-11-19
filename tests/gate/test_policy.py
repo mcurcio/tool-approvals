@@ -9,7 +9,7 @@ from types import MappingProxyType
 import pytest
 
 from tests.gate.cases import FREE, GATED
-from tests.gate.harness import PRINCIPAL, SERVER, rule
+from tests.gate.harness import PRINCIPAL, ROUTE, SERVER, rule
 from tool_approvals.config.views import RulesView
 from tool_approvals.gate.core.check import CheckCore, Pass, Unavailable
 from tool_approvals.gate.core.ports import GatewayContext, NoApproval, PolicyInput, PolicyVerdict, Require
@@ -136,7 +136,7 @@ class _NoApprovals:
 
 def _core(rules: RulesView, requests: _NoApprovals) -> CheckCore:
     known = frozenset({STRICT, LIGHT})
-    return CheckCore(RulesFilePolicy(rules), requests, known, timedelta(seconds=5), AsyncioTimeouts())
+    return CheckCore(RulesFilePolicy(rules), requests, known, timedelta(seconds=5), AsyncioTimeouts(), ROUTE.server)
 
 
 async def test_an_absent_attribute_refuses_the_call_through_the_core() -> None:

@@ -4,7 +4,7 @@ import hashlib
 
 import pytest
 
-from tool_approvals.kernel.names import WaitId, is_wait_id, wait_id_hash
+from tool_approvals.kernel.names import WaitId, is_principal, is_wait_id, wait_id_hash
 from tool_approvals.kernel.words import MAX_REASON_CHARS, MAX_WORK_REF_CHARS, AgentWords, WordsError
 
 
@@ -49,3 +49,16 @@ def test_only_the_sha256_of_a_wait_id_is_stored() -> None:
     assert wait_id_hash(wait) == hashlib.sha256(b"pX0dXk2mF9w3nQYq1Zr8Tg").digest()
     assert len(wait_id_hash(wait)) == 32
     assert wait_id_hash(WaitId("pX0dXk2mF9w3nQYq1Zr8Th")) != wait_id_hash(wait)
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["", "a\rb", "a\nb", "a\x00b", "a\tb", "a\x1bb", "a\x7fb", "a\x85b", " agent", "agent ", "\tagent"],
+)
+def test_a_principal_is_never_empty_nor_outside_an_http_field_value(text: str) -> None:
+    assert not is_principal(text)
+
+
+@pytest.mark.parametrize("text", ["agent-1", "agent one", "agënt-7", "spiffe://example.org/agent", "a"])
+def test_a_principal_may_hold_inner_spaces_and_any_printable_text(text: str) -> None:
+    assert is_principal(text)

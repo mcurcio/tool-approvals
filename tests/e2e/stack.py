@@ -62,8 +62,9 @@ DRAIN: Final = "1s"  # each service's stop drain: no load balancer to move away 
 # gate.ext_authz.hook_timeout, and Envoy's raised timeout: agentgateway's own fixed 10 s for its processors, so a
 # gate slower than both hooks needs one delay. Above the gate's check budget (5 s), as `config check` demands.
 EXT_AUTHZ_TIMEOUT: Final = timedelta(seconds=10)
-# wait.max_hold, and the wait target's request timeout in agentgateway, which must be above it (a held call on the
-# 2026-07-28 protocol sends nothing until it ends). A deployment keeps the same order at its own values.
+# wait.max_hold, and the wait route's request timeout at each gateway (agentgateway's wait target, Envoy's route),
+# which must be above it (a held call on the 2026-07-28 protocol sends nothing until it ends). A deployment keeps
+# the same order at its own values.
 MAX_HOLD: Final = timedelta(seconds=50)
 WAIT_REQUEST_TIMEOUT: Final = timedelta(seconds=60)
 REQUIREMENT: Final = "reviewed"
@@ -231,7 +232,7 @@ def render(  # noqa: PLR0913 (every setting a case varies)
 ) -> Rendered:
     """Write E2E_DIR under `tmp`. `guardrails` False renders gateways that route straight to the tool servers;
     `ext_mcp` and `ext_authz` are where the gateways dial the gate's hooks (a relay, or the gate itself);
-    `max_hold` is the wait server's, `wait_request_timeout` agentgateway's on the wait target."""
+    `max_hold` is the wait server's, `wait_request_timeout` each gateway's on the wait route."""
     directory = tmp / "e2e"
     mounted, records = directory / "mounted", directory / "records"
     tls_dir, secret_dir = mounted / "tls", mounted / "secrets"
@@ -277,6 +278,18 @@ def render(  # noqa: PLR0913 (every setting a case varies)
     agents_jwt = AgentJwt(issuer=ISSUER, audience=AUDIENCE, jwks_file="/e2e/jwks.json")
     ca = "/e2e/tls/ca.pem"
     hook_bearer = bearers["gateway-hook"]
+    wait = (
+        WaitTarget(
+            WAIT_SERVER,
+            f"https://wait:{WAIT_MCP_PORT}/mcp",
+            ca,
+            bearers["gateway-wait-route"],
+            wait_request_timeout,
+            PRINCIPAL_HEADER,
+        )
+        if guardrails
+        else None
+    )
     agw = agentgateway.config(
         servers={name: f"http://echo:{ECHO_PORT}{envoy.mcp_path(name)}" for name in TOOL_SERVERS},
         agents=agents_jwt,
@@ -285,17 +298,7 @@ def render(  # noqa: PLR0913 (every setting a case varies)
             if guardrails
             else None
         ),
-        wait=(
-            WaitTarget(
-                WAIT_SERVER,
-                f"https://wait:{WAIT_MCP_PORT}/mcp",
-                ca,
-                bearers["gateway-wait-route"],
-                wait_request_timeout,
-            )
-            if guardrails
-            else None
-        ),
+        wait=wait,
     )
     (mounted / "agentgateway.yaml").write_text(json.dumps(agw, indent=2))
     env = envoy.config(
@@ -304,6 +307,7 @@ def render(  # noqa: PLR0913 (every setting a case varies)
         guardrail=(Hook(*ext_authz, ca_file=ca, bearer=hook_bearer), EXT_AUTHZ_TIMEOUT, SERVER_KEY)
         if guardrails
         else None,
+        wait=wait,
     )
     (mounted / "envoy.json").write_text(json.dumps(env, indent=2))
     (directory / PORTS_FILE).write_text(json.dumps(_ports(desk_port), indent=2))
@@ -717,5 +721,5 @@ def stack(
     tmp: Path, *, max_hold: timedelta = MAX_HOLD, wait_request_timeout: timedelta = WAIT_REQUEST_TIMEOUT
 ) -> AbstractAsyncContextManager[Stack]:
     """Start the stack (images built from this commit), yield it, tear it down. `max_hold` is the wait server's,
-    `wait_request_timeout` agentgateway's on the wait target (keep it above `max_hold`)."""
+    `wait_request_timeout` each gateway's on the wait route (keep it above `max_hold`)."""
     return _stack(tmp, max_hold, wait_request_timeout)

@@ -16,7 +16,7 @@ from tests.fixtures.ports import free_port
 from tool_approvals.config.views import ListenerView, RequestsClientView, TlsView
 from tool_approvals.contract.requests.v1 import requests_pb2_grpc
 from tool_approvals.contract_mapping.requests import await_outcome_response
-from tool_approvals.kernel.names import WaitId
+from tool_approvals.kernel.names import Principal, WaitId
 from tool_approvals.kernel.requests import RequestsUnavailable, WaitReport, WaitState
 from tool_approvals.requests_client.client import RequestsClient
 from tool_approvals.serving.grpc_server import Keepalive, grpc_server
@@ -90,7 +90,7 @@ async def test_a_held_stream_over_a_vanished_peer_ends_unavailable(tls: TlsFiles
     relay = await hole.serve(relay_port)
     client = RequestsClient.connect(RequestsClientView(f"dns:///localhost:{relay_port}", tls.ca, "bearer"), FAST)
     try:
-        reports = client.await_outcome(WAIT)
+        reports = client.await_outcome(WAIT, Principal("agent-1"))
         assert (await anext(reports)).state is WaitState.WAITING
         hole.frozen = True
         async with asyncio.timeout(10):  # without keepalive the stream waits for ever

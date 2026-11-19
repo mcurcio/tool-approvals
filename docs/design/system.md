@@ -189,10 +189,11 @@ The wait is not part of the Check API (no gateway hook calls it): it is the wait
 As a **Wait Task**: `working` while Waiting; `completed` with the outcome as the tool result (a refusal is a normal
 result, not `failed`). No status is `failed`: when Approvals cannot be reached, `tasks/get` answers a JSON-RPC
 error and the client polls again. The task id is fresh, never the ticket. Details:
-[the wait tool and MCP Tasks](../reference/wait.md). Because no gateway
-attests a principal on `tasks/*`, a Wait Task is authorised by its unguessable id, as
-[SEP-2663](https://modelcontextprotocol.io/seps/2663-tasks-extension) allows: a leaked id reveals that one wait's
-outcome and can cancel that wait, but cannot word, answer or spend anything.
+[the wait tool and MCP Tasks](../reference/wait.md). A wait, held or a Task, is bound to the principal that
+opened it: every gateway attests the principal on every message of the wait route, `tasks/*` included, and to
+anyone else the wait does not exist (`tasks/get` answers as for an id never issued, so it tells no one whose a task
+is). The task id names the wait; it is not what authorises reading it, so a leaked id reveals nothing and ends
+nothing ([service design](service.md#key-flows)).
 
 ### Policy port
 

@@ -40,6 +40,13 @@ message CheckRequest {
   agent, its route), never from the call. Empty values are refused.
 - **`params`** must be the exact bytes of the JSON-RPC `params` the gateway will forward, not a re-encoding, and
   nothing after the gate may change them: the approval covers these bytes. In proto3 JSON, `bytes` are base64.
+- **Which messages to ask about:** a `tools/call` only, with or without an `id`. Forward every other well-formed
+  JSON-RPC message unasked (any other method, `tasks/*` included, notifications, and the client's responses to the
+  server; on the wait route, with the principal header set: [the wait](#the-wait-through-your-gateway)), and refuse a body that is not one JSON-RPC request or response (a batch, duplicate keys, trailing data),
+  a `notifications/*` method carrying an `id`, or a method that is not `tools/call` but reads as it (another case,
+  padding, a fullwidth or other confusable slash: [Envoy](envoy.md#which-requests-pass) lists the comparison), since
+  a server that normalises method names would run it as a call nobody checked. This is the rule the gate's own adapters apply
+  ([Envoy](envoy.md#which-requests-pass), [agentgateway](agentgateway.md)), so it holds behind every gateway.
 - **`gateway_attributes`** are passed to policy as sent: the rules-file policy matches a rule's `attributes`
   against them ([configuration](configuration.md#gate)). A rule whose principal, server and tool match and
   that names an attribute the request leaves out answers `unavailable`.
@@ -73,7 +80,7 @@ message CheckResponse {
 
 | Verdict | Meaning | The gateway |
 |---|---|---|
-| `pass` | No approval needed, or this exact call's yes was just spent | Forwards the call unchanged |
+| `pass` | No approval needed, or this exact call's yes was just spent, or the call is on the wait route (`server` is `wait_route.server`) | Forwards the call unchanged |
 | `pending` | Approval requested; `ticket` names it | Refuses the call with `agent_text` |
 | `refused` | A person said no, with an optional `comment`; the no stands until the answer deadline | Refuses with `agent_text` |
 | `rejected` | The gate will not consider the call (`REASON_MALFORMED`, `REASON_TASK_REQUESTED`, `REASON_TOO_LARGE`) | Refuses with `agent_text` |
@@ -113,15 +120,28 @@ The gate rejects, before any Approval exists:
 |---|---|
 | `REASON_TOO_LARGE` | `params` over 16384 bytes |
 | `REASON_TASK_REQUESTED` | A `task` member, or `_meta["io.modelcontextprotocol/clientCapabilities"].extensions` naming `io.modelcontextprotocol/tasks`: a task's follow-up requests would escape the approved call ([MCP Tasks](wait.md#mcp-tasks)) |
-| `REASON_MALFORMED` | Not UTF-8 JSON; not an object; a top-level key other than `name`, `arguments`, `_meta`; a duplicate key at any depth; no `name` or an empty one; `arguments` not an object; `_meta` not an object; nesting deeper than 32; a number too large for a float; a NUL or lone surrogate in a name, key or string; an empty principal or server |
+| `REASON_MALFORMED` | Not UTF-8 JSON; not an object; a top-level key other than `name`, `arguments`, `_meta`; a duplicate key at any depth; no `name` or an empty one; `arguments` not an object; `_meta` not an object; nesting deeper than 32; a number too large for a float; a NUL or lone surrogate in a name, key or string; an empty principal or server; a principal that cannot be an HTTP header value (a control character, or a leading or trailing space) |
 
 ## The wait, through your gateway
 
 A `pending` refusal tells the agent to call the wait tool, which your gateway must route to the wait server like
-any MCP server ([the wait tool](wait.md)). The first-party agentgateway mapping recognises the wait route and sets
-the attested principal on it; a gateway using the Check API must do the same itself: on the route named
-`wait_route.server`, set the header `wait_route.principal_header` to the principal it attested, replacing any copy
-the client sent, and authenticate to the wait server with a registry credential granted `wait.call` (a bearer,
-or a client certificate on a listener with `tls.client_ca`). On every other route,
-remove that header. Do not send the wait route's calls to the Check API: policy would judge them like any other
-call.
+any MCP server ([the wait tool](wait.md)). The gate has one rule for the wait route, the same through every
+adapter: a call whose `server` is `wait_route.server` is `pass` (with an empty `agent_text`), without parsing its
+params and without asking policy or Approvals; the wait server reads its own calls. A non-empty `principal` is
+still required, and one that cannot be an HTTP header value as it stands (a control character, CR, LF, NUL and
+tab included, or a leading or trailing space) counts as none, on every route, so no gateway is ever asked to write
+it in a header. So a gateway using the Check API may ask about the wait route's calls like any other, and gets
+`pass`, or skip asking.
+
+What the first-party agentgateway and Envoy wiring does, a gateway using the Check API does itself: on the route
+named `wait_route.server`, set the header `wait_route.principal_header` to the principal it attested on **every**
+message it forwards there, the `tools/call` and every message it forwards unasked (`tasks/get`, `initialize`,
+notifications) alike, replacing any copy the client sent, and authenticate to the wait server with a registry
+credential granted `wait.call` (a bearer, or a client certificate on a listener with `tls.client_ca`). On every
+other route, remove that header, on every message. The Check API's `pass` carries no header to set: the principal
+is the one the caller sent, and the messages it forwards unasked never reach the gate at all.
+
+The wait server binds every wait to the principal that opened it: it reads a Wait Task only for the principal in
+that header, answers another principal's task exactly as an unknown one, and refuses a `tasks/get` that carries no
+principal. A gateway that writes the header on `tools/call` alone leaves its agents unable to read their own
+tasks; one that forwards a client's copy would let an agent read as another.

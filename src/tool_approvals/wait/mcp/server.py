@@ -57,6 +57,5 @@ def asgi_app(server: MCPServer[Any], listener: ListenerView) -> Starlette:
 
 
 def principal_of(ctx: ServerRequestContext[Any, Any], header: str) -> Principal | None:
-    """The attested principal from the request's `header` (set by the gate on the wait route, never by the
-    client): a single non-empty value, else None (the call is refused)."""
+    """`calls.principal_of`: the attested principal from the request's `header`, or None (the call is refused)."""
     return calls.principal_of(ctx, header)

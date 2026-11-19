@@ -78,7 +78,7 @@ async def test_open_wait_racing_an_answer_ends_the_new_wait_with_the_outcome(wor
     assert [row["outcome"] for row in await world.rows("SELECT outcome::text FROM waits")] == ["approved"]
     world.wire(world.uow)
     async with running_feed(world.feed):
-        reports = [report.state async for report in world.waits.await_outcome(wait)]
+        reports = [report.state async for report in world.waits.await_outcome(wait, AGENT)]
     assert reports == [WaitState.APPROVED]
 
 

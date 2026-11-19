@@ -10,8 +10,8 @@ import pytest
 
 from tests.fixtures.certs import TlsFiles, tls_files
 from tests.fixtures.scripted_requests import Script
-from tests.gate.cases import FREE
-from tests.gate.harness import Gate, check_json, check_request, running_gate
+from tests.gate.cases import FREE, GATED
+from tests.gate.harness import ROUTE, Gate, check_grpc, check_json, check_request, running_gate
 from tests.gate.v1_client import UnknownKind, from_json, read_verdict, runs
 from tool_approvals.contract.check.v1 import check_pb2, check_pb2_grpc
 
@@ -92,6 +92,25 @@ async def test_json_carries_params_as_base64_bytes(gate: Gate) -> None:
     reply = await check_json(gate, check_request(FREE))
     assert reply.status_code == 200
     assert runs(from_json(reply.text))
+
+
+# GATED needs a person's yes on any other route, and a `task` member is rejected there: the wait server's route is
+# `pass` without policy, the same answer every adapter gives (CheckCore.check). The gate fixture asserts that
+# Approvals was never asked.
+@pytest.mark.parametrize("params", [GATED, b'{"name":"approval_wait","arguments":{},"task":{}}'])
+async def test_the_wait_route_passes_without_policy_on_both_bindings(gate: Gate, params: bytes) -> None:
+    request = check_request(params)
+    request.server = ROUTE.server
+    assert (await check_grpc(gate, request)).WhichOneof("verdict") == "pass"
+    reply = await check_json(gate, request)
+    assert reply.status_code == 200
+    assert runs(from_json(reply.text))
+
+
+async def test_another_route_still_asks_policy(gate: Gate) -> None:
+    # The same params on a tool route: rejected (the `task` member), so the wait rule is keyed on the route alone.
+    request = check_request(b'{"name":"approval_wait","arguments":{},"task":{}}')
+    assert (await check_grpc(gate, request)).WhichOneof("verdict") == "rejected"
 
 
 def test_a_v1_client_refuses_an_unknown_verdict_kind_over_grpc() -> None:

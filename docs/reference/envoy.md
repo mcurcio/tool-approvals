@@ -10,8 +10,7 @@ names.
 Envoy's types are an optional dependency: the published image carries them; a gate installed from the package
 needs the `envoy` extra (`tool-approvals[envoy]`), and `config check` refuses a `gate.ext_authz` section without it.
 
-**Not built yet:** the wait server behind Envoy (planned, milestone 4). Today an agent behind Envoy is told to call
-the wait tool, which must be served through another gateway.
+**Not built yet (milestone 4):** long holds through Envoy ([the wait route](#the-wait-route)).
 
 ## The HTTP filters
 
@@ -139,32 +138,42 @@ certificate:
     hook_timeout: 70s # no default: raise Envoy's ext_authz timeout to match
     principal_path: [envoy.filters.http.jwt_authn, payload, sub] # filter name, then keys
     server_key: server # default; the route's context_extensions key naming its server
-    exposed_wait_tool: approvals-wait_approval_wait
+    exposed_wait_tool: approval_wait # Envoy does not prefix tool names
 ```
 
 ## Which requests pass
 
-The filter sees every HTTP request on the route, so the gate classifies each one:
+The filter sees every HTTP request on the route. The gate reads the HTTP facts, then applies to the body the one
+rule it applies behind every gateway: it checks `tools/call` and nothing else.
 
 | Request | Gate |
 |---|---|
 | `GET` (a server stream), `DELETE` (ending a session), any HTTP method but `POST` | Refused (`malformed`) |
 | A body Envoy cut (`x-envoy-auth-partial-body: true`) | Refused (`too-large`) |
-| A body that is not one JSON-RPC request: a batch, duplicate keys, trailing data, no method, a client's JSON-RPC response | Refused (`malformed`) |
-| `POST` of a single `tools/call` | Checked like any call, on the params' exact bytes ([the Check API](check-api.md#the-verdict)) |
-| `POST` of `initialize`, `notifications/initialized`, `tools/list`, `ping` | Passed |
-| `POST` of a `tasks/*` method | Refused (`task-requested`): task follow-ups would escape the approved call |
-| `POST` of any other method | Refused (`malformed`) |
+| A body that is neither one JSON-RPC request nor one JSON-RPC response: a batch, duplicate keys, trailing data, no method and no `result` or `error` | Refused (`malformed`) |
+| `POST` of a client's JSON-RPC response (its answer to a server's request: sampling, elicitation, roots) | Passed |
+| `POST` of a single `tools/call` | Checked like any call, on the params' exact bytes ([the Check API](check-api.md#the-verdict)); on the wait route, passed without policy, with the attested principal header ([the wait route](#the-wait-route)) |
+| `POST` of a `notifications/*` method carrying an `id` (an MCP notification has none) | Refused (`malformed`) |
+| `POST` of a method that is not `tools/call` but reads as it once Unicode-normalised (NFKC), casefolded and stripped of whitespace and invisible format characters, with a confusable slash (fraction, division, fullwidth, big solidus, box-drawing diagonal) read as `/`: `Tools/call`, `tools/call `, `tools∕call` | Refused (`malformed`) |
+| `POST` of any other request or notification, whatever its method (`initialize`, `tools/list`, `tasks/*`, `ping`, one the server does not serve) | Passed, on every route; on the wait route with the attested principal header, as every message there |
 
-A refusal answers the request's own `id` when the gate could read one (the method rows), and `null` otherwise. A
-route that names no server, or a request with no principal at `principal_path`, is refused (`unavailable`) before
-any of these. A route naming `wait_route.server` is checked like any other server's until the wait route behind
-Envoy is built (milestone 4).
+The rule is the gate's, not Envoy's, and is not configured: behind agentgateway, whose guardrail is sent
+`tools/call` alone, every other method passes too, a lookalike of `tools/call` included: agentgateway forwards
+whatever it does not itself read as `tools/call` without asking the gate, so only a server that matches method
+names exactly is safe behind it. `tasks/*` needs no check of its own: the gate refuses every
+`tools/call` that asks to run as a task (`task-requested`), so no task follows a call it let through, and a Wait
+Task is read only by the principal that opened it, at the wait server ([MCP Tasks](wait.md#mcp-tasks)), from the
+principal header the gate sets on every message of the wait route. A refusal answers the request's
+own `id` when the gate could read one, and `null` when it could read no message. A refused notification (a
+message with a `method` and no `id`, whatever refused it: a checked `tools/call` or a lookalike of one) is
+answered as MCP's Streamable HTTP transport asks: HTTP 400, its JSON-RPC error carrying no `id` member. A route that names no server, or a request with no principal at `principal_path`, is
+refused (`unavailable`) before any of these.
 
 ## What the agent sees
 
 A refused request gets HTTP 200 with a JSON-RPC error answering the request's own `id` (its exact bytes; `null`
-when it had none). The message is the Check API's `agent_text`; `data` names the verdict and, when pending, the
+when the gate could read no message). A refused notification gets HTTP 400 with the same error and no `id`. The
+message is the Check API's `agent_text`; `data` names the verdict and, when pending, the
 ticket:
 
 ```json
@@ -180,5 +189,51 @@ ticket:
 These are the codes agentgateway v1.7.0 uses for its own refusals (through agentgateway itself the gate's refusal
 reaches the agent as a failed tool result instead: [agentgateway](agentgateway.md#what-the-agent-sees)). A pass
 forwards the request with one change: the OK response lists `wait_route.principal_header` (`x-approvals-principal`
-in the example) in `headers_to_remove`, so no tool behind Envoy sees a principal header an agent sent. Envoy
-applies it; nothing in the bootstrap needs to ask for it.
+in the example) in `headers_to_remove`, so no tool behind Envoy sees a principal header an agent sent. On the wait
+route the OK response sets that header instead, to the attested principal, on every message: the checked
+`tools/call` and every message passed unchecked (`tasks/get`, `initialize`, a notification) alike. Envoy applies both; nothing in the
+bootstrap needs to ask for them.
+
+## The wait route
+
+The wait server is one more MCP route, whose `context_extensions` server is `wait_route.server`. The gate passes
+its `tools/call` requests without policy (and its `tasks/get`, as on every route, so Wait Tasks work behind
+Envoy), and on every message of the route sets `wait_route.principal_header` to the principal at
+`principal_path`, overwriting every copy the agent sent (an OK response header with `append: false`, which Envoy's
+ext_authz reads for these headers, and `append_action: OVERWRITE_IF_EXISTS_OR_ADD`, the field that replaces it);
+the wait server reads the principal from that header alone, and shows a wait only to the principal that opened
+it, so another agent's `tasks/get` is answered as for an unknown task. The route authenticates to the wait server itself,
+with a registry bearer granted `wait.call`, in place of the agent's `Authorization` (which `jwt_authn` does not
+forward):
+
+```yaml
+- match:
+    path: /approvals-wait/mcp
+  route:
+    cluster: approvals_wait
+    prefix_rewrite: /mcp
+    timeout: 0s # off: a held call sends nothing until the hold ends
+  request_headers_to_add:
+  - header:
+      key: authorization
+      value: Bearer <bearer of the gateway-wait-route entry>
+    append_action: OVERWRITE_IF_EXISTS_OR_ADD
+  typed_per_filter_config:
+    envoy.filters.http.ext_authz:
+      '@type': type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute
+      check_settings:
+        context_extensions:
+          server: approvals-wait
+```
+
+with the `approvals_wait` cluster reaching `wait.listeners.mcp` over TLS (an `UpstreamTlsContext` verifying its
+certificate, as for the gate's cluster). The bearer lives in the bootstrap; keep it out of anything an agent can
+read. Turn the route's `timeout` off (or raise it above `wait.max_hold`): a held call sends nothing until the
+hold ends, and Envoy's default gives a response 15 s.
+
+Point `gate.ext_authz.exposed_wait_tool` at the wait tool's name as agents see it: behind Envoy, which does not
+prefix tool names, `wait.tool` itself (`approval_wait` by default).
+
+**What milestone 4 adds.** The end-to-end suite runs waits that answer at once, and opens and reads a Wait Task
+through Envoy. Not yet built or proven through Envoy: a hold that outlasts Envoy's stream idle timeout (5 minutes
+by default) or the connection manager's other defaults.

@@ -87,7 +87,7 @@ and its own secrets), and wire your gateway. [Running tool-approvals](docs/opera
 | Gateway | Wiring | Status |
 |---|---|---|
 | [agentgateway](https://agentgateway.dev) | Guardrail processor (`ext_mcp`), last in the chain, fail closed, `tools/call` request phase; the wait server as an MCP target ([wiring](docs/reference/agentgateway.md)) | Complete |
-| Envoy family (Envoy, Envoy Gateway, Istio) | [`ext_authz`](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_authz_filter) gRPC with the request body as raw bytes, last body filter, raised timeout; caller from `jwt_authn` metadata ([wiring](docs/reference/envoy.md)) | Complete, except the wait route (milestone 4) |
+| Envoy family (Envoy, Envoy Gateway, Istio) | [`ext_authz`](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_authz_filter) gRPC with the request body as raw bytes, last body filter, raised timeout; caller from `jwt_authn` metadata ([wiring](docs/reference/envoy.md)) | Complete, except long holds through Envoy (milestone 4) |
 | Any other hook | Call the **Check API** (gRPC, or JSON over HTTP) from the gateway's own plugin ([reference](docs/reference/check-api.md)) | Complete |
 
 Each row is an optional adapter: a gate serves only the listeners its configuration names. One conformance suite
@@ -167,6 +167,8 @@ With no answer by the answer deadline the approval expires; a yes not spent with
 
 - **Agents can only ask.** The agents' side (gate and wait server) has no method that lists, shows or answers an
   approval, and no credential granted to it can reach one. Agents' words appear to approvers only as quoted text.
+- **A wait is its opener's.** The gateway attests the agent on every message to the wait server, and a wait, held
+  or a Task, is shown only to the agent that opened it; to any other agent its id reads as unknown.
 - **An answer counts only from an allowed surface, at no more than its cap,** from a member of an approver group,
   signed in strongly and recently enough. Every answer records the surface, approver, qualifying group, vouched
   assurance and sign-in moment, and is audited.
@@ -201,7 +203,7 @@ Task has a reserved place in the contracts and needs no breaking change.
 | 1 | Tracer: Check API (gRPC and JSON), `ext_mcp` and minimal `ext_authz` mappings, rules-file policy, config with floor and registry, Approvals on Postgres, held wait and Wait Task create and get, minimal desk with step-up | Built |
 | 2 | Gateway breadth: gateways as optional adapters behind one port, full `ext_authz` classification, gateway-attribute policy, mTLS, inbound deadlines, one conformance suite for every adapter, the answer's moment re-checked at claim | Built |
 | 3 | Approvers' side: complete desk, Answers API for integrated surfaces, audit report, event delivery to channels, Web Push, retention, compose file and Helm chart. **The first deployable release** | Planned |
-| 4 | Wait Tasks complete: cancel, replacement, caps, time to live, the Envoy wait route | Planned |
+| 4 | Wait Tasks complete: cancel, replacement, caps, time to live, long holds through Envoy | Planned |
 | 5 | AuthZEN and OPA policy adapters | Planned |
 
 ## Contributing

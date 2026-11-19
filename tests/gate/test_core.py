@@ -44,9 +44,18 @@ from tool_approvals.gate.core.ports import GatewayContext, NoApproval, PolicyInp
 from tool_approvals.gate.mappings.check_api import CheckServicer, check_json_app
 from tool_approvals.gate.mappings.ext_authz import ExtAuthzServicer
 from tool_approvals.gate.mappings.ext_mcp import ExtMcpServicer
+from tool_approvals.kernel.calls import RejectReason
 from tool_approvals.kernel.methods import Method
-from tool_approvals.kernel.names import CallerName, RequirementName, Ticket, ToolName
-from tool_approvals.kernel.requests import CallRef, Claimed, ClaimResult, RequestResult, RequestsUnavailable, Ticketed
+from tool_approvals.kernel.names import CallerName, Principal, RequirementName, ServerName, Ticket, ToolName
+from tool_approvals.kernel.requests import (
+    CallRef,
+    Claimed,
+    ClaimResult,
+    Rejected,
+    RequestResult,
+    RequestsUnavailable,
+    Ticketed,
+)
 from tool_approvals.kernel.timeouts import Stopped, StopSignal, TimedOut
 from tool_approvals.serving.timeouts import AsyncioTimeouts
 
@@ -98,11 +107,18 @@ class _Limits(AsyncioTimeouts):
 
 
 def _core(policy: _Policy, requests: _Requests | None = None, timeouts: AsyncioTimeouts | None = None) -> CheckCore:
-    return CheckCore(policy, requests or _Requests(), frozenset({REVIEWED}), BUDGET, timeouts or AsyncioTimeouts())
+    return CheckCore(
+        policy, requests or _Requests(), frozenset({REVIEWED}), BUDGET, timeouts or AsyncioTimeouts(), ROUTE.server
+    )
 
 
-def _context(attributes: Mapping[str, str] | None = None, deadline: timedelta | None = None) -> GatewayContext:
-    return GatewayContext(PRINCIPAL, SERVER, MappingProxyType(dict(attributes or {})), deadline)
+def _context(
+    attributes: Mapping[str, str] | None = None,
+    deadline: timedelta | None = None,
+    server: ServerName = SERVER,
+    principal: Principal = PRINCIPAL,
+) -> GatewayContext:
+    return GatewayContext(principal, server, MappingProxyType(dict(attributes or {})), deadline)
 
 
 async def test_the_policy_sees_the_parsed_call_and_the_attributes() -> None:
@@ -131,6 +147,65 @@ async def test_any_error_from_approvals_refuses(error: Exception) -> None:
     requests = _Requests(raises=error)
     assert await _core(_Policy(verdict=Require(REVIEWED)), requests).check(_context(), GATED) == Unavailable()
     assert requests.asked == ["claim"]
+
+
+# ---- the wait route: one rule for every adapter ----
+
+
+# Params no other route would let through: a task asked for, malformed, and none at all.
+@pytest.mark.parametrize("params", [GATED, b'{"name":"approval_wait","task":{}}', b"not json", b""])
+async def test_the_wait_route_passes_with_the_attested_principal_and_asks_nothing(params: bytes) -> None:
+    policy, requests, timeouts = _Policy(raises=AssertionError("asked policy")), _Requests(), _Limits()
+    # A deadline already passed: the wait route spends no time, so it does not refuse on time either.
+    context = _context(server=ROUTE.server, deadline=timedelta(0))
+    assert await _core(policy, requests, timeouts).check(context, params) == Pass(attested=PRINCIPAL)
+    assert (policy.asked, requests.asked, timeouts.limits) == ([], [], [])
+
+
+async def test_any_other_route_passes_without_an_attested_principal() -> None:
+    policy = _Policy()
+    assert await _core(policy).check(_context(), GATED) == Pass(attested=None)
+    assert len(policy.asked) == 1
+
+
+async def test_a_message_passed_on_carries_the_attested_principal_on_the_wait_route_alone() -> None:
+    """Every message on the wait route is attested, not only its tools/call."""
+    core = _core(_Policy(raises=AssertionError("asked policy")), _Requests())
+    assert core.unchecked(PRINCIPAL, ROUTE.server) == Pass(attested=PRINCIPAL)
+    assert core.unchecked(PRINCIPAL, SERVER) == Pass(attested=None)
+    assert core.unchecked(Principal(""), ROUTE.server) == Pass(attested=None)  # nobody to attest: the header goes
+
+
+async def test_the_wait_route_without_a_principal_is_rejected_as_any_call() -> None:
+    policy = _Policy(raises=AssertionError("asked policy"))
+    context = _context(server=ROUTE.server, principal=Principal(""))
+    assert await _core(policy).check(context, GATED) == Rejected(RejectReason.MALFORMED)
+
+
+# A principal no adapter could write in the wait route's principal header (RFC 9110 field value) is no principal.
+_NOT_A_HEADER_VALUE = ["a\rb", "a\nb", "a\x00b", "a\tb", "a\x1bb", "a\x7fb", "a\x85b", " agent", "agent "]
+
+
+@pytest.mark.parametrize("principal", _NOT_A_HEADER_VALUE)
+async def test_a_principal_that_cannot_be_a_header_value_is_none_on_every_route(principal: str) -> None:
+    """The gate core, not an adapter, decides it, so no adapter ever stamps such a principal: on the wait route a
+    message passed on is not attested (its adapter removes the header) and a tools/call is rejected, as with no
+    principal; elsewhere the call is rejected before policy."""
+    policy = _Policy(raises=AssertionError("asked policy"))
+    core = _core(policy)
+    assert core.unchecked(Principal(principal), ROUTE.server) == Pass(attested=None)
+    for server in (ROUTE.server, SERVER):
+        context = _context(server=server, principal=Principal(principal))
+        assert await core.check(context, GATED) == Rejected(RejectReason.MALFORMED), server
+
+
+@pytest.mark.parametrize("principal", ["agent one", "agënt-7", "spiffe://example.org/agent"])
+async def test_a_principal_that_is_a_header_value_is_attested(principal: str) -> None:
+    """An inner space and non-ASCII text (sent as UTF-8, which HTTP carries as field octets) are kept."""
+    core = _core(_Policy(raises=AssertionError("asked policy")))
+    assert core.unchecked(Principal(principal), ROUTE.server) == Pass(attested=Principal(principal))
+    context = _context(server=ROUTE.server, principal=Principal(principal))
+    assert await core.check(context, GATED) == Pass(attested=Principal(principal))
 
 
 # ---- the time limit: check_budget, or the gateway's deadline less REPLY_RESERVE ----
@@ -185,6 +260,9 @@ class _Recording:
         self.seen.append((context, params))
         return Pass()
 
+    def unchecked(self, principal: Principal, server: ServerName) -> Pass:
+        raise AssertionError("the Check API and ext_mcp never pass a message on unchecked")
+
 
 class _RpcContext:
     """The one part of a grpc.aio.ServicerContext the adapters read: what is left of the caller's deadline."""
@@ -212,8 +290,8 @@ async def _through_each_grpc_adapter(remaining: float | None) -> list[GatewayCon
     checker = _Recording()
     rpc: Any = _RpcContext(remaining)
     await CheckServicer(checker, WAIT_TOOL).Check(check_request(GATED, {"tenant": TENANT}), rpc)
-    await ExtMcpServicer(checker, _mcp_view(), ROUTE).CheckRequest(mcp_request(GATED), rpc)
-    await ExtAuthzServicer(checker, _authz_view(), ROUTE).Check(authz_request(tools_call(GATED)), rpc)
+    await ExtMcpServicer(checker, _mcp_view(), ROUTE.principal_header).CheckRequest(mcp_request(GATED), rpc)
+    await ExtAuthzServicer(checker, _authz_view(), ROUTE.principal_header).Check(authz_request(tools_call(GATED)), rpc)
     assert [(context.principal, context.server, params) for context, params in checker.seen] == [
         (PRINCIPAL, SERVER, GATED)
     ] * 3
@@ -257,7 +335,8 @@ async def test_the_json_check_api_sends_the_attributes_as_sent_and_no_deadline()
 async def test_ext_authz_reads_a_context_extension_attribute() -> None:
     checker = _Recording()
     view = _authz_view({"zone": ExtAuthzAttributeView(None, ZONE_KEY)})
-    await ExtAuthzServicer(checker, view, ROUTE).Check(authz_request(tools_call(GATED)), _RpcContext(None))  # type: ignore[arg-type]
+    rpc: Any = _RpcContext(None)
+    await ExtAuthzServicer(checker, view, ROUTE.principal_header).Check(authz_request(tools_call(GATED)), rpc)
     [(context, _)] = checker.seen
     assert dict(context.attributes) == {"zone": ZONE}
 
@@ -275,7 +354,8 @@ async def test_ext_authz_reads_a_context_extension_attribute() -> None:
 async def test_ext_authz_leaves_out_an_attribute_it_cannot_read(source: ExtAuthzAttributeView) -> None:
     checker = _Recording()
     view = _authz_view({"tenant": AUTHZ_ATTRIBUTES["tenant"], "other": source})
-    await ExtAuthzServicer(checker, view, ROUTE).Check(authz_request(tools_call(GATED)), _RpcContext(None))  # type: ignore[arg-type]
+    rpc: Any = _RpcContext(None)
+    await ExtAuthzServicer(checker, view, ROUTE.principal_header).Check(authz_request(tools_call(GATED)), rpc)
     [(context, _)] = checker.seen
     assert dict(context.attributes) == {"tenant": TENANT}
 
@@ -288,6 +368,6 @@ async def test_ext_authz_leaves_out_an_attribute_it_cannot_read(source: ExtAuthz
 async def test_ext_mcp_leaves_out_an_attribute_it_cannot_read(path: tuple[str, ...]) -> None:
     checker = _Recording()
     view = _mcp_view({"tenant": MCP_ATTRIBUTES["tenant"], "other": path})
-    await ExtMcpServicer(checker, view, ROUTE).CheckRequest(mcp_request(GATED), _RpcContext(None))  # type: ignore[arg-type]
+    await ExtMcpServicer(checker, view, ROUTE.principal_header).CheckRequest(mcp_request(GATED), _RpcContext(None))  # type: ignore[arg-type]
     [(context, _)] = checker.seen
     assert dict(context.attributes) == {"tenant": TENANT}

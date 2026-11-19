@@ -13,7 +13,7 @@ from tests.e2e.stack import stack
 pytestmark = pytest.mark.timeout(300)
 
 SKIPPED = (
-    cases.case_11_envoy_denies_what_is_not_one_tools_call,
+    cases.case_11_envoy_checks_tools_call_alone,
     cases.case_14_check_api_verdicts_agree_over_grpc_and_json,
 )
 
@@ -37,6 +37,7 @@ async def test_agentgateway(tmp_path: Path) -> None:
         await cases.case_7_the_hook_runs_over_tls_with_the_bearer(st, gateway)
         await cases.case_12_gateway_attributes_reach_policy(st, gateway)
         await cases.case_13_agent_credentials_never_reach_the_gate(st, gateway)
+        await cases.case_15_a_wait_task_is_read_only_by_the_agent_that_opened_it(st, gateway)
         await cases.case_10_no_principal_is_refused(st, gateway)
         await cases.case_9_gate_slower_than_the_hook_timeout_refuses(st, gateway)
         await cases.case_8_gate_stopped_refuses(st, gateway)

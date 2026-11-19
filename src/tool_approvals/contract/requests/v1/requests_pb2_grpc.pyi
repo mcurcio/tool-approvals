@@ -36,7 +36,9 @@ class ApprovalRequestsServiceStub:
     """The only spend of a yes."""
     OpenWait: _grpc.UnaryUnaryMultiCallable[_requests_pb2.OpenWaitRequest, _requests_pb2.OpenWaitResponse]
     AwaitOutcome: _grpc.UnaryStreamMultiCallable[_requests_pb2.AwaitOutcomeRequest, _requests_pb2.AwaitOutcomeResponse]
-    """The current status first; the stream ends after a terminal one."""
+    """The current status first; the stream ends after a terminal one. Only the wait's own principal follows it:
+    for any other principal the wait does not exist (UnknownWait), the same answer as for an id never issued.
+    """
 
 @_typing.type_check_only
 class ApprovalRequestsServiceAsyncStub(ApprovalRequestsServiceStub):
@@ -46,7 +48,9 @@ class ApprovalRequestsServiceAsyncStub(ApprovalRequestsServiceStub):
     """The only spend of a yes."""
     OpenWait: _aio.UnaryUnaryMultiCallable[_requests_pb2.OpenWaitRequest, _requests_pb2.OpenWaitResponse]  # type: ignore[assignment]
     AwaitOutcome: _aio.UnaryStreamMultiCallable[_requests_pb2.AwaitOutcomeRequest, _requests_pb2.AwaitOutcomeResponse]  # type: ignore[assignment]
-    """The current status first; the stream ends after a terminal one."""
+    """The current status first; the stream ends after a terminal one. Only the wait's own principal follows it:
+    for any other principal the wait does not exist (UnknownWait), the same answer as for an id never issued.
+    """
 
 class ApprovalRequestsServiceServicer(metaclass=_abc_1.ABCMeta):
     @_abc_1.abstractmethod
@@ -77,6 +81,8 @@ class ApprovalRequestsServiceServicer(metaclass=_abc_1.ABCMeta):
         request: _requests_pb2.AwaitOutcomeRequest,
         context: _ServicerContext,
     ) -> _typing.Union[_abc.Iterator[_requests_pb2.AwaitOutcomeResponse], _abc.AsyncIterator[_requests_pb2.AwaitOutcomeResponse]]:
-        """The current status first; the stream ends after a terminal one."""
+        """The current status first; the stream ends after a terminal one. Only the wait's own principal follows it:
+        for any other principal the wait does not exist (UnknownWait), the same answer as for an id never issued.
+        """
 
 def add_ApprovalRequestsServiceServicer_to_server(servicer: ApprovalRequestsServiceServicer, server: _typing.Union[_grpc.Server, _aio.Server]) -> None: ...

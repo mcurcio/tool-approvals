@@ -5,7 +5,7 @@ import dataclasses
 import hashlib
 import ssl
 from collections.abc import AsyncIterator, Mapping, Sequence
-from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final, Literal
 
@@ -19,12 +19,17 @@ from pydantic import ConfigDict, TypeAdapter
 from tests.fixtures.certs import ClientCert, TlsFiles
 from tests.fixtures.ports import free_port
 from tests.fixtures.scripted_requests import Script, scripted_requests
+from tool_approvals.auth.registry import Registry
 from tool_approvals.config.views import ListenerView, RegistryEntryView, TlsView, WaitRouteView, WaitView
 from tool_approvals.kernel.calls import TASKS_EXTENSION
 from tool_approvals.kernel.methods import Method
 from tool_approvals.kernel.names import CallerName, ServerName, WaitId
 from tool_approvals.kernel.requests import WaitReport, WaitState
+from tool_approvals.requests_client.client import RequestsClient
+from tool_approvals.serving.timeouts import AsyncioTimeouts
+from tool_approvals.wait.core.hold import WaitCore
 from tool_approvals.wait.main import serve
+from tool_approvals.wait.mcp.server import asgi_app, build_server
 
 TOOL: Final = "approval_wait"
 PRINCIPAL_HEADER: Final = "x-attested-principal"
@@ -88,11 +93,8 @@ async def _wait_server(
         yield running
 
 
-@asynccontextmanager
-async def _running(
-    approvals: Any, tls: TlsFiles, max_hold: timedelta, tasks: bool, mtls: Mtls | None
-) -> AsyncIterator[Running]:
-    view = WaitView(
+def _view(approvals: Any, tls: TlsFiles, max_hold: timedelta, tasks: bool, mtls: Mtls | None) -> WaitView:
+    return WaitView(
         mcp=ListenerView("localhost", free_port(), TlsView(tls.cert, tls.key, None if mtls is None else tls.ca)),
         health=ListenerView("localhost", free_port(), None),
         drain=timedelta(0),
@@ -108,6 +110,13 @@ async def _running(
             *(() if mtls is None else mtls.entries),
         ),
     )
+
+
+@asynccontextmanager
+async def _running(
+    approvals: Any, tls: TlsFiles, max_hold: timedelta, tasks: bool, mtls: Mtls | None
+) -> AsyncIterator[Running]:
+    view = _view(approvals, tls, max_hold, tasks, mtls)
     stop = asyncio.Event()
     serving = asyncio.create_task(serve(view, stop))
     try:
@@ -199,5 +208,39 @@ async def _client(
         timeout=httpx2.Timeout(30, read=60),
     ) as http:
         transport = streamable_http_client(running.url, http_client=http)
+        async with Client(transport, mode=mode, extensions=[Tasks()] if tasks else None, cache=None) as connected:
+            yield connected
+
+
+@asynccontextmanager
+async def in_process_client(
+    tls: TlsFiles,
+    headers: Mapping[bytes, bytes],
+    *,
+    mode: str = MODERN,
+    tasks: bool = False,
+    script: Script | None = None,
+) -> AsyncIterator[Client]:
+    """A real MCP client of the wait server's own ASGI app (`asgi_app(build_server(...))`) in process, its
+    Approvals the scripted server (None: not configured), with no HTTP parser between them: `headers` reach the app
+    byte for byte, as a value no HTTP/1.1 parser would pass (CR, LF, NUL, a leading space) would if a gateway's hop
+    let it through."""
+    async with AsyncExitStack() as stack:
+        approvals = (
+            None
+            if script is None
+            else await stack.enter_async_context(scripted_requests(script, tls, APPROVALS_BEARER))
+        )
+        view = _view(approvals, tls, timedelta(seconds=5), tasks=True, mtls=None)
+        requests = None if approvals is None else RequestsClient.connect(approvals)
+        if requests is not None:
+            stack.push_async_callback(requests.close)
+        core = WaitCore(requests, view.max_hold, asyncio.Event(), AsyncioTimeouts())
+        app = asgi_app(build_server(core, view, Registry(view.registry)), view.mcp)
+        await stack.enter_async_context(app.router.lifespan_context(app))
+        http = await stack.enter_async_context(
+            httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), headers=dict(headers))
+        )
+        transport = streamable_http_client(f"https://localhost:{view.mcp.port}/mcp", http_client=http)
         async with Client(transport, mode=mode, extensions=[Tasks()] if tasks else None, cache=None) as connected:
             yield connected

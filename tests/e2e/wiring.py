@@ -26,10 +26,11 @@ class Hook:
 
 @dataclass(frozen=True, slots=True)
 class WaitTarget:
-    """The wait server, exposed to agents as one more MCP server behind the gateway (agentgateway only, unit 1)."""
+    """The wait server, exposed to agents as one more MCP server behind each gateway."""
 
     server: str  # the route's server name (`wait_route.server`)
     url: str  # its MCP endpoint, https
     ca_file: str
     bearer: str  # a registry caller granted wait.call
     request_timeout: timedelta  # how long the gateway lets one held call run; above the wait's max_hold
+    principal_header: str  # `wait_route.principal_header`: the gateway attests the principal in it
