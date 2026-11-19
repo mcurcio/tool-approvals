@@ -138,7 +138,10 @@ ticket "…"" as a failed tool call, calls the wait tool, and repeats the origin
 
 **Other methods and Tasks.** The guardrail is sent `tools/call` alone; agentgateway forwards every other method
 itself, `tasks/*` included. That is the gate's one rule behind every gateway (the Envoy adapter, which sees every
-request, applies it in the gate: [which requests pass](envoy.md#which-requests-pass)). Because `tasks/*` follow-ups
+request, applies it in the gate: [which requests pass](envoy.md#which-requests-pass)), with one gap: the gate never
+sees a method agentgateway does not itself read as `tools/call`, so it cannot refuse one that only reads as it
+(`Tools/call`, `tools/call `, `tools∕call`), as it does behind Envoy. Such a call reaches the server unchecked; it
+runs only on a server that normalises method names. Because `tasks/*` follow-ups
 are not checked, a gated call that asks to run as a task would escape the approved call: the gate rejects it
 (`task-requested`). The wait tool itself is offered as a task to clients that declare Tasks
 ([the wait tool](wait.md#mcp-tasks)).

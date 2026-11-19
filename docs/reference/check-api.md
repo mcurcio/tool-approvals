@@ -42,8 +42,10 @@ message CheckRequest {
   nothing after the gate may change them: the approval covers these bytes. In proto3 JSON, `bytes` are base64.
 - **Which messages to ask about:** a `tools/call` only, with or without an `id`. Forward every other well-formed
   JSON-RPC message unasked (any other method, `tasks/*` included, notifications, and the client's responses to the
-  server), and refuse a body that is not one JSON-RPC request or response (a batch, duplicate keys, trailing data)
-  or a `notifications/*` method carrying an `id`. This is the rule the gate's own adapters apply
+  server), and refuse a body that is not one JSON-RPC request or response (a batch, duplicate keys, trailing data),
+  a `notifications/*` method carrying an `id`, or a method that is not `tools/call` but reads as it (another case,
+  padding, a fullwidth or other confusable slash: [Envoy](envoy.md#which-requests-pass) lists the comparison), since
+  a server that normalises method names would run it as a call nobody checked. This is the rule the gate's own adapters apply
   ([Envoy](envoy.md#which-requests-pass), [agentgateway](agentgateway.md)), so it holds behind every gateway.
 - **`gateway_attributes`** are passed to policy as sent: the rules-file policy matches a rule's `attributes`
   against them ([configuration](configuration.md#gate)). A rule whose principal, server and tool match and

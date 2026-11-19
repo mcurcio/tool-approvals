@@ -154,10 +154,13 @@ rule it applies behind every gateway: it checks `tools/call` and nothing else.
 | `POST` of a client's JSON-RPC response (its answer to a server's request: sampling, elicitation, roots) | Passed |
 | `POST` of a single `tools/call` | Checked like any call, on the params' exact bytes ([the Check API](check-api.md#the-verdict)); on the wait route, passed without policy ([the wait route](#the-wait-route)) |
 | `POST` of a `notifications/*` method carrying an `id` (an MCP notification has none) | Refused (`malformed`) |
+| `POST` of a method that is not `tools/call` but reads as it once Unicode-normalised (NFKC), casefolded and stripped of whitespace and invisible format characters, with a confusable slash (fraction, division, fullwidth, big solidus, box-drawing diagonal) read as `/`: `Tools/call`, `tools/call `, `tools∕call` | Refused (`malformed`) |
 | `POST` of any other request or notification, whatever its method (`initialize`, `tools/list`, `tasks/*`, `ping`, one the server does not serve) | Passed, on every route |
 
 The rule is the gate's, not Envoy's, and is not configured: behind agentgateway, whose guardrail is sent
-`tools/call` alone, every other method passes too. `tasks/*` needs no check of its own: the gate refuses every
+`tools/call` alone, every other method passes too, a lookalike of `tools/call` included: agentgateway forwards
+whatever it does not itself read as `tools/call` without asking the gate, so only a server that matches method
+names exactly is safe behind it. `tasks/*` needs no check of its own: the gate refuses every
 `tools/call` that asks to run as a task (`task-requested`), so no task follows a call it let through, and a Wait
 Task is authorised by its id at the wait server ([MCP Tasks](wait.md#mcp-tasks)). A refusal answers the request's
 own `id` when the gate could read one, and `null` when it could read no message. A refused notification (a

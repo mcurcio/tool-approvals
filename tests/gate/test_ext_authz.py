@@ -69,7 +69,6 @@ PASSED_REQUESTS: Final = (
     "roots/list",
     "notifications",
     "Ping",
-    "Tools/call",  # methods are case-sensitive: not tools/call, so not checked
 )
 
 
@@ -133,8 +132,14 @@ ROWS: Final = (
     # Any other notification passes, a tasks/* one and one no MCP revision names too.
     *(
         Row(f"pass-notification-{m}", _notification(m), PassOn())
-        for m in ("unknown/thing", "tasks/cancel", "notifications", "Tools/call")
+        for m in ("unknown/thing", "tasks/cancel", "notifications")
     ),
+    # A method that only reads as tools/call (case, padding, a confusable slash) is refused, never passed unchecked.
+    *(
+        Row(f"lookalike-{i}", _rpc(m, b'"l-1"'), Deny(MALFORMED, b'"l-1"'))
+        for i, m in enumerate(("Tools/call", "tools/call ", "tools\u2215call", "tools\uff0fcall"))
+    ),
+    Row("lookalike-notification", _notification("Tools/call"), Deny(MALFORMED, b"")),
     # The wait server's route is classified as any route's: the checker passes its tools/call (CheckCore.check).
     Row("wait-server", tools_call(FREE), ToCheck(FREE, b"7"), server=ROUTE.server),
     Row("wait-server-pass-method", _rpc("tools/list"), PassOn(), server=ROUTE.server),
