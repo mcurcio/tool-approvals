@@ -10,6 +10,7 @@ from collections import Counter
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Final
 
+from tool_approvals.config import channel_checks
 from tool_approvals.config.sections import (
     GATEWAY_ADAPTERS,
     NO_APPROVAL,
@@ -43,6 +44,7 @@ def problems(cfg: "ConfigFile") -> list[str]:
         *_approvals(cfg),
         *_answerable(cfg),
         *_lock_waits(cfg),
+        *channel_checks.problems(cfg),
     ]
 
 

@@ -10,15 +10,22 @@ serialisation; here `before_commit` lets a test run a rival use case between a u
 
 import asyncio
 import copy
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from types import TracebackType
 
-from tool_approvals.approvals.app.ports import ApprovalRepository, ConcurrentChange, UnitOfWork
+from tool_approvals.approvals.app.ports import (
+    ApprovalRepository,
+    ConcurrentChange,
+    PushSubscriptionRepository,
+    UnitOfWork,
+)
 from tool_approvals.approvals.domain.approval import Actor, Approval, EventKind, State
-from tool_approvals.kernel.names import Fingerprint, Principal, Ticket
+from tool_approvals.approvals.domain.push import PushSubscription
+from tool_approvals.kernel.names import Fingerprint, Principal, RequirementName, Ticket
+from tool_approvals.kernel.requirements import GroupRef
 
 type _Snapshot = tuple[object, ...]
 
@@ -149,6 +156,7 @@ class MemoryUnitOfWork:
         self._by = by
         self.now = store.clock
         self.approvals: ApprovalRepository = _MemoryApprovals(self)
+        self.push_subscriptions: PushSubscriptionRepository = _MemoryPushSubscriptions(self)
         self._loaded: dict[Ticket, tuple[Approval, int, _Snapshot]] = {}
         self._added: dict[Ticket, Approval] = {}
         self._deleted: set[Ticket] = set()
@@ -297,6 +305,11 @@ class _MemoryApprovals:
     async def next_due(self) -> datetime | None:
         return min((next_due_at(approval) for approval in self._unit._view()), default=None)
 
+    async def waiting_for(
+        self, groups_by_requirement: Mapping[RequirementName, frozenset[GroupRef]], limit: int
+    ) -> list[Approval]:
+        raise NotImplementedError
+
     def add(self, approval: Approval) -> None:
         self._unit._read = True
         self._unit._added[approval.ticket] = approval
@@ -304,6 +317,25 @@ class _MemoryApprovals:
     async def delete(self, approval: Approval) -> None:
         assert self._unit._load(approval.ticket) is approval, "delete what this unit of work read"
         self._unit._deleted.add(approval.ticket)
+
+
+class _MemoryPushSubscriptions:
+    """Satisfies `PushSubscriptionRepository`."""
+
+    def __init__(self, unit: MemoryUnitOfWork) -> None:
+        self._unit = unit
+
+    async def get(self, endpoint: str) -> PushSubscription | None:
+        raise NotImplementedError
+
+    async def routed_to(self, groups: frozenset[GroupRef]) -> list[PushSubscription]:
+        raise NotImplementedError
+
+    def add(self, subscription: PushSubscription) -> None:
+        raise NotImplementedError
+
+    async def delete(self, subscription: PushSubscription) -> None:
+        raise NotImplementedError
 
 
 def next_due_at(approval: Approval) -> datetime:

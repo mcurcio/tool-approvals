@@ -4,13 +4,15 @@ Every use case runs its whole unit of work again on ConcurrentChange, up to MAX_
 StoreUnavailable.
 """
 
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime
 from typing import Final, Protocol
 
 from tool_approvals.approvals.domain.approval import Actor, Approval
-from tool_approvals.kernel.names import Fingerprint, Principal, Ticket
+from tool_approvals.approvals.domain.push import PushSubscription
+from tool_approvals.kernel.names import Fingerprint, Principal, RequirementName, Ticket
+from tool_approvals.kernel.requirements import GroupRef
 
 MAX_ATTEMPTS: Final = 3
 
@@ -47,9 +49,32 @@ class ApprovalRepository(Protocol):
 
     async def next_due(self) -> datetime | None: ...
 
+    async def waiting_for(
+        self, groups_by_requirement: Mapping[RequirementName, frozenset[GroupRef]], limit: int
+    ) -> list[Approval]:
+        """Waiting Approvals whose requirement name is a key of `groups_by_requirement` and whose snapshot's approver
+        groups meet that key's groups, earliest answer deadline first (then ticket), at most `limit`. The desk's
+        list: the caller passes, per requirement as configured now, the viewer's groups among its approver
+        groups."""
+        ...
+
     def add(self, approval: Approval) -> None: ...
 
     async def delete(self, approval: Approval) -> None: ...
+
+
+class PushSubscriptionRepository(Protocol):
+    """Web Push subscriptions, keyed by endpoint (one per endpoint: registering it again replaces it)."""
+
+    async def get(self, endpoint: str) -> PushSubscription | None: ...
+
+    async def routed_to(self, groups: frozenset[GroupRef]) -> list[PushSubscription]:
+        """Every subscription whose approver groups meet `groups`, ordered by endpoint."""
+        ...
+
+    def add(self, subscription: PushSubscription) -> None: ...
+
+    async def delete(self, subscription: PushSubscription) -> None: ...
 
 
 class UnitOfWork(Protocol):
@@ -60,6 +85,9 @@ class UnitOfWork(Protocol):
 
     @property
     def approvals(self) -> ApprovalRepository: ...
+
+    @property
+    def push_subscriptions(self) -> PushSubscriptionRepository: ...
 
     async def lock_principal(self, principal: Principal) -> None:
         """Serialise this principal's units of work (the caps are counted under it); taken before any row."""

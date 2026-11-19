@@ -118,9 +118,15 @@ _CREDENTIAL_KEYS: Final[dict[str, type[BearerCredential | ClientCertCredential]]
 }
 
 
+# A registry entry's kind: `caller` (the agents' side and the services calling each other), `surface` (an integrated
+# answer surface, named as its `surfaces` entry), `operator` (reads the audit report). Each kind's grants are in
+# kernel.methods (CALLER_METHODS, SURFACE_METHODS, OPERATOR_METHODS); config.checks refuses any other.
+RegistryKind = Literal["caller", "surface", "operator"]
+
+
 class RegistryEntry(Section):
     name: Text
-    kind: Literal["caller"]
+    kind: RegistryKind
     credential: BearerCredential | ClientCertCredential
     grants: tuple[Method, ...]
 
@@ -181,8 +187,11 @@ class RequirementSection(Section):
 
 
 class Surface(Section):
+    """An answer surface. `native` is the built-in desk (always binds the digest); `integrated` is another system
+    answering through the Answers API with its own registry entry (`kind: surface`, the same name)."""
+
     name: Text
-    kind: Literal["native"]  # unit 3 adds integrated surfaces
+    kind: Literal["native", "integrated"]
     cap: Text
     binds_digest: StrictBool = True
 
@@ -330,6 +339,9 @@ class ApprovalsListeners(Section):
     requests: Listener
     approvers: Listener
     health: Listener
+    answers_grpc: Listener | None = None  # the Answers API over gRPC, for integrated surfaces; needs tls
+    answers_json: Listener | None = None  # the Answers API as proto3 JSON (POST /v1/review, /v1/answer); needs tls
+    admin: Listener | None = None  # the audit report (GET /v1/audit), for operators; needs tls
 
 
 class Database(Section):
@@ -360,6 +372,14 @@ class Desk(Section):
     form_key: Secret
 
 
+class Delivery(Section):
+    """Event delivery to every channel: one webhook or push attempt's timeout, and the give-up horizon past which
+    a paused channel dead-letters an event (approvals.retention must be at least it)."""
+
+    attempt_timeout: Duration = timedelta(seconds=5)
+    give_up_after: Duration = timedelta(hours=24)
+
+
 class Approvals(Section):
     listeners: ApprovalsListeners
     drain: Duration = DRAIN
@@ -368,3 +388,35 @@ class Approvals(Section):
     caps: Caps = Caps()
     idp: Idp
     desk: Desk
+    delivery: Delivery = Delivery()
+
+
+# What a webhook channel receives: `notices` (approval.waiting and approval.resolved, routing data and the desk link)
+# or `audit` (an audit sink: every event, approval.answered included).
+ChannelEvents = Literal["notices", "audit"]
+
+
+class WebhookChannel(Section):
+    """CloudEvents (structured JSON) POSTed to `url`, signed per Standard Webhooks with `signing_secret` (the
+    `whsec_`-prefixed base64 secret, resolved by `approvals serve`)."""
+
+    name: Text
+    kind: Literal["webhook"]
+    url: Text  # an absolute http(s) URL
+    signing_secret: Secret
+    events: ChannelEvents
+
+
+class WebPushChannel(Section):
+    """Web Push (RFC 8030, encrypted per RFC 8291, VAPID per RFC 8292) of approval.waiting and approval.resolved to
+    every subscription an approver registered through the desk whose groups route the event. A subscription's
+    endpoint must start with one of `push_origins`, and nothing else is ever sent to."""
+
+    name: Text
+    kind: Literal["web_push"]
+    vapid_private_key: Secret  # a PEM P-256 private key
+    vapid_subject: Text  # a mailto: or https: contact the push services may use
+    push_origins: Annotated[tuple[Text, ...], Field(min_length=1)]  # https origins, e.g. https://push.example.com
+
+
+Channel = Annotated[WebhookChannel | WebPushChannel, Field(discriminator="kind")]

@@ -34,7 +34,7 @@ only version.
 |---|---|
 | `gate` | `gate`, `wait_route`, `registry`, `requirements` |
 | `wait` | `wait`, `wait_route`, `registry` |
-| `approvals serve` | `approvals`, `assurance`, `floor`, `requirements`, `surfaces`, `registry` |
+| `approvals serve` | `approvals`, `assurance`, `floor`, `requirements`, `surfaces`, `registry`, and `channels` when it sends events |
 | `approvals migrate` | `approvals` (it reads only `approvals.database`) |
 
 ## `registry`: who may call whom
@@ -59,7 +59,21 @@ registry:
     kind: caller
     credential: { bearer_sha256: 4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c }
     grants: [wait.call]
+  - name: ticketing # an integrated answer surface: named as its `surfaces` entry, answering through the Answers API
+    kind: surface
+    credential: { bearer_sha256: 6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e }
+    grants: [answers.review, answers.answer]
+  - name: auditor # an operator reading the audit report
+    kind: operator
+    credential: { bearer_sha256: 708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f }
+    grants: [admin.audit]
 ```
+
+| Kind | Who | May be granted |
+|---|---|---|
+| `caller` | The agents' side (a gateway's hook, the gate, the wait server, a gateway's wait route) | `check`, `requests.*`, `wait.call` |
+| `surface` | An integrated answer surface; its `name` is the name of its `surfaces` entry (`kind: integrated`) | `answers.review`, `answers.answer` |
+| `operator` | A person or system reading the audit report | `admin.audit` |
 
 A credential is exactly one of:
 
@@ -94,10 +108,14 @@ and, on the next line, `sha256:<hex>`: the hex goes in `bearer_sha256`, the bear
 | `requests.request`, `requests.claim` | The gate asking Approvals for a ticket, and spending a yes |
 | `requests.open_wait`, `requests.await_outcome` | The wait server opening and following a wait |
 | `wait.call` | A `tools/call` or `tasks/get` to the wait server (discovery needs no grant) |
+| `answers.review`, `answers.answer` | An integrated surface reading an Approval and answering it ([the Answers API](answers-api.md)) |
+| `admin.audit` | Reading the audit report ([the audit report](audit.md)) |
 
-`kind: caller` is the only kind. A hook credential is trusted for every principal and server it names, so give
+A hook credential is trusted for every principal and server it names, so give
 each gateway its own entry. Refused at load: one bearer hash, or one client certificate, on two entries; a grant
-that is not in the table; a hash that is not 64 hex digits; a credential naming both kinds or neither; a
+that is not in the table, or one its entry's kind may not hold (no `caller` is ever granted an answers or admin
+method); a `surface` entry that names no integrated surface, or an integrated surface with no `surface` entry; a
+hash that is not 64 hex digits; a credential naming both kinds or neither; a
 client-certificate entry granted anything but `check` and `wait.call`, or one that no listener serving its grants
 asks for (`tls.client_ca`); any listener that accepts registry bearers without `tls`.
 
@@ -120,19 +138,23 @@ floor:
 requirements:
   reviewed:
     approver_groups: [{ claim: groups, value: approvers }] # any one qualifies
-    allowed_surfaces: [desk]
+    allowed_surfaces: [desk, ticketing]
     min_assurance: passkey
     max_sign_in_age: 3m # the approver signed in at most this long before answering
     answer_deadline: 2h # from the request to the latest answer
     use_window: 15m # from the yes to the latest claim
 
-# Where people answer, and the highest level each may vouch. A native surface always binds the digest of what the
-# approver was shown.
+# Where people answer, and the highest level each may vouch. A native surface (the desk) always binds the digest of
+# what the approver was shown; an integrated surface answers through the Answers API as its registry entry.
 surfaces:
   - name: desk
     kind: native
     cap: passkey
     binds_digest: true
+  - name: ticketing
+    kind: integrated
+    cap: passkey # the highest level it may vouch; a vouched level above it is refused
+    binds_digest: true # default; false lets it answer without the digest of what it showed
 ```
 
 - **`assurance`** is ordered weakest first. A sign-in's level is the level whose `acr` list holds the identity
@@ -144,9 +166,11 @@ surfaces:
   `approver_groups` (`claim` is the token claim, `value` one of its values), through one of `allowed_surfaces`, at
   `min_assurance` or above, signed in at most `max_sign_in_age` before answering. With no answer by
   `answer_deadline` the Approval expires; a yes not used within `use_window` expires. The name `none` is reserved.
-- **`surfaces`**: `kind: native` (the built-in desk) is the only kind until integrated surfaces arrive (planned,
-  milestone 3). `cap` is the highest level the surface may vouch; a requirement may not allow a surface whose cap is
-  below the requirement's minimum. A native surface must keep `binds_digest: true` (the default).
+- **`surfaces`**: `kind: native` is the built-in desk; `kind: integrated` is another system answering through the
+  [Answers API](answers-api.md) with its own registry entry (`kind: surface`, the same name). `cap` is the highest
+  level the surface may vouch: an answer vouching more is refused (`above-cap`), and a requirement may not allow a
+  surface whose cap is below the requirement's minimum. A native surface must keep `binds_digest: true` (the
+  default); an integrated one may set it to `false`, and then answers without the digest of what it showed.
 
 An Approval keeps a copy of the requirement it was asked under. An answer, and later the claim that spends a yes,
 must meet the stricter of that copy and the requirement as configured now (groups and surfaces intersected, the
@@ -274,6 +298,9 @@ approvals: # `approvals migrate` reads only approvals.database
     requests: { host: 0.0.0.0, port: 9443, tls: { cert: /etc/tool-approvals/approvals.pem, key: /etc/tool-approvals/approvals-key.pem } }
     approvers: { host: 0.0.0.0, port: 8080 } # the desk, behind a TLS-terminating proxy at public_url
     health: { host: 0.0.0.0, port: 8081 }
+    answers_grpc: { host: 0.0.0.0, port: 9446, tls: { cert: /etc/tool-approvals/approvals.pem, key: /etc/tool-approvals/approvals-key.pem } }
+    answers_json: { host: 0.0.0.0, port: 8446, tls: { cert: /etc/tool-approvals/approvals.pem, key: /etc/tool-approvals/approvals-key.pem } }
+    admin: { host: 0.0.0.0, port: 8447, tls: { cert: /etc/tool-approvals/approvals.pem, key: /etc/tool-approvals/approvals-key.pem } }
   drain: 5s # default
   database:
     dsn: { file: /run/secrets/approvals-dsn } # postgresql://approvals@db.example.com/approvals, direct, no pooler
@@ -295,12 +322,17 @@ approvals: # `approvals migrate` reads only approvals.database
     public_url: https://approvals.example.com
     session_key: { file: /run/secrets/desk-session-key } # at least 32 bytes
     form_key: { file: /run/secrets/desk-form-key } # at least 32 bytes, separate from the session key
+  delivery:
+    attempt_timeout: 5s # default; one webhook or push attempt
+    give_up_after: 24h # default; a paused channel dead-letters an event older than this (retention is at least it)
 ```
 
 | Key | Meaning |
 |---|---|
 | `listeners.requests` | ApprovalRequests (gRPC), for the gate and the wait server only. Needs `tls` |
 | `listeners.approvers` | The [desk](desk.md), plain HTTP behind a TLS-terminating proxy that serves `public_url` |
+| `listeners.answers_grpc`, `listeners.answers_json` | The [Answers API](answers-api.md) for integrated surfaces, over gRPC and as proto3 JSON; each optional, each needs `tls` |
+| `listeners.admin` | The [audit report](audit.md) for operators; optional; needs `tls` |
 | `database.dsn` | Any libpq connection string, straight to Postgres with no pooler in between: Approvals holds a `LISTEN` connection and takes advisory locks ([operations](../operations.md#postgres)) |
 | `database.lock_timeout` | How long a unit of work waits for any lock (a principal's, a row's, the commit-order lock) before it fails and the request is refused as unavailable; never longer than what is left of the caller's deadline. At most a quarter of `gate.check_budget` when the file has both: one check can meet four lock waits in a row (claim's row and commit-order locks, then request's principal and commit-order locks). Default `1s` |
 | `database.pool_size`, `database.max_overflow`, `database.pool_timeout` | Each replica's connection pool: connections kept open (default `5`), more opened under load (default `10`), and how long a request waits for one before it is refused as unavailable (default `1s`, on the scale of a lock wait and well inside `gate.check_budget`). The change feed holds one more connection of its own |
@@ -310,31 +342,66 @@ approvals: # `approvals migrate` reads only approvals.database
 | `idp` | The OpenID Provider the desk signs approvers in with: discovery at `<issuer>/.well-known/openid-configuration`, a confidential client, the groups claim. See [the desk](desk.md#identity-provider-requirements) |
 | `desk.surface` | The native surface the desk answers as |
 | `desk.public_url` | The desk's external HTTPS address; the sign-in callback is `<public_url>/callback` |
+| `delivery.attempt_timeout` | One webhook or Web Push attempt; past it the channel pauses with backoff. Default `5s` |
+| `delivery.give_up_after` | While a channel is paused, an event older than this is dead-lettered and delivery moves on. Default `24h`; `retention` must be at least it when any channel is configured |
 | `desk.session_key`, `desk.form_key` | Two separate secrets of at least 32 bytes (refused if they are equal), the same on every replica. The session key signs the sign-in cookie, so whoever holds it can mint a qualifying session: guard it as answer authority |
+
+## `channels`: where Approvals sends events
+
+```yaml
+# Where Approvals sends events: CloudEvents over signed webhooks (Standard Webhooks), and Web Push. A notice carries
+# routing data and the desk link, never the call's arguments or the agent's words.
+channels:
+  - name: approver-notices
+    kind: webhook
+    url: https://hooks.example.com/approvals
+    signing_secret: { env: NOTICES_SIGNING_SECRET } # whsec_ and base64 of the key
+    events: notices # approval.waiting and approval.resolved
+  - name: audit-archive
+    kind: webhook
+    url: https://audit.example.com/ingest
+    signing_secret: { env: AUDIT_SIGNING_SECRET }
+    events: audit # an audit sink: every event, approval.answered included
+  - name: browser-push
+    kind: web_push
+    vapid_private_key: { env: VAPID_PRIVATE_KEY } # a PEM P-256 private key
+    vapid_subject: mailto:approvers@example.com
+    push_origins: [https://push.example.com] # a subscription's endpoint must start with one of these
+```
+
+| Key | Meaning |
+|---|---|
+| `kind: webhook` | CloudEvents in structured JSON mode, POSTed to `url` and signed per [Standard Webhooks](https://www.standardwebhooks.com/) with `signing_secret` (`whsec_` followed by the base64 key). `events: notices` sends `approval.waiting` and `approval.resolved`; `events: audit` makes it an audit sink that receives every event |
+| `kind: web_push` | Web Push of `approval.waiting` and `approval.resolved` to every browser an approver registered through the desk, whose groups route the event. `vapid_private_key` is a PEM P-256 private key; `vapid_subject` a `mailto:` or `https:` contact; `push_origins` the push services' https origins: a subscription whose endpoint starts with none of them is refused, and nothing is sent anywhere else. At most one |
+
+Delivery is at least once and in event-id order per channel: [channels](channels.md).
 
 ## Every rule `config check` enforces
 
 Besides each value's grammar and the unknown-key and duplicate-key refusals:
 
 - `assurance`: no level name and no `acr` value twice.
-- `surfaces`: no name twice; each `cap` a known level; a native surface binds the digest. `floor.min_assurance` a
-  known level.
+- `surfaces`: no name twice; each `cap` a known level; a native surface binds the digest; each integrated surface has
+  exactly one registry entry of kind `surface` with its name. `floor.min_assurance` a known level.
 - `requirements`: not named `none`; `min_assurance` a known level; at or above the floor (level and sign-in age);
   at least one approver group and one allowed surface; every allowed surface known, with a cap at least the
   requirement's minimum. With an `approvals` section, also: every approver group's `claim` is
-  `approvals.idp.groups_claim` (the only claim the desk reads groups from), and `approvals.desk.surface` is among
-  the allowed surfaces (the desk is the one surface that answers until milestone 3).
-- `registry`: no bearer hash or client certificate on two entries; grants from the grant table; a
-  client-certificate entry granted only `check` and `wait.call`, and some listener serving its grants has
-  `tls.client_ca`.
+  `approvals.idp.groups_claim` (the only claim the desk reads groups from).
+- `registry`: no bearer hash or client certificate on two entries; grants from the grant table, each one the
+  entry's kind may hold; every `surface` entry names an integrated surface; a client-certificate entry granted only
+  `check` and `wait.call`, and some listener serving its grants has `tls.client_ca`.
 - Every listener that accepts registry bearers (`gate.check_api.*`, `gate.ext_mcp.listener`,
-  `gate.ext_authz.listener`, `wait.listeners.mcp`, `approvals.listeners.requests`) has `tls`.
+  `gate.ext_authz.listener`, `wait.listeners.mcp`, `approvals.listeners.requests`, `approvals.listeners.answers_grpc`,
+  `approvals.listeners.answers_json`, `approvals.listeners.admin`) has `tls`.
 - `gate.check_budget` below every configured `hook_timeout`; every policy `require` and `default` a known
   requirement or `none`; every attribute a policy rule reads mapped by each enabled `gate.ext_mcp` and
   `gate.ext_authz`, and supplied by at least one enabled mapping (the Check API counts: its caller sends them);
   each `gate.ext_authz.attributes` entry names exactly one of `metadata` or `context_extension`.
 - `gate.ext_authz` needs Envoy's types installed (the `envoy` extra; the image carries it).
-- `approvals.desk.surface` a known surface; `approvals.retention` at least the longest `answer_deadline` +
+- `channels`: no name twice; at most one `web_push`; a webhook `url` an absolute http or https URL; every
+  `push_origins` entry an https origin; `vapid_subject` a `mailto:` or `https:` URI; with any channel,
+  `approvals.retention` at least `approvals.delivery.give_up_after`, and `attempt_timeout` below `give_up_after`.
+- `approvals.desk.surface` a known native surface; `approvals.retention` at least the longest `answer_deadline` +
   `use_window` of a requirement (how long a Wait Task may be followed).
 - `approvals.database.lock_timeout` at most a quarter of `gate.check_budget`, when the file has both sections.
 

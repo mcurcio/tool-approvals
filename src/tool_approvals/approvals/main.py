@@ -8,11 +8,16 @@ from typing import Final
 
 from tool_approvals.approvals.app.answers import AnswerService
 from tool_approvals.approvals.app.deadlines import DeadlineWaker
+from tool_approvals.approvals.app.ports import UnitOfWorkFactory
+from tool_approvals.approvals.app.push import PushDesk, PushRegistrations
 from tool_approvals.approvals.app.requests import RequestService
 from tool_approvals.approvals.app.rules import Rules
+from tool_approvals.approvals.app.waiting import WaitingList
 from tool_approvals.approvals.app.waits import WaitService
+from tool_approvals.approvals.edges.answers import ANSWERS_METHODS, AnswersServicer, answers_json_app
 from tool_approvals.approvals.edges.desk.app import desk_app
 from tool_approvals.approvals.edges.requests import RequestsServicer
+from tool_approvals.approvals.infra.channels.web_push import application_server_key
 from tool_approvals.approvals.infra.feed import RECONNECT_CAP, RECONNECT_FIRST, PgChangeFeed
 from tool_approvals.approvals.infra.sources import new_ticket, new_wait_id
 from tool_approvals.approvals.infra.store import migrate as store_migrate
@@ -21,6 +26,7 @@ from tool_approvals.approvals.infra.store.uow import TRANSIENT_FAILURES, sql_uni
 from tool_approvals.auth.grpc_auth import GrpcAuth
 from tool_approvals.auth.registry import Registry
 from tool_approvals.config.views import ApprovalsView, MigrateView
+from tool_approvals.contract.answers.v1 import answers_pb2_grpc
 from tool_approvals.contract.requests.v1 import requests_pb2_grpc
 from tool_approvals.contract_mapping.requests import AWAIT_OUTCOME_PATH, CLAIM_PATH, OPEN_WAIT_PATH, REQUEST_PATH
 from tool_approvals.kernel.methods import Method
@@ -69,9 +75,24 @@ async def serve_until(view: ApprovalsView, stopping: asyncio.Event) -> int:
         requests = RequestService(uow, new_ticket, rules)
         waits = WaitService(uow, new_wait_id, feed, rules)
         waker = DeadlineWaker(uow, feed, rules, AsyncioTimeouts(), view.database.lock_timeout)
-        desk = desk_app(AnswerService(uow, rules, view.desk.surface), view.desk, view.idp, view.scale)
-        server = grpc_server(view.requests, [GrpcAuth(Registry(view.registry), REQUESTS_METHODS)])
+        registry = Registry(view.registry)
+        desk = desk_app(
+            AnswerService(uow, rules, view.desk.surface),
+            view.desk,
+            view.idp,
+            view.scale,
+            WaitingList(uow, rules, view.desk.surface),
+            _push_desk(view, uow),
+        )
+        server = grpc_server(view.requests, [GrpcAuth(registry, REQUESTS_METHODS)])
         requests_pb2_grpc.add_ApprovalRequestsServiceServicer_to_server(RequestsServicer(requests, waits), server)
+        # The Answers API: one AnswerService per integrated surface, each bound to it; the caller's registry name
+        # picks it.
+        surfaces = {name: AnswerService(uow, rules, rule) for name, rule in view.integrated.items()}
+        answers_grpc = None
+        if view.answers_grpc is not None:
+            answers_grpc = grpc_server(view.answers_grpc, [GrpcAuth(registry, ANSWERS_METHODS)])
+            answers_pb2_grpc.add_AnswersServiceServicer_to_server(AnswersServicer(surfaces), answers_grpc)
         try:
             async with asyncio.TaskGroup() as group:
                 group.create_task(drain_then_stop(stopping, view.drain, stop))
@@ -81,6 +102,10 @@ async def serve_until(view: ApprovalsView, stopping: asyncio.Event) -> int:
                 # wait again on another replica.
                 group.create_task(serve_grpc(server, stop, STOP_GRACE))
                 group.create_task(serve_asgi(desk, view.approvers, stop))
+                if answers_grpc is not None:
+                    group.create_task(serve_grpc(answers_grpc, stop, STOP_GRACE))
+                if view.answers_json is not None:
+                    group.create_task(serve_asgi(answers_json_app(surfaces, registry), view.answers_json, stop))
                 health = health_app(ready_checks(stopping, {READY_CHANGE_FEED: feed.connected}))
                 group.create_task(serve_asgi(health, view.health, stop))
         except BaseException:
@@ -89,6 +114,17 @@ async def serve_until(view: ApprovalsView, stopping: asyncio.Event) -> int:
     finally:
         await engine.dispose()
     return EXIT_OK
+
+
+def _push_desk(view: ApprovalsView, uow: UnitOfWorkFactory) -> PushDesk | None:
+    """The desk's push registration, when a Web Push channel is configured."""
+    if view.web_push is None:
+        return None
+    approver_groups = frozenset(group for r in view.requirements.values() for group in r.approver_groups)
+    return PushDesk(
+        PushRegistrations(uow, view.web_push.push_origins, approver_groups),
+        application_server_key(view.web_push.vapid_private_key),
+    )
 
 
 async def _supervise(

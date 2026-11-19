@@ -26,6 +26,12 @@ from tool_approvals.kernel.requirements import Floor, GroupRef, Requirement, Sur
 EXAMPLE = Path(__file__).parents[2] / "examples" / "config.yaml"
 SESSION_KEY = b"s" * 32
 FORM_KEY = b"f" * 40
+# The example's channel secrets, which approvals serve resolves from the environment.
+CHANNEL_ENV = {
+    "NOTICES_SIGNING_SECRET": "whsec_bm90aWNlcy1zaWduaW5nLWtleQ==",
+    "AUDIT_SIGNING_SECRET": "whsec_YXVkaXQtc2lnbmluZy1rZXk=",
+    "VAPID_PRIVATE_KEY": "not parsed by the view",
+}
 
 
 def _yaml() -> YAML:
@@ -73,7 +79,14 @@ def test_the_gate_view_mirrors_its_sections() -> None:
     assert view.policy.default is None
     assert view.requirements == {RequirementName("reviewed")}
     assert view.wait_route == WaitRouteView(ServerName("approvals-wait"), "x-approvals-principal")
-    assert [entry.name for entry in view.registry] == ["gateway-hook", "gate", "wait-server", "gateway-wait-route"]
+    assert [entry.name for entry in view.registry] == [
+        "gateway-hook",
+        "gate",
+        "wait-server",
+        "gateway-wait-route",
+        "ticketing",
+        "auditor",
+    ]
     assert view.registry[0].grants == {Method.CHECK}
     assert view.registry[0].bearer_sha256 == bytes.fromhex(
         "1f0b6c6e2a2d4b5f8e9a0c1d2e3f405162738495a6b7c8d9e0f1a2b3c4d5e6f7"
@@ -120,7 +133,9 @@ def _approvals_document(tmp_path: Path) -> Any:
 
 
 def test_the_approvals_view_resolves_its_secrets_and_kernel_values(tmp_path: Path) -> None:
-    view = approvals_view(load(_write(tmp_path, _approvals_document(tmp_path))), {"IDP_SECRET": "idp-secret"})
+    view = approvals_view(
+        load(_write(tmp_path, _approvals_document(tmp_path))), {"IDP_SECRET": "idp-secret", **CHANNEL_ENV}
+    )
     assert view.database.dsn == "postgresql://approvals@db.example.com/approvals"  # one trailing newline dropped
     assert view.database.lock_timeout == timedelta(seconds=1)
     assert view.idp.client_secret == "idp-secret"  # noqa: S105 - a test value
@@ -129,7 +144,9 @@ def test_the_approvals_view_resolves_its_secrets_and_kernel_values(tmp_path: Pat
     assert view.desk.form_key == FORM_KEY
     desk = SurfaceRule(SurfaceName("desk"), AssuranceName("passkey"), binds_digest=True)
     assert view.desk.surface == desk
-    assert view.surfaces == {SurfaceName("desk"): desk}
+    ticketing = SurfaceRule(SurfaceName("ticketing"), AssuranceName("passkey"), binds_digest=True)
+    assert view.surfaces == {SurfaceName("desk"): desk, SurfaceName("ticketing"): ticketing}
+    assert view.integrated == {SurfaceName("ticketing"): ticketing}
     assert view.scale.rank(AssuranceName("password")) == 0
     assert view.scale.level_of_acr("urn:example:acr:passkey") == "passkey"
     assert view.floor == Floor(AssuranceName("passkey"), timedelta(minutes=5))
@@ -137,7 +154,7 @@ def test_the_approvals_view_resolves_its_secrets_and_kernel_values(tmp_path: Pat
         RequirementName("reviewed"): Requirement(
             name=RequirementName("reviewed"),
             approver_groups=frozenset({GroupRef("groups", "approvers")}),
-            allowed_surfaces=frozenset({SurfaceName("desk")}),
+            allowed_surfaces=frozenset({SurfaceName("desk"), SurfaceName("ticketing")}),
             min_assurance=AssuranceName("passkey"),
             max_sign_in_age=timedelta(minutes=3),
             answer_deadline=timedelta(hours=2),

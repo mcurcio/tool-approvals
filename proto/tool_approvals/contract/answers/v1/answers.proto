@@ -1,0 +1,125 @@
+// Answers API v1: for integrated answer surfaces, each authenticated with its own registry credential (a `surface`
+// entry granted answers.review and answers.answer). The desk keeps the same rules in-process. Served over gRPC and
+// as proto3 JSON (POST /v1/review, POST /v1/answer).
+syntax = "proto3";
+
+package tool_approvals.contract.answers.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
+service AnswersService {
+  // What to show for one Approval, with the digest an answer from that page carries.
+  rpc Review(ReviewRequest) returns (ReviewResponse);
+  // Submit one person's answer, as the surface vouches it.
+  rpc Answer(AnswerRequest) returns (AnswerResponse);
+}
+
+message ReviewRequest {
+  string ticket = 1;
+}
+
+message ReviewResponse {
+  oneof result {
+    ApprovalDetail detail = 1;
+    AnswerError error = 2;
+  }
+}
+
+message ApprovalDetail {
+  string ticket = 1;
+  string principal = 2;
+  string server = 3;
+  string tool = 4;
+  // The exact argument bytes the approval covers (JSON text): what counts.
+  bytes arguments = 5;
+  // The agent's words, quoted, never interpreted.
+  optional string reason = 6;
+  optional string work_ref = 7;
+  // The stricter of the requirement the Approval was asked under and the one configured now.
+  Requirement requirement = 8;
+  State state = 9;
+  google.protobuf.Timestamp answer_deadline = 10;
+  // SHA-256 of what is shown (principal, server, tool, argument bytes, words, requirement name); a binding surface
+  // sends it back as AnswerRequest.shown_digest.
+  bytes digest = 11;
+}
+
+message Requirement {
+  string name = 1;
+  repeated GroupRef approver_groups = 2;
+  repeated string allowed_surfaces = 3;
+  string min_assurance = 4;
+  google.protobuf.Duration max_sign_in_age = 5;
+  google.protobuf.Duration answer_deadline = 6;
+  google.protobuf.Duration use_window = 7;
+}
+
+message GroupRef {
+  string claim = 1;
+  string value = 2;
+}
+
+enum State {
+  STATE_UNSPECIFIED = 0;
+  STATE_WAITING = 1;
+  STATE_APPROVED = 2;
+  STATE_REFUSED = 3;
+  STATE_USED = 4;
+  STATE_EXPIRED = 5;
+}
+
+message AnswerRequest {
+  string ticket = 1;
+  Verdict verdict = 2;
+  optional string comment = 3;
+  // Who answered, as the surface vouches.
+  Approver approver = 4;
+  // The assurance level the surface vouches for the approver's sign-in; above the surface's cap is refused.
+  string assurance = 5;
+  // When the approver signed in, as the surface vouches; checked against the requirement's max sign-in age.
+  google.protobuf.Timestamp signed_in_at = 6;
+  // The digest of what the approver was shown (ApprovalDetail.digest); required where the surface binds it.
+  optional bytes shown_digest = 7;
+}
+
+message Approver {
+  string id = 1;
+  repeated GroupRef groups = 2;
+}
+
+enum Verdict {
+  VERDICT_UNSPECIFIED = 0;
+  VERDICT_APPROVE = 1;
+  VERDICT_REFUSE = 2;
+}
+
+message AnswerResponse {
+  oneof result {
+    Answered answered = 1;
+    AnswerError error = 2;
+  }
+}
+
+message Answered {}
+
+message AnswerError {
+  Code code = 1;
+
+  enum Code {
+    CODE_UNSPECIFIED = 0;
+    CODE_UNKNOWN_TICKET = 1;
+    CODE_UNKNOWN_REQUIREMENT = 2;
+    // Not in the requirement's allowed surfaces.
+    CODE_SURFACE_NOT_ALLOWED = 3;
+    // The vouched assurance is above the surface's cap.
+    CODE_ABOVE_CAP = 4;
+    // Below the requirement's minimum assurance.
+    CODE_ASSURANCE_TOO_LOW = 5;
+    CODE_SIGN_IN_TOO_OLD = 6;
+    CODE_NOT_AN_APPROVER = 7;
+    CODE_DIGEST_MISMATCH = 8;
+    CODE_ALREADY_ANSWERED = 9;
+    CODE_PAST_DEADLINE = 10;
+  }
+}

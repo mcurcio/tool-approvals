@@ -41,6 +41,8 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from tool_approvals.approvals.app.answers import AnswerService, ApprovalDetail
 from tool_approvals.approvals.app.ports import StoreUnavailable
+from tool_approvals.approvals.app.push import PushDesk
+from tool_approvals.approvals.app.waiting import WaitingList
 from tool_approvals.approvals.domain.answer import Verdict
 from tool_approvals.approvals.domain.approval import State
 from tool_approvals.approvals.edges.desk import pages
@@ -78,8 +80,16 @@ _TITLES: Final[Mapping[int, str]] = {
 }
 
 
-def desk_app(answers: AnswerService, desk: DeskView, idp: IdpView, scale: AssuranceScale) -> Starlette:
-    """The desk on the approvers' listener, answering as `desk.surface`."""
+def desk_app(  # noqa: PLR0913, PLR0917 (milestone 3 adds the list and push)
+    answers: AnswerService,
+    desk: DeskView,
+    idp: IdpView,
+    scale: AssuranceScale,
+    waiting: WaitingList | None = None,
+    push: PushDesk | None = None,
+) -> Starlette:
+    """The desk on the approvers' listener, answering as `desk.surface`. `waiting` serves the list of Approvals the
+    signed-in approver may answer; `push` (with a Web Push channel configured) lets them register for notices."""
     routes = _Desk(answers, desk, idp, scale)
     return Starlette(
         routes=[

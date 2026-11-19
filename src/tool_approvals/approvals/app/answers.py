@@ -53,6 +53,12 @@ class AnswerService:
             approval = await unit.approvals.get(ticket)
             return AnswerError.UNKNOWN_TICKET if approval is None else self._detail(viewer, approval)
 
+    async def review_as_surface(self, ticket: Ticket) -> ApprovalDetail | AnswerError:
+        """The detail for this service's integrated surface, which vouches for its own approvers: UNKNOWN_TICKET,
+        UNKNOWN_REQUIREMENT, or SURFACE_NOT_ALLOWED when the effective requirement does not allow the surface; no
+        viewer-group check (the answer's vouched groups are checked when it is recorded)."""
+        raise NotImplementedError
+
     def _detail(self, viewer: frozenset[GroupRef], approval: Approval) -> ApprovalDetail | AnswerError:
         current = self._current(approval)
         if current is None:

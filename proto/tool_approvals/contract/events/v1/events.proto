@@ -1,0 +1,56 @@
+// The data of the CloudEvents Approvals delivers to channels and audit sinks (structured mode, signed with
+// Standard Webhooks). Event ids rise in commit order; receivers order and deduplicate by the CloudEvents `id`.
+// Never the call's arguments or the agent's words.
+syntax = "proto3";
+
+package tool_approvals.contract.events.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// The data of `approval.waiting` and `approval.resolved`, sent to notice channels and Web Push: routing data and the
+// desk link only.
+message ApprovalNotice {
+  string ticket = 1;
+  string principal = 2;
+  string server = 3;
+  string tool = 4;
+  // The routing key: the approver groups of the requirement the Approval was asked under.
+  repeated GroupRef approver_groups = 5;
+  // <desk public_url>/approvals/<ticket>
+  string desk_link = 6;
+}
+
+// The data of every event an audit sink receives, and of every audit report line.
+message AuditEvent {
+  string ticket = 1;
+  string principal = 2;
+  string server = 3;
+  string tool = 4;
+  string requirement = 5;
+  repeated GroupRef approver_groups = 6;
+  // Who made the change: "principal:<p> via <caller>", "approver:<sub> via <surface>", "deadline", ...
+  string actor = 7;
+  // Set on `approval.answered` only.
+  Answered answered = 8;
+}
+
+message Answered {
+  Verdict verdict = 1;
+  string surface = 2;
+  string approver = 3;
+  GroupRef qualifying_group = 4;
+  string vouched_assurance = 5;
+  google.protobuf.Timestamp sign_in_moment = 6;
+  google.protobuf.Timestamp answered_at = 7;
+}
+
+enum Verdict {
+  VERDICT_UNSPECIFIED = 0;
+  VERDICT_APPROVE = 1;
+  VERDICT_REFUSE = 2;
+}
+
+message GroupRef {
+  string claim = 1;
+  string value = 2;
+}

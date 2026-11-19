@@ -53,23 +53,23 @@
   expect: ["surfaces.desk: a native surface must bind the digest"]
 
 - name: a repeated surface name
-  set: { surfaces.1: { name: desk, kind: native, cap: passkey } }
+  set: { surfaces.2: { name: desk, kind: native, cap: passkey } }
   expect: ["surfaces: the surface 'desk' is named twice"]
 
 - name: desk.surface not a known surface
   set: { approvals.desk.surface: chat }
   expect: ["approvals.desk.surface: unknown surface 'chat'"]
 
-- name: a surface kind other than native
-  set: { surfaces.0.kind: integrated }
-  expect: ["surfaces[0].kind: Input should be 'native'"]
+- name: a surface kind other than native or integrated
+  set: { surfaces.0.kind: chat }
+  expect: ["surfaces[0].kind: Input should be 'native' or 'integrated'"]
 
 - name: one bearer hash on two entries
   set: { registry.1.credential.bearer_sha256: 1f0b6c6e2a2d4b5f8e9a0c1d2e3f405162738495a6b7c8d9e0f1a2b3c4d5e6f7 }
   expect: ["registry: one bearer hash on two entries (gateway-hook, gate)"]
 
 - name: an unknown method
-  set: { registry.0.grants: [check, answers.answer] }
+  set: { registry.0.grants: [check, desk.answer] }
   expect: ["registry[0].grants[1]: Input should be 'check', 'requests.request'"]
 
 - name: a bearer hash that is not 64 hex digits
@@ -248,6 +248,7 @@
 
 - name: a desk key under 32 bytes once resolved
   command: approvals
+  delete: [channels]
   set:
     approvals.database.dsn: { env: DSN }
     approvals.idp.client_secret: { env: IDP_SECRET }
@@ -262,6 +263,7 @@
 
 - name: one desk key as both the session key and the form key
   command: approvals
+  delete: [channels]
   set:
     approvals.database.dsn: { env: DSN }
     approvals.idp.client_secret: { env: IDP_SECRET }
@@ -276,6 +278,7 @@
 
 - name: unresolvable secrets, all listed
   command: approvals
+  delete: [channels]
   set:
     approvals.idp.client_secret: { env: IDP_SECRET }
   env: {}

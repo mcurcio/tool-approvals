@@ -1,0 +1,18 @@
+// The audit report: `GET /v1/audit?after=<id>` on Approvals' admin listener, JSON Lines, one AuditRecord (proto3
+// JSON) per line, ids rising in commit order; within retention.
+syntax = "proto3";
+
+package tool_approvals.contract.audit.v1;
+
+import "google/protobuf/timestamp.proto";
+import "tool_approvals/contract/events/v1/events.proto";
+
+message AuditRecord {
+  // The event id: rises in commit order; the next page is `after=<the last id read>`.
+  int64 id = 1;
+  google.protobuf.Timestamp time = 2;
+  // The event type, as an audit sink's CloudEvent carries it: approval.waiting, approval.worded, approval.answered,
+  // approval.used, approval.expired.
+  string type = 3;
+  tool_approvals.contract.events.v1.AuditEvent data = 4;
+}
