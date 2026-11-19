@@ -72,6 +72,11 @@ gate and the wait server (once Approvals is ready). The published ports are the 
 agentgateway hook (9444), the wait server (8443) and the desk (8080, behind a TLS-terminating proxy at its public
 URL). Approvals' requests listener and every health listener stay on the compose network.
 
+The published ports bind to `127.0.0.1` by default, so only the host itself (its proxy, its gateway) reaches them.
+`TOOL_APPROVALS_BIND` sets the host address they bind to instead (for example `0.0.0.0` for every interface, or one
+interface's address): the desk listener is plain HTTP, so publish it beyond the host only on a network you trust
+between it and the TLS-terminating proxy.
+
 `TOOL_APPROVALS_VERSION` pins the image tag (default `latest`), `TOOL_APPROVALS_IMAGE` the image itself.
 
 ## Upgrading

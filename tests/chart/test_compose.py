@@ -94,3 +94,11 @@ def test_every_secret_is_a_file_under_the_gitignored_secrets_directory_and_docum
     assert "for name in approvals gate wait" in readme
     ignored = (COMPOSE_DIR / "secrets" / ".gitignore").read_text(encoding="utf-8").split()
     assert ignored[-2:] == ["*", "!.gitignore"]
+
+
+def test_every_published_port_binds_to_loopback_unless_the_operator_sets_an_address() -> None:
+    published = [port for name in SERVICES for port in _services()[name].get("ports", [])]
+    assert published
+    for port in published:
+        assert str(port).startswith("${TOOL_APPROVALS_BIND:-127.0.0.1}:"), port
+    assert "TOOL_APPROVALS_BIND" in (COMPOSE_DIR / "README.md").read_text(encoding="utf-8")

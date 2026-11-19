@@ -52,7 +52,8 @@ secret files its own sections read (the migration gets only the DSN).
    key per service (`openssl`). The [compose README](../deploy/compose/README.md) has every command.
 2. **Configuration.** Edit `config.yaml` (registry hashes, requirements, policy, identity provider, desk URL) and
    run `config check` on it.
-3. **Start:** `docker compose -f deploy/compose/compose.yaml up -d`.
+3. **Start:** `docker compose -f deploy/compose/compose.yaml up -d`. The published ports bind to `127.0.0.1`;
+   set `TOOL_APPROVALS_BIND` to publish them on another host address.
 4. **Upgrade:** set `TOOL_APPROVALS_VERSION` to the new release and `up -d` again: the migration runs first, then
    each service is recreated.
 

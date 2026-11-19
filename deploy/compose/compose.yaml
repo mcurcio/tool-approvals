@@ -55,7 +55,7 @@ services:
     secrets: [approvals-dsn, idp-client-secret, desk-session-key, desk-form-key, approvals.pem, approvals-key.pem]
     healthcheck: *ready
     ports:
-      - "8080:8080" # the desk (approvers): put a TLS-terminating proxy at its public_url in front of it
+      - "${TOOL_APPROVALS_BIND:-127.0.0.1}:8080:8080" # the desk (approvers): put a TLS-terminating proxy at its public_url in front of it
     depends_on:
       migrate: { condition: service_completed_successfully }
 
@@ -65,8 +65,8 @@ services:
     secrets: [gate-approvals-bearer, ca.pem, gate.pem, gate-key.pem]
     healthcheck: *ready
     ports:
-      - "9443:9443" # the Check API (gRPC)
-      - "9444:9444" # the agentgateway hook (ext_mcp)
+      - "${TOOL_APPROVALS_BIND:-127.0.0.1}:9443:9443" # the Check API (gRPC)
+      - "${TOOL_APPROVALS_BIND:-127.0.0.1}:9444:9444" # the agentgateway hook (ext_mcp)
     depends_on:
       approvals: { condition: service_healthy }
 
@@ -76,7 +76,7 @@ services:
     secrets: [wait-approvals-bearer, ca.pem, wait.pem, wait-key.pem]
     healthcheck: *ready
     ports:
-      - "8443:8443" # the wait server (MCP), the gateway's wait route
+      - "${TOOL_APPROVALS_BIND:-127.0.0.1}:8443:8443" # the wait server (MCP), the gateway's wait route
     depends_on:
       approvals: { condition: service_healthy }
 
