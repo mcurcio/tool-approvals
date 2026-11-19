@@ -3,10 +3,9 @@
 The Python packages, what each may import, what each module promises, and how Approvals uses Postgres. Read the
 [system](system.md) and [service](service.md) designs first.
 
-> **Status:** milestones 0, 1 and 2 are built: every module below not marked planned exists, and the import
-> contracts are enforced in CI ([roadmap](system.md#delivery-milestones)). Modules for later milestones
-> (`gate.policy`'s AuthZEN and OPA adapters; `approvals.edges.answers` and `admin`; `approvals.infra.channels`;
-> `approvals.app.delivery` and `audit`; telemetry) are planned.
+> **Status:** milestones 0 to 3 are built: every module below not marked planned exists, the import contracts are
+> enforced in CI, and the image and the Helm chart are released together ([roadmap](system.md#delivery-milestones)).
+> Modules for later milestones (`gate.policy`'s AuthZEN and OPA adapters) and telemetry are planned.
 
 ## Summary
 

@@ -4,8 +4,8 @@ The whole system: what problem it solves, its parts, the public contracts and ho
 [service design](service.md) goes one level down (the three services, what crosses between them, state and
 failure); the [module design](module.md) goes one further (packages, import rules, storage mechanics).
 
-> **Status:** milestones 0, 1 and 2 are built; nothing here is deployable until milestone 3
-> ([roadmap](#delivery-milestones)). The [reference pages](../reference/configuration.md) document what is built.
+> **Status:** milestones 0 to 3 are built, and milestone 3 is the first deployable release: a compose file and a
+> Helm chart released with the image ([operations](../operations.md), [roadmap](#delivery-milestones)). The [reference pages](../reference/configuration.md) document what is built.
 > Where code and these pages disagree, one of them has a bug: please open an issue.
 
 ## Summary
