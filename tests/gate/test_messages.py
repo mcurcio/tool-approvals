@@ -11,7 +11,12 @@ from tool_approvals.gate.core.messages import PassOn, Refuse, ToCheck, classify_
 from tool_approvals.kernel.calls import TOOLS_CALL, RejectReason
 from tool_approvals.kernel.requests import Rejected
 
-MALFORMED = Refuse(Rejected(RejectReason.MALFORMED), b"")
+MALFORMED = Refuse(Rejected(RejectReason.MALFORMED), b"", notification=False)  # no message could be read
+REFUSED_NOTIFICATION = Refuse(Rejected(RejectReason.MALFORMED), b"", notification=True)
+
+
+def _refused(id_json: bytes) -> Refuse:
+    return Refuse(Rejected(RejectReason.MALFORMED), id_json, notification=False)
 
 
 def _request(method: str, request_id: object = 1) -> bytes:
@@ -42,7 +47,7 @@ def test_a_client_response_passes() -> None:
 
 
 def test_a_notifications_method_carrying_an_id_is_refused_answering_it() -> None:
-    expected = Refuse(Rejected(RejectReason.MALFORMED), b'"n-1"')
+    expected = _refused(b'"n-1"')
     assert classify_message(_request("notifications/initialized", "n-1")) == expected
     assert classify_message(_notification("notifications/initialized")) == PassOn()
 
@@ -82,8 +87,10 @@ LOOKALIKES = (
 
 def test_a_method_that_only_reads_as_tools_call_is_refused_answering_its_id() -> None:
     for method in LOOKALIKES:
-        assert classify_message(_request(method, 9)) == Refuse(Rejected(RejectReason.MALFORMED), b"9"), method
-        assert classify_message(_notification(method)) == MALFORMED, method
+        assert classify_message(_request(method, 9)) == _refused(b"9"), method
+        assert classify_message(_notification(method)) == REFUSED_NOTIFICATION, method
+    # A request id of null is no JSON-RPC request the gate reads: no message, so not answered as a notification.
+    assert classify_message(_request("Tools/call", None)) == MALFORMED
 
 
 def test_tools_call_itself_is_no_lookalike() -> None:
@@ -111,7 +118,7 @@ def test_every_case_spacing_and_slash_variant_is_refused(
     """Whatever its case, padding and slash, a method that reads as tools/call is checked when exact, else refused."""
     cased = "".join(char.upper() if up else char for char, up in zip(TOOLS_CALL, upper, strict=True))
     method = "".join(before) + cased.replace("/", slash) + "".join(after)
-    expected = ToCheck(b"{}", b"1") if method == TOOLS_CALL else Refuse(Rejected(RejectReason.MALFORMED), b"1")
+    expected = ToCheck(b"{}", b"1") if method == TOOLS_CALL else _refused(b"1")
     assert classify_message(_request(method)) == expected
 
 

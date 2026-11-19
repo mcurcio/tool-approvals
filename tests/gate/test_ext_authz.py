@@ -139,7 +139,8 @@ ROWS: Final = (
         Row(f"lookalike-{i}", _rpc(m, b'"l-1"'), Deny(MALFORMED, b'"l-1"'))
         for i, m in enumerate(("Tools/call", "tools/call ", "tools\u2215call", "tools\uff0fcall"))
     ),
-    Row("lookalike-notification", _notification("Tools/call"), Deny(MALFORMED, b"")),
+    # Refused as the notification it is: HTTP 400, no id (a body with no readable message keeps 200 and id null).
+    Row("lookalike-notification", _notification("Tools/call"), Deny(MALFORMED, b"", notification=True)),
     # The wait server's route is classified as any route's: the checker passes its tools/call (CheckCore.check).
     Row("wait-server", tools_call(FREE), ToCheck(FREE, b"7"), server=ROUTE.server),
     Row("wait-server-pass-method", _rpc("tools/list"), PassOn(), server=ROUTE.server),
@@ -165,10 +166,10 @@ async def test_the_servicer_answers_each_row(gate: Gate, row: Row) -> None:
     if not isinstance(row.expected, Deny):
         assert_allowed(response)  # ToCheck rows carry FREE, which the policy passes without Approvals
         return
-    verdict, id_json = row.expected.verdict, row.expected.id_json
-    assert_denied(response, verdict, id_json)
+    verdict, id_json, notification = row.expected.verdict, row.expected.id_json, row.expected.notification
+    assert_denied(response, verdict, id_json, notification=notification)
     body: bytes = response.denied_response.body.encode()
-    prefix = b'{"jsonrpc":"2.0","id":' + (id_json or b"null") + b',"error":'
+    prefix = b'{"jsonrpc":"2.0",' + (b"" if notification else b'"id":' + (id_json or b"null") + b",") + b'"error":'
     assert body.startswith(prefix), body
     error = json.loads(body[len(prefix) : -1])
     message = agent_text(verdict, WAIT_TOOL)

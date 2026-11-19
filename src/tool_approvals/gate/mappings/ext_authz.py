@@ -53,6 +53,7 @@ class HttpFacts:
 class Deny:
     verdict: Rejected | Unavailable
     id_json: bytes  # the exact bytes of the request's id; b"" when unknown
+    notification: bool = False  # a refused notification: HTTP 400 and no id, not HTTP 200 with "id": null
 
 
 type Classification = ToCheck | PassOn | Deny
@@ -64,7 +65,7 @@ def classify(facts: HttpFacts) -> Classification:
     a POST (GET, a server stream; DELETE, ending a session; the rest), MALFORMED; a body Envoy cut, TOO_LARGE. Then
     a tools/call is checked on its params span's exact bytes (the wait server's route too: the checker passes it,
     `CheckCore.check`); every other well-formed JSON-RPC message passes on, tasks/* included; a body that is not one
-    is MALFORMED, answering the request's id when it could be read."""
+    is MALFORMED, answering the request's id when it could be read; a refused notification stays one."""
     if not facts.server:
         return Deny(Unavailable(), b"")  # the gateway did not say where: fail closed
     if facts.method != POST:
@@ -72,7 +73,9 @@ def classify(facts: HttpFacts) -> Classification:
     if facts.partial_body:
         return Deny(Rejected(RejectReason.TOO_LARGE), b"")
     judged = classify_message(facts.body)
-    return Deny(judged.verdict, judged.id_json) if isinstance(judged, Refuse) else judged
+    if isinstance(judged, Refuse):
+        return Deny(judged.verdict, judged.id_json, notification=judged.notification)
+    return judged
 
 
 # xds-protos ships no type stubs (its modules are Any to mypy), so the base class is untyped.
@@ -84,9 +87,10 @@ class ExtAuthzServicer(external_auth_pb2_grpc.AuthorizationServicer):  # type: i
     (`Pass.attested`) sets `principal_header` to the attested principal, overwriting any copy the client sent; any
     other OK removes `principal_header` (headers_to_remove), so no tool sees one a client sent. A denial is
     HTTP 200 application/json {"jsonrpc": "2.0", "id": <id bytes>, "error": {"code", "message": agent_text,
-    "data": {"verdict", "ticket"?}}}, code from mappings.errors; a refused notification (a tools/call with no id,
-    the one notification the gate refuses) is HTTP 400 with the same error and no "id" member, as MCP's Streamable
-    HTTP asks."""
+    "data": {"verdict", "ticket"?}}}, code from mappings.errors; a refused notification (a message with a method
+    and no id, whatever refused it: a checked tools/call or the core's message rule) is HTTP 400 with the same
+    error and no "id" member, as MCP's Streamable HTTP asks. A body from which no message could be read keeps
+    HTTP 200 with "id": null."""
 
     def __init__(self, checker: Checker, view: ExtAuthzView, principal_header: str) -> None:
         self._checker: Final = checker
@@ -108,8 +112,8 @@ class ExtAuthzServicer(external_auth_pb2_grpc.AuthorizationServicer):  # type: i
         match classify(facts):
             case PassOn():
                 return _allow(self._principal_header, None)
-            case Deny(verdict, id_json):
-                return self._deny(verdict, id_json)
+            case Deny(verdict, id_json, notification):
+                return self._deny(verdict, id_json, notification=notification)
             case ToCheck(params, id_json):
                 gateway = GatewayContext(
                     Principal(principal),

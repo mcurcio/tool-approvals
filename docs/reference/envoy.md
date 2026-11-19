@@ -164,8 +164,8 @@ names exactly is safe behind it. `tasks/*` needs no check of its own: the gate r
 `tools/call` that asks to run as a task (`task-requested`), so no task follows a call it let through, and a Wait
 Task is authorised by its id at the wait server ([MCP Tasks](wait.md#mcp-tasks)). A refusal answers the request's
 own `id` when the gate could read one, and `null` when it could read no message. A refused notification (a
-`tools/call` with no `id`) is answered as MCP's Streamable HTTP transport asks: HTTP 400, its JSON-RPC error
-carrying no `id` member. A route that names no server, or a request with no principal at `principal_path`, is
+message with a `method` and no `id`, whatever refused it: a checked `tools/call` or a lookalike of one) is
+answered as MCP's Streamable HTTP transport asks: HTTP 400, its JSON-RPC error carrying no `id` member. A route that names no server, or a request with no principal at `principal_path`, is
 refused (`unavailable`) before any of these.
 
 ## What the agent sees

@@ -56,10 +56,11 @@ class PassOn:
 
 @dataclass(frozen=True, slots=True)
 class Refuse:
-    """Not one well-formed JSON-RPC message."""
+    """Refused without a check: not one well-formed JSON-RPC message, or a message the rule refuses."""
 
     verdict: Rejected
-    id_json: bytes  # the exact bytes of the request's id; b"" when none could be read
+    id_json: bytes  # the exact bytes of the request's id; b"" when none could be read or it is a notification
+    notification: bool  # a message with a method and no id, answered as one (no id); False when none was read
 
 
 type MessageVerdict = ToCheck | PassOn | Refuse
@@ -68,18 +69,19 @@ type MessageVerdict = ToCheck | PassOn | Refuse
 def classify_message(body: bytes) -> MessageVerdict:
     """What the gate does with one JSON-RPC message body. A body that is not one JSON-RPC request or response (a
     batch, duplicate keys, trailing data, no method and no result or error: `read_rpc_message`) is Refuse(MALFORMED)
-    with no id; a notifications/* method carrying an id (an MCP notification has none, and MCP names no request so)
-    is Refuse(MALFORMED) answering that id. A tools/call is ToCheck, with or without an id; a method that only reads
-    as tools/call (`lookalike_tools_call`) is Refuse(MALFORMED) answering its id, if any. Anything else passes on:
-    a client's response, a notification, and a request of any other method."""
+    with no id, not as a notification; a notifications/* method carrying an id (an MCP notification has none, and
+    MCP names no request so) is Refuse(MALFORMED) answering that id. A tools/call is ToCheck, with or without an
+    id; a method that only reads as tools/call (`lookalike_tools_call`) is Refuse(MALFORMED) answering its id, or
+    marked a notification when it has none. Anything else passes on: a client's response, a notification, and a
+    request of any other method."""
     rpc = read_rpc_message(body)
     if isinstance(rpc, CallRejected):
-        return Refuse(Rejected(rpc.reason), b"")
+        return Refuse(Rejected(rpc.reason), b"", notification=False)  # no message read: not a notification
     if isinstance(rpc, RpcResponse):
         return PassOn()
     if rpc.method == TOOLS_CALL:
         params = b"" if rpc.params is None else body[rpc.params.start : rpc.params.end]
         return ToCheck(params, rpc.id_json)
     if lookalike_tools_call(rpc.method) or (rpc.method.startswith(NOTIFICATIONS_PREFIX) and rpc.id_json):
-        return Refuse(Rejected(RejectReason.MALFORMED), rpc.id_json)
+        return Refuse(Rejected(RejectReason.MALFORMED), rpc.id_json, notification=not rpc.id_json)
     return PassOn()
