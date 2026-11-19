@@ -2,8 +2,8 @@
 
 `charts/tool-approvals` runs the three services on Kubernetes: a Deployment each for the gate, the wait server and
 Approvals, the schema migration as a hook before every install and upgrade, a Service per service, a disruption
-budget and a topology spread per Deployment, and optionally a NetworkPolicy per listener. The release job publishes
-it with the image, at the same version:
+budget and a topology spread per Deployment, and a NetworkPolicy per listener (on by default). The release job
+publishes it with the image, at the same version:
 
 ```bash
 helm install tool-approvals oci://ghcr.io/mcurcio/charts/tool-approvals --version <version> \
@@ -21,7 +21,7 @@ page lists every value.
 | Service | `<fullname>-gate`, `-wait`, `-approvals` | One port per listener the configuration names, named as in the table below; Approvals' `requests` listener is not on it |
 | Service (headless) | `<fullname>-approvals-requests` | Approvals' `requests` listener, `clusterIP: None`: the gate and the wait server resolve every replica and round-robin over them, so point `gate.approvals.address` and `wait.approvals.address` at `dns:///<fullname>-approvals-requests.<namespace>.svc.cluster.local:<port>` |
 | PodDisruptionBudget | one per Deployment | From `<service>.podDisruptionBudget` |
-| NetworkPolicy | `<fullname>-<service>-<listener>` | One per listener, when `networkPolicy.enabled` |
+| NetworkPolicy | `<fullname>-<service>-<listener>` | One per listener, unless `networkPolicy.enabled` is `false` |
 | ConfigMap | `<fullname>-config` | The configuration file, mounted at `/etc/tool-approvals/config.yaml` |
 | ServiceAccount | `<fullname>` | When `serviceAccount.create` |
 | Job + ConfigMap (hook) | `<fullname>-migrate` | `approvals migrate`, `helm.sh/hook: pre-install,pre-upgrade` (ConfigMap weight -1, Job weight 0, deleted before the next hook and on success); mounts only `secrets.migrate` |
@@ -97,7 +97,7 @@ It is rendered while `approvals.enabled`.
 |---|---|---|
 | `service.type` | `ClusterIP` | The type of the three per-service Services (the requests Service is always headless) |
 | `service.annotations` | `{}` | Added to the three per-service Services |
-| `networkPolicy.enabled` | `false` | Render one NetworkPolicy per configured listener |
+| `networkPolicy.enabled` | `true` | Render one NetworkPolicy per configured listener. With no peers configured, every listener but `requests` admits nobody: name each listener's callers before they can connect |
 | `networkPolicy.ingress.gate.<listener>` | `[]` | `check-api-grpc`, `check-api-json`, `ext-mcp`, `ext-authz`, `health` |
 | `networkPolicy.ingress.wait.<listener>` | `[]` | `mcp`, `health` |
 | `networkPolicy.ingress.approvals.<listener>` | `[]` | `requests`, `approvers`, `answers-grpc`, `answers-json`, `admin`, `health` |

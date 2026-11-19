@@ -93,7 +93,8 @@ disruption budgets, a topology spread, optional NetworkPolicies, and the migrati
    one new pod at a time (`maxUnavailable: 0`), each taking traffic once `/readyz` answers. A configuration change
    alone also rolls the pods (the pods carry the configuration's checksum).
 
-**NetworkPolicy.** Set `networkPolicy.enabled` and admit only the callers each listener serves: the gateway to
+**NetworkPolicy.** The chart renders one per listener by default (`networkPolicy.enabled: true`), admitting
+nobody a listener's list does not name. Admit only the callers each listener serves: the gateway to
 the gate's hooks and Check API and to the wait server's `mcp`; this release's gate and wait pods to Approvals'
 `requests` (the chart adds them); people's ingress to `approvers`; integrated surfaces to `answers-grpc` and
 `answers-json`; operators to `admin`; your probes and monitoring to `health`. Keep `requests`, `approvers`, the

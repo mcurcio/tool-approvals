@@ -72,7 +72,8 @@ docker compose -f deploy/compose/compose.yaml up -d
 ```
 
 **Kubernetes, with Helm.** Create the Secrets the services read, put your configuration file under `config` in a
-values file, then install the chart released with the image (the migration runs as a hook first):
+values file, name under `networkPolicy.ingress` who may reach each listener (the chart's NetworkPolicies admit
+nobody else), then install the chart released with the image (the migration runs as a hook first):
 
 ```bash
 helm install tool-approvals oci://ghcr.io/mcurcio/charts/tool-approvals --version <version> \

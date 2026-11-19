@@ -1,5 +1,6 @@
 # The fewest listeners: no Check API, one gateway hook, no Answers API and no admin listener, Approvals' requests
-# listener on a non-default port, NetworkPolicies with no peers configured, and a ServiceAccount the operator made.
+# listener on a non-default port, the default NetworkPolicies (on, no peers configured), and a ServiceAccount the
+# operator made.
 secrets:
   gate: tool-approvals-gate
   wait: tool-approvals-wait
@@ -9,8 +10,6 @@ tls:
   gate: tool-approvals-tls
   wait: tool-approvals-tls
   approvals: tool-approvals-tls
-networkPolicy:
-  enabled: true
 serviceAccount:
   create: false
   name: tool-approvals

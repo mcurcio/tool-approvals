@@ -87,10 +87,11 @@ service:
   type: ClusterIP
   annotations: {}
 
-# One NetworkPolicy per listener. Each list holds NetworkPolicyPeers admitted to that listener; an empty list admits
-# nothing but what the chart adds (this release's gate and wait pods on approvals' requests listener).
+# One NetworkPolicy per listener, on by default. Each list holds NetworkPolicyPeers admitted to that listener; an empty
+# list admits nothing but what the chart adds (this release's gate and wait pods on approvals' requests listener), so
+# name the gateway, your ingress, integrated surfaces and operators here before they can connect.
 networkPolicy:
-  enabled: false
+  enabled: true
   ingress:
     gate:
       check-api-grpc: []

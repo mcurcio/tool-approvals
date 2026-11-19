@@ -401,6 +401,31 @@ def test_one_network_policy_per_listener_when_enabled(values: Path) -> None:
             assert spec["ingress"] == []
 
 
+def test_network_policies_are_on_by_default() -> None:
+    assert _values(CHART / "values.yaml")["networkPolicy"]["enabled"] is True
+    assert "networkPolicy" not in _values(MINIMAL)  # so MINIMAL renders the default
+
+
+@needs_helm
+def test_by_default_every_approvals_listener_has_a_policy_and_the_approver_side_admits_nobody() -> None:
+    extra = [
+        *_set_json("config.approvals.listeners.answers_grpc", {**OPTIONAL_TLS_LISTENER, "port": 9446}),
+        *_set_json("config.approvals.listeners.answers_json", {**OPTIONAL_TLS_LISTENER, "port": 8446}),
+        *_set_json("config.approvals.listeners.admin", {**OPTIONAL_TLS_LISTENER, "port": 8447}),
+    ]
+    policies = _of_kind(_render(MINIMAL, *extra), "NetworkPolicy")
+    approvals = {
+        name.removeprefix("t-tool-approvals-approvals-"): policy
+        for name, policy in policies.items()
+        if name.startswith("t-tool-approvals-approvals-")
+    }
+    assert set(approvals) == {"health", "requests", "approvers", "answers-grpc", "answers-json", "admin"}
+    for listener in ("approvers", "answers-grpc", "answers-json", "admin"):
+        spec = approvals[listener]["spec"]
+        assert spec["policyTypes"] == ["Ingress"]
+        assert spec["ingress"] == [], listener  # no rule: admits nobody until the operator names peers
+
+
 @needs_helm
 def test_no_network_policy_unless_enabled() -> None:
     assert not _of_kind(_render(MINIMAL, "--set", "networkPolicy.enabled=false"), "NetworkPolicy")
