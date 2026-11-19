@@ -132,11 +132,18 @@ def proto_json_route[Q: Message, R: Message](
     return Route(path, endpoint, methods=["POST"])
 
 
-def health_app(ready: Mapping[str, Callable[[], bool]]) -> ASGIApp:
-    """GET /healthz: 200 while the process runs. GET /readyz: 200 when every named check is true, else 503
-    naming the checks that are not."""
+def health_app(
+    ready: Mapping[str, Callable[[], bool]], live: Mapping[str, Callable[[], bool]] | None = None
+) -> ASGIApp:
+    """GET /healthz: 200 while the process runs and every named liveness check is true, else 503 naming the checks
+    that are not ("not live: delivery <channel>"), so the orchestrator restarts the process. GET /readyz: 200 when
+    every named ready check is true, else 503 naming the checks that are not."""
+    liveness = dict(live or {})
 
     async def healthz(_: Request) -> Response:
+        not_live = [name for name, check in liveness.items() if not check()]
+        if not_live:
+            return PlainTextResponse("not live: " + ", ".join(not_live), 503)
         return PlainTextResponse("ok")
 
     async def readyz(_: Request) -> Response:

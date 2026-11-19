@@ -31,6 +31,7 @@ from sqlalchemy.dialects.postgresql import ENUM, JSONB, TIMESTAMP
 from tool_approvals.approvals.domain.answer import Verdict
 from tool_approvals.approvals.domain.approval import EventKind, State
 from tool_approvals.kernel.requests import WaitState
+from tool_approvals.kernel.requirements import GroupRef
 
 metadata: Final = MetaData()
 NOTIFY_CHANNEL: Final = "approval_changed"  # payload: the ticket a commit touched
@@ -84,6 +85,40 @@ class _WaitOutcome(TypeDecorator[WaitState]):
     @override
     def process_result_value(self, value: str | None, dialect: Dialect) -> WaitState | None:
         return None if value is None else _OUTCOME_OF[value]
+
+
+class GroupsJson(TypeDecorator[frozenset[GroupRef]]):
+    """A set of groups as JSONB: [{"claim", "value"}], sorted, so equal sets store equal documents."""
+
+    impl = JSONB
+    cache_ok = True
+
+    @override
+    def process_bind_param(self, value: frozenset[GroupRef] | None, dialect: Dialect) -> object:
+        return None if value is None else groups_json(value)
+
+    @override
+    def process_result_value(self, value: object, dialect: Dialect) -> frozenset[GroupRef] | None:
+        return None if value is None else groups_of(value)
+
+
+def groups_json(groups: frozenset[GroupRef]) -> list[dict[str, str]]:
+    """The stored form of a set of groups."""
+    return [{"claim": group.claim, "value": group.value} for group in sorted(groups)]
+
+
+def groups_of(document: object) -> frozenset[GroupRef]:
+    """A stored set of groups back; ValueError for any other shape."""
+    if not isinstance(document, list):
+        raise ValueError("stored groups are a JSON list")
+    groups: set[GroupRef] = set()
+    for item in document:
+        match item:
+            case {"claim": str(claim), "value": str(value)} if len(item) == 2:
+                groups.add(GroupRef(claim, value))
+            case _:
+                raise ValueError("a stored group is {claim, value}")
+    return frozenset(groups)
 
 
 approvals: Final = Table(
@@ -166,6 +201,44 @@ approval_events: Final = Table(  # append-only: each row is its own audit (one e
     Column("created_by", Text, nullable=False),
 )
 Index("approval_events_ticket", approval_events.c.ticket)
+
+# Migration 0003_delivery: event delivery and Web Push.
+
+channel_cursors: Final = Table(  # one per channel; written only through the channel lock's connection
+    "channel_cursors",
+    metadata,
+    Column("channel", Text, primary_key=True),
+    Column("last_event_id", BigInteger, nullable=False, server_default="0"),
+    Column("paused_until", TZ),
+    Column("pause_reason", Text),
+    *audit_columns(),
+)
+
+dead_letters: Final = Table(  # an event a channel gave up on; deleted with its event
+    "dead_letters",
+    metadata,
+    Column("id", BigInteger, Identity(always=True), primary_key=True),
+    Column("channel", Text, nullable=False),
+    Column("event_id", BigInteger, ForeignKey("approval_events.id", ondelete="CASCADE"), nullable=False),
+    Column("reason", Text, nullable=False),
+    *audit_columns(),
+    UniqueConstraint("channel", "event_id", name="dead_letters_channel_event_id_key"),
+)
+Index("dead_letters_event_id", dead_letters.c.event_id)
+
+push_subscriptions: Final = Table(
+    "push_subscriptions",
+    metadata,
+    Column("endpoint_hash", LargeBinary, primary_key=True),  # SHA-256 of the endpoint
+    Column("endpoint", Text, nullable=False),
+    Column("p256dh", LargeBinary, nullable=False),
+    Column("auth", LargeBinary, nullable=False),
+    Column("approver", Text, nullable=False),
+    Column("approver_groups", GroupsJson(), nullable=False),  # [{"claim", "value"}], sorted
+    *audit_columns(),
+    info={AUDITED: True},
+)
+Index("push_subscriptions_approver", push_subscriptions.c.approver)
 
 # The unique indexes whose violation is a lost race, not a bug: the unit of work reports ConcurrentChange.
 ONE_LIVE_INDEXES: Final = frozenset({"approvals_one_live_call", "waits_one_live"})

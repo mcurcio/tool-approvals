@@ -1,6 +1,8 @@
 """Each command's view of the configuration: frozen values in kernel types, with only that command's secrets
 resolved. A command never sees another command's sections or secrets."""
 
+import base64
+import binascii
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -36,6 +38,7 @@ from tool_approvals.kernel.names import CallerName, RequirementName, ServerName,
 from tool_approvals.kernel.requirements import AssuranceScale, Floor, Requirement, SurfaceRule
 
 MIN_DESK_KEY_BYTES: Final = 32
+WHSEC_PREFIX: Final = "whsec_"
 
 
 @dataclass(frozen=True, slots=True)
@@ -473,11 +476,23 @@ def _channels(
         where = f"channels.{channel.name}"
         if isinstance(channel, WebhookChannel):
             secret = secrets.text(channel.signing_secret, f"{where}.signing_secret")
+            if secret and not _standard_webhooks_secret(secret):
+                secrets.problem(f"{where}.signing_secret: not whsec_ and base64")
             webhooks.append(WebhookChannelView(channel.name, channel.url, secret, channel.events))
         elif isinstance(channel, WebPushChannel):
             key = secrets.raw(channel.vapid_private_key, f"{where}.vapid_private_key")
             web_push = WebPushChannelView(channel.name, key, channel.vapid_subject, channel.push_origins)
     return tuple(webhooks), web_push
+
+
+def _standard_webhooks_secret(secret: str) -> bool:
+    """Whether `secret` is a Standard Webhooks signing secret: `whsec_` and the base64 of a non-empty key."""
+    if not secret.startswith(WHSEC_PREFIX):
+        return False
+    try:
+        return bool(base64.b64decode(secret.removeprefix(WHSEC_PREFIX), validate=True))
+    except binascii.Error:
+        return False
 
 
 def _kind_of(surfaces: tuple[Surface, ...], name: SurfaceName) -> str:

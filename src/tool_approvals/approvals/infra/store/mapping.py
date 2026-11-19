@@ -4,6 +4,8 @@
   snapshot, the words, the answer and the audit columns) are mapped under `_`-prefixed names.
 - `version_id_col` with the domain's own version: every UPDATE and DELETE is conditional on the version read, so
   a lost race raises (optimistic lock) instead of overwriting.
+- `PushSubscription` keys on `endpoint_hash` (the SHA-256 of its endpoint, written at flush) and keeps its routing
+  groups as a sorted JSON list of {"claim", "value"}.
 - The answer columns map to a private `AnswerColumns` value. The load event rebuilds `Approval.answer` through
   `issuer.rebuild` (with the words, the requirement and a fresh event list); the one `before_flush` listener copies
   them back into the columns and stamps the audit columns on every table whose `info` has "audited".
@@ -21,7 +23,8 @@ from sqlalchemy.orm import Session, UOWTransaction, composite, registry, relatio
 from tool_approvals.approvals.domain import issuer
 from tool_approvals.approvals.domain.answer import Answer, Verdict
 from tool_approvals.approvals.domain.approval import Actor, Approval, Wait
-from tool_approvals.approvals.infra.store.tables import AUDITED, approvals, metadata, waits
+from tool_approvals.approvals.domain.push import PushSubscription
+from tool_approvals.approvals.infra.store.tables import AUDITED, approvals, metadata, push_subscriptions, waits
 from tool_approvals.kernel.calls import CallIdentity
 from tool_approvals.kernel.names import ApproverId, AssuranceName, Digest, SurfaceName, Ticket
 from tool_approvals.kernel.requirements import GroupRef, Requirement, snapshot_json, snapshot_of
@@ -148,6 +151,21 @@ mapper_registry.map_imperatively(
 )
 
 
+_p = push_subscriptions.c
+mapper_registry.map_imperatively(
+    PushSubscription,
+    push_subscriptions,
+    properties={
+        "endpoint": _p.endpoint,
+        "p256dh": _p.p256dh,
+        "auth": _p.auth,
+        "approver": _p.approver,
+        "approver_groups": _p.approver_groups,
+    },
+    column_prefix="_",  # endpoint_hash (written at flush) and the audit columns
+)
+
+
 _AUDITED_TABLES: Final = frozenset(table for table in metadata.tables.values() if table.info.get(AUDITED))
 
 
@@ -187,6 +205,10 @@ def _before_flush(session: Session, _flush: UOWTransaction, _instances: object) 
         approval._reason = None if approval.words is None else approval.words.reason
         approval._work_ref = None if approval.words is None else approval.words.work_ref
         approval._answer_columns = AnswerColumns.of(approval.answer)
+    for instance in session.new:
+        if isinstance(instance, PushSubscription):
+            stored: Any = instance  # the key column is mapped under a name the domain does not declare
+            stored._endpoint_hash = instance.endpoint_hash
     for instance in session.new:
         if _audited(instance):
             instance._created_at, instance._created_by = now, by

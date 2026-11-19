@@ -6,12 +6,24 @@ StoreUnavailable.
 
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import AbstractAsyncContextManager
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Final, Protocol
 
-from tool_approvals.approvals.domain.approval import Actor, Approval
+from tool_approvals.approvals.domain.answer import Verdict
+from tool_approvals.approvals.domain.approval import Actor, Approval, EventKind
 from tool_approvals.approvals.domain.push import PushSubscription
-from tool_approvals.kernel.names import Fingerprint, Principal, RequirementName, Ticket
+from tool_approvals.kernel.names import (
+    ApproverId,
+    AssuranceName,
+    Fingerprint,
+    Principal,
+    RequirementName,
+    ServerName,
+    SurfaceName,
+    Ticket,
+    ToolName,
+)
 from tool_approvals.kernel.requirements import GroupRef
 
 MAX_ATTEMPTS: Final = 3
@@ -111,3 +123,92 @@ class ChangeFeed(Protocol):
     def watch(self, ticket: Ticket) -> AbstractAsyncContextManager[AsyncIterator[None]]: ...
 
     def watch_all(self) -> AbstractAsyncContextManager[AsyncIterator[None]]: ...
+
+
+# Event delivery and the audit report (milestone 3).
+
+
+@dataclass(frozen=True, slots=True)
+class AnsweredFacts:
+    """The answer an `approved` or `refused` event reports to an audit sink: the Approval row's answer columns,
+    never its comment."""
+
+    verdict: Verdict
+    surface: SurfaceName
+    approver: ApproverId
+    qualifying_group: GroupRef
+    vouched_assurance: AssuranceName
+    sign_in_moment: datetime
+    answered_at: datetime | None  # None on a yes stored before migration 0002
+
+
+@dataclass(frozen=True, slots=True)
+class CommittedEvent:
+    """One committed approval event with what a channel or the audit report says about it: routing data, the
+    actor and, on an answer, the answer. Never the call's arguments, the agent's words or the approver's comment."""
+
+    id: int  # rises in commit order
+    ticket: Ticket
+    kind: EventKind
+    created_at: datetime
+    actor: str  # the event row's created_by: str(Actor)
+    principal: Principal
+    server: ServerName
+    tool: ToolName
+    requirement: RequirementName
+    approver_groups: frozenset[GroupRef]  # the requirement snapshot's
+    answered: AnsweredFacts | None  # set on `approved` and `refused` events (from the Approval's answer columns)
+
+
+class EventLog(Protocol):
+    """Committed events, read in id order (ids rise in commit order, so no lower id commits after a higher one is
+    seen)."""
+
+    async def after(self, after: int, limit: int) -> list[CommittedEvent]:
+        """The events with id > `after`, ascending, at most `limit`."""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class ChannelPosition:
+    """A channel's cursor row, read with the database's clock."""
+
+    last_event_id: int  # the last event delivered or dead-lettered; 0 for a new channel
+    paused_until: datetime | None  # set while the channel is paused (it stays set past the moment, until a success)
+    now: datetime  # the database's clock_timestamp() at the read
+
+
+class ChannelLog(Protocol):
+    """One channel's events and cursor, on a connection that holds the channel's lock. Every write goes through
+    that connection, so a holder whose lock is gone (its connection closed) can no longer write. Raises a
+    transient store failure when the connection is lost."""
+
+    async def position(self) -> ChannelPosition: ...
+
+    async def events_after(self, after: int, limit: int) -> list[CommittedEvent]: ...
+
+    async def advance(self, event_id: int) -> None:
+        """The cursor to at least `event_id` (never lower: GREATEST), the pause cleared."""
+        ...
+
+    async def skip(self, event_id: int) -> None:
+        """The cursor to at least `event_id`, the pause kept: an event this channel is not sent."""
+        ...
+
+    async def dead_letter(self, event_id: int, reason: str) -> None:
+        """A dead_letters row for (channel, event) and the cursor to at least `event_id`, in one transaction; the
+        pause kept."""
+        ...
+
+    async def pause(self, until: timedelta, reason: str) -> None:
+        """Pause the channel for `until` from the database's now, with `reason`; the cursor kept."""
+        ...
+
+
+class ChannelLocks(Protocol):
+    """The per-channel lock every replica competes for."""
+
+    def hold(self, channel: str) -> AbstractAsyncContextManager[ChannelLog]:
+        """Entered once this replica holds `channel`'s lock (blocking until then); the lock is released on exit or
+        when its connection is lost."""
+        ...
