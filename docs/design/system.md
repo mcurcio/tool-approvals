@@ -314,7 +314,7 @@ with a ticket; a test client declaring Tasks calls `approval_wait` and gets a Wa
 an `acr` is refused; one at the right strength approves; `tasks/get` completes with `approved`; the repeat runs
 once. The same refusal and claim through Envoy's `ext_authz` and through a plain HTTP Check API caller. The
 assurance-cap rule for integrated surfaces is proven inside Approvals against real Postgres; its end-to-end path
-needs the Answers API (milestone 3).
+runs through the Answers API (milestone 3), in the e2e tracer.
 
 **Gateway breadth (milestone 2):** every adapter builds the same gateway context; the rules file matches gateway
 attributes; Envoy's requests are classified by one pure table; a gateway hook may authenticate with mTLS; an
