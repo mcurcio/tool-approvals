@@ -23,13 +23,14 @@ from tool_approvals.approvals.app.waiting import WaitingSummary
 _PACKAGE: Final = "tool_approvals.approvals.edges.desk"
 
 STYLESHEET: Final = files(_PACKAGE).joinpath("desk.css").read_bytes()
-SCRIPT: Final = files(_PACKAGE).joinpath("desk.js").read_bytes()  # the list page's push registration
+SCRIPT: Final = files(_PACKAGE).joinpath("desk.js").read_bytes()  # the push page's registration
 SERVICE_WORKER: Final = files(_PACKAGE).joinpath("desk-sw.js").read_bytes()  # shows the push notices
 _HIDDEN_CATEGORIES: Final = frozenset({"Cc", "Cf", "Zl", "Zp"})
 _COMBINING: Final = "Mn"  # a nonspacing mark: hidden only where nothing visible carries it
 _KEPT: Final = frozenset("\n")
 _TITLE: Final = "Review a tool call"
 _LIST_TITLE: Final = "Waiting for your answer"
+_PUSH_TITLE: Final = "Notices in this browser"
 
 
 def visible(text: str) -> str:
@@ -52,11 +53,12 @@ _ENVIRONMENT.filters["visible"] = visible
 _REVIEW: Final = _ENVIRONMENT.get_template("review.html")
 _MESSAGE: Final = _ENVIRONMENT.get_template("message.html")
 _LIST: Final = _ENVIRONMENT.get_template("list.html")
+_PUSH: Final = _ENVIRONMENT.get_template("push.html")
 
 
 @dataclass(frozen=True, slots=True)
 class PushOffer:
-    """What the list page's script needs to register this browser for push notices: none of it agent-supplied."""
+    """What the push page's script needs to register this browser for push notices: none of it agent-supplied."""
 
     script: str  # the URL of desk.js
     service_worker: str  # the URL of desk-sw.js
@@ -86,10 +88,18 @@ def _rerendered(arguments_json: bytes) -> str:
     return json.dumps(json.loads(arguments_json), indent=2, sort_keys=True, ensure_ascii=False)
 
 
-def list_page(rows: Sequence[WaitingSummary], *, stylesheet: str, review_base: str, push: PushOffer | None) -> str:
-    """The Waiting Approvals the viewer may answer, each linking to `review_base`/<ticket>; with the push offer
-    (and its script) when `push` is given, and no script otherwise."""
-    return _LIST.render(title=_LIST_TITLE, stylesheet=stylesheet, rows=rows, review_base=review_base, push=push)
+def list_page(rows: Sequence[WaitingSummary], *, stylesheet: str, review_base: str, push_page: str | None) -> str:
+    """The Waiting Approvals the viewer may answer, each linking to `review_base`/<ticket>; with a link to
+    `push_page` when given. No script."""
+    return _LIST.render(
+        title=_LIST_TITLE, stylesheet=stylesheet, rows=rows, review_base=review_base, push_page=push_page
+    )
+
+
+def push_page(push: PushOffer, *, stylesheet: str, list_page: str | None) -> str:
+    """The push offer: the one page that loads a script (`push.script`), with a link back to `list_page` when
+    given."""
+    return _PUSH.render(title=_PUSH_TITLE, stylesheet=stylesheet, push=push, list_page=list_page)
 
 
 def message_page(title: str, message: str, *, stylesheet: str) -> str:

@@ -1,5 +1,6 @@
 """The desk's list of Waiting Approvals, over the in-memory store: a plain sign-in reaches it, each row links to
-its review, what an agent wrote shows only as visible escaped text, and every response carries the policy."""
+its review, what an agent wrote shows only as visible escaped text, and push is offered on a page of its own, the
+only one that loads a script. The policy each response carries is test_policy's."""
 
 import html.parser
 import json
@@ -12,12 +13,12 @@ from tests.approvals.memory import store_down
 from tests.fixtures.oidc_provider import SignInScript
 from tool_approvals.approvals.app.ports import StoreUnavailable
 from tool_approvals.approvals.app.waiting import WaitingList, WaitingSummary
-from tool_approvals.approvals.edges.desk.app import CONTENT_SECURITY_POLICY
 from tool_approvals.kernel.names import Principal, ServerName
 from tool_approvals.kernel.requests import CallRef
 from tool_approvals.kernel.requirements import GroupRef
 
 LIST_URL: Final = f"{DESK_URL}/approvals"
+PUSH_URL: Final = f"{DESK_URL}/push"
 
 
 class _Page(html.parser.HTMLParser):
@@ -42,7 +43,7 @@ def _parsed(text: str) -> _Page:
 
 
 async def test_a_plain_sign_in_reaches_the_list_and_each_row_links_to_its_review() -> None:
-    async with memory_desk() as desk:
+    async with memory_desk(push=False) as desk:
         first, second = await desk.ticket(), await desk.ticket(call_ref("/b"))
         person = desk.person()
         page = await person.browser.visit(LIST_URL)
@@ -65,7 +66,7 @@ async def test_the_root_sends_to_the_list() -> None:
 
 
 async def test_an_approver_in_no_group_sees_an_empty_list() -> None:
-    async with memory_desk() as desk:
+    async with memory_desk(push=False) as desk:
         await desk.ticket()
         person = desk.person()
         desk.idp.script(SignInScript(groups=("strangers",)))
@@ -113,16 +114,47 @@ async def test_without_push_the_list_links_no_script_and_the_push_routes_do_not_
         page = await person.browser.visit(LIST_URL)
         assert page.status_code == 200
         assert _parsed(page.text).scripts() == []
+        assert PUSH_URL not in _parsed(page.text).links()
         assert "data-application-server-key" not in page.text
-        for method, path in (("GET", "/desk.js"), ("GET", "/desk-sw.js"), ("POST", "/push/subscriptions")):
+        for method, path in (
+            ("GET", "/push"),
+            ("GET", "/login?next=push"),
+            ("GET", "/desk.js"),
+            ("GET", "/desk-sw.js"),
+            ("POST", "/push/subscriptions"),
+        ):
             assert (await person.browser.send(method, f"{DESK_URL}{path}")).status_code == 404, path
         assert (await person.browser.send("DELETE", f"{DESK_URL}/push/subscriptions")).status_code == 404
 
 
-async def test_with_push_the_list_offers_it_through_the_package_scripts() -> None:
+async def test_with_push_the_list_links_the_push_page_and_loads_no_script() -> None:
+    async with memory_desk() as desk:
+        await desk.ticket()
+        page = await desk.person().browser.visit(LIST_URL)
+        parsed = _parsed(page.text)
+        assert PUSH_URL in parsed.links()
+        assert parsed.scripts() == []
+        assert "<script" not in page.text.lower()
+        assert "data-push-token" not in page.text
+
+
+async def test_a_plain_sign_in_reaches_the_push_page() -> None:
     async with memory_desk() as desk:
         person = desk.person()
-        page = await person.browser.visit(LIST_URL)
+        page = await person.browser.visit(PUSH_URL)
+        assert (page.status_code, str(page.url)) == (200, PUSH_URL)
+        assert page.headers["cache-control"] == "no-store"
+        login = next(r for r in person.browser.visited if r.url.path == "/push" and r.status_code == 303)
+        assert login.headers["location"] == f"{DESK_URL}/login?next=push"
+        (asked,) = desk.idp.authorizations
+        assert "acr_values" not in asked
+        assert "max_age" not in asked
+
+
+async def test_the_push_page_offers_push_through_the_package_scripts() -> None:
+    async with memory_desk() as desk:
+        person = desk.person()
+        page = await person.browser.visit(PUSH_URL)
         parsed = _parsed(page.text)
         assert parsed.scripts() == [f"{DESK_URL}/desk.js"]
         (section,) = [attrs for tag, attrs in parsed.tags if tag == "section"]
@@ -136,24 +168,6 @@ async def test_with_push_the_list_offers_it_through_the_package_scripts() -> Non
             assert script.status_code == 200
             assert script.headers["content-type"].startswith("text/javascript"), path
             assert marker in script.content
-
-
-async def test_every_list_and_push_response_carries_the_content_security_policy() -> None:
-    async with memory_desk() as desk:
-        person = desk.person()
-        await person.browser.visit(LIST_URL)
-        for method, path in (
-            ("GET", "/"),
-            ("GET", "/desk.js"),
-            ("GET", "/desk-sw.js"),
-            ("POST", "/push/subscriptions"),
-            ("DELETE", "/push/subscriptions"),
-        ):
-            await person.browser.send(method, f"{DESK_URL}{path}")
-        responses = [r for r in person.browser.visited if str(r.url).startswith(DESK_URL)]
-        assert {200, 303, 415} <= {r.status_code for r in responses}
-        for response in responses:
-            assert response.headers["content-security-policy"] == CONTENT_SECURITY_POLICY, response.url
 
 
 class _Down(WaitingList):

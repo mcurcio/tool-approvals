@@ -1,5 +1,5 @@
-"""Registering a browser for push notices from the desk's list, over the in-memory store: a JSON request with the
-session's push token stores one subscription under the approver; every other request is refused and stores
+"""Registering a browser for push notices from the desk's push page, over the in-memory store: a JSON request with
+the session's push token stores one subscription under the approver; every other request is refused and stores
 nothing."""
 
 import base64
@@ -32,11 +32,11 @@ def _subscription(endpoint: str = ENDPOINT, p256dh: bytes = P256DH, auth: bytes 
 
 
 async def _signed_in(desk: MemoryDesk, script: SignInScript | None = None) -> tuple[DeskPerson, str]:
-    """A person who opened the list; the push token its page carries."""
+    """A person who opened the push page; the push token it carries."""
     if script is not None:
         desk.idp.script(script)
     person = desk.person()
-    page = await person.browser.visit(f"{DESK_URL}/approvals")
+    page = await person.browser.visit(f"{DESK_URL}/push")
     assert page.status_code == 200, page.text
     token = page.text.split('data-push-token="', 1)[1].split('"', 1)[0]
     return person, token

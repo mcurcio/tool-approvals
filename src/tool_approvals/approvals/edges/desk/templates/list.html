@@ -1,6 +1,4 @@
 {% extends "base.html" %}
-{% block head %}{% if push %}<script src="{{ push.script }}" defer></script>
-{% endif %}{% endblock %}
 {% block main %}
 <h1>{{ title }}</h1>
 {% if rows %}
@@ -22,14 +20,7 @@
 {% else %}
 <p>Nothing is waiting for you.</p>
 {% endif %}
-{% if push %}
-<section id="push" data-application-server-key="{{ push.application_server_key }}" data-push-token="{{ push.token }}" data-subscriptions="{{ push.subscriptions }}" data-service-worker="{{ push.service_worker }}">
-<h2>Notices</h2>
-<p>
-<button type="button" id="push-on" hidden>Notify this browser</button>
-<button type="button" id="push-off" hidden>Stop notifying this browser</button>
-</p>
-<p id="push-status" role="status"></p>
-</section>
+{% if push_page %}
+<p><a href="{{ push_page }}">Notices in this browser</a></p>
 {% endif %}
 {% endblock %}

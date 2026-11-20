@@ -1,4 +1,4 @@
-// The desk's list page: register this browser for push notices of Approvals waiting for the signed-in approver,
+// The desk's push page: register this browser for push notices of Approvals waiting for the signed-in approver,
 // or stop them. Everything it needs is in the #push section's data attributes; it never reads agent text.
 "use strict";
 

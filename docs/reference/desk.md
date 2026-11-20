@@ -60,12 +60,15 @@ The list answers nothing, so it needs a sign-in but no step-up: without one, the
 (`/login?next=list`, no `acr_values` or `max_age`) and comes back to the list. A review opened from it asks for
 the requirement's level as usual. The list is sent with `Cache-Control: no-store`.
 
-## Push notices from the list
+## Push notices
 
-With a Web Push channel configured, the list page offers **Notify this browser** (and **Stop notifying this
-browser**). It loads one first-party script, `/desk.js`, which registers the service worker `/desk-sw.js`, asks
-the browser for a push subscription with the channel's VAPID public key, and sends it to the desk. The key and the
-other values the script needs are data attributes on the page; there is no inline script. The service worker shows
+With a Web Push channel configured, the list links to the push page, `GET /push`, which offers **Notify this
+browser** (and **Stop notifying this browser**). Like the list it needs a sign-in but no step-up: without one, the
+desk signs the person in plainly (`/login?next=push`) and comes back to it; it is sent with
+`Cache-Control: no-store`. It is the only desk page that loads a script: one first-party script, `/desk.js`, which
+registers the service worker `/desk-sw.js`, asks the browser for a push subscription with the channel's VAPID
+public key, and sends it to the desk. The key and the other values the script needs are data attributes on the
+page; there is no inline script. The service worker shows
 a notification for `approval.waiting` with a link to the review, replaces it (the same tag: the ticket) for
 `approval.resolved`, and opens the link on a click; a link that is not the desk's own opens the list instead.
 
@@ -84,7 +87,8 @@ a notification for `approval.waiting` with a link to the review, replaces it (th
   `desk.form_key` over the session and the word `push`.
 - Registering an endpoint again replaces its subscription; an approver removes only their own.
 
-Without a Web Push channel these routes and both scripts answer 404, and the list page links no script.
+Without a Web Push channel these routes, the push page and both scripts answer 404, and the list does not link
+the push page.
 
 ## What the desk checks in the ID token
 
@@ -130,7 +134,7 @@ Map each `acr` value your provider issues to a level in `assurance`, weakest fir
 | Form token | An HMAC with `desk.form_key` over the session, the ticket and the shown digest: the CSRF defence, and the binding of an answer to the page that showed it |
 | Both keys | At least 32 bytes each, separate, and the same on every replica |
 | HTTPS | The cookie is `Secure`, so serve `public_url` over HTTPS: a TLS-terminating proxy in front of the plain-HTTP approvers listener |
-| Content-Security-Policy | `default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'` on every response. The review page holds no script. The push scripts also need `script-src 'self'; worker-src 'self'; connect-src 'self'`; until the policy adds them, browsers refuse `/desk.js` and the push offer does nothing |
+| Content-Security-Policy | Per page. The push page (`/push`) and the service worker's script (`/desk-sw.js`), when served: `default-src 'none'; script-src 'self'; worker-src 'self'; connect-src 'self'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`, so the page runs only the desk's own scripts (never inline script or another origin's) and they reach only the desk. Every other response, the review page, the answer and the list included: `default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`, which runs no script at all. The review page holds no script |
 
 Every answer is stored with the surface, the approver's subject, the group through which they qualified, the
 level the surface vouched, and the sign-in moment.
