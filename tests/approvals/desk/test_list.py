@@ -186,8 +186,8 @@ async def test_the_service_worker_scope_is_its_own_directory_and_excludes_the_re
         response = await person.browser.send("GET", worker)
         assert response.status_code == 200
         assert "service-worker-allowed" not in response.headers
-        for page in (f"{DESK_URL}/approvals", f"{DESK_URL}/approvals/x", LIST_URL, f"{DESK_URL}/"):
-            assert not page.startswith(scope), page
+        for url in (f"{DESK_URL}/approvals", f"{DESK_URL}/approvals/x", LIST_URL, f"{DESK_URL}/"):
+            assert not url.startswith(scope), url
         assert (await person.browser.send("GET", f"{DESK_URL}/desk-sw.js")).status_code == 404
 
 
