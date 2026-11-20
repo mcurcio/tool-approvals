@@ -25,7 +25,12 @@ from tests.approvals.domain.examples import (
 )
 from tool_approvals.approvals.app.answers import AnswerService
 from tool_approvals.approvals.app.deadlines import DeadlineWaker
-from tool_approvals.approvals.app.ports import ApprovalRepository, UnitOfWork, UnitOfWorkFactory
+from tool_approvals.approvals.app.ports import (
+    ApprovalRepository,
+    PushSubscriptionRepository,
+    UnitOfWork,
+    UnitOfWorkFactory,
+)
 from tool_approvals.approvals.app.requests import RequestService
 from tool_approvals.approvals.app.rules import Rules
 from tool_approvals.approvals.app.waits import WaitService
@@ -116,6 +121,10 @@ class _Paused:
     @property
     def approvals(self) -> ApprovalRepository:
         return self._unit.approvals
+
+    @property
+    def push_subscriptions(self) -> PushSubscriptionRepository:
+        return self._unit.push_subscriptions
 
     async def lock_principal(self, principal: Principal) -> None:
         await self._unit.lock_principal(principal)

@@ -7,14 +7,14 @@ forwarded, whether the call may run. If your policy says the call needs approval
 ticket, a person reviews the exact call and answers, and the agent repeats the call, which then runs once.
 Policy, approval routing and the surfaces people answer on are yours to choose.
 
-> **Status: pre-release.** Milestones 1 and 2 are built: the Check API, the agentgateway and Envoy adapters
-> (Envoy's request classification complete), gateway-attribute policy, the rules-file policy, Approvals on
-> Postgres, the wait tool with MCP Tasks, a minimal desk with step-up sign-in, mTLS for gateway hooks and inbound
-> gRPC deadlines. What is still planned is marked so on this page and in the [roadmap](#roadmap); the first
-> release meant for deployment is milestone 3. Releases stay on `0.x` until the project is declared stable. The
-> `0.x` line starts from a seed tag, `v0.1.0`, that the release job puts on the root commit before the first
-> release; on `0.x` a breaking change raises the minor version, a rule deleted from the release configuration when
-> the project goes 1.0.
+> **Status: milestone 3 is built, the first deployable release.** Milestones 1 to 3 are built: the Check API, the
+> agentgateway and Envoy adapters, gateway-attribute policy, the rules-file policy, Approvals on Postgres, the wait
+> tool with MCP Tasks, the desk with step-up sign-in, the Answers API for integrated surfaces, the audit report,
+> event delivery to channels and Web Push, and a compose file and a Helm chart released with the image. What is
+> still planned is marked so on this page and in the [roadmap](#roadmap). Releases stay on `0.x` until the project
+> is declared stable. The `0.x` line starts from a seed tag, `v0.1.0`, that the release job puts on the root commit
+> before the first release; on `0.x` a breaking change raises the minor version, a rule deleted from the release
+> configuration when the project goes 1.0.
 
 ## Why
 
@@ -62,15 +62,32 @@ The design pages explain each piece: [system](docs/design/system.md), [services]
 
 ## Quick start
 
+**One host, with Docker Compose.** [`deploy/compose`](deploy/compose/README.md) runs Postgres, the migration and
+the three services. Create the secret files its README lists under `deploy/compose/secrets/`, edit
+`deploy/compose/config.yaml`, then:
+
 ```bash
-docker build -t tool-approvals .                                   # or use the image CI publishes
-cp examples/config.yaml config.yaml                                # then edit: names, addresses, policy
-docker run --rm tool-approvals credentials issue                   # once per registry entry
-docker run --rm --read-only -v "$PWD/config.yaml:/c.yaml:ro" tool-approvals --config /c.yaml config check
+docker run --rm ghcr.io/mcurcio/tool-approvals credentials issue   # once per registry entry
+docker compose -f deploy/compose/compose.yaml up -d
 ```
 
-Then, against your Postgres: `approvals migrate`, `approvals serve`, `gate` and `wait` (each with the same file
-and its own secrets), and wire your gateway. [Running tool-approvals](docs/operations.md) walks through it.
+**Kubernetes, with Helm.** Create the Secrets the services read, put your configuration file under `config` in a
+values file, name under `networkPolicy.ingress` who may reach each listener (the chart's NetworkPolicies admit
+nobody else), then install the chart released with the image (the migration runs as a hook first):
+
+```bash
+helm install tool-approvals oci://ghcr.io/mcurcio/charts/tool-approvals --version <version> \
+  --namespace approvals -f values.yaml
+```
+
+Either way, check the configuration first and wire your gateway after:
+
+```bash
+cp examples/config.yaml config.yaml                                # then edit: names, addresses, policy
+docker run --rm --read-only -v "$PWD/config.yaml:/c.yaml:ro" ghcr.io/mcurcio/tool-approvals --config /c.yaml config check
+```
+
+[Running tool-approvals](docs/operations.md) walks through both, and through running the commands yourself.
 
 | Reference | |
 |---|---|
@@ -80,7 +97,11 @@ and its own secrets), and wire your gateway. [Running tool-approvals](docs/opera
 | [The Check API](docs/reference/check-api.md) | For any other gateway's hook |
 | [The wait tool and MCP Tasks](docs/reference/wait.md) | What the agent calls while a person decides |
 | [The desk and OIDC step-up](docs/reference/desk.md) | Where people answer, and what the identity provider must provide |
-| [Running tool-approvals](docs/operations.md) | Image, commands, Postgres, upgrades, replicas, health, stopping |
+| [The Answers API](docs/reference/answers-api.md) | How an integrated system reviews and answers, within its cap |
+| [Channels](docs/reference/channels.md) | Signed CloudEvents webhooks and Web Push: notices and audit sinks |
+| [The audit report](docs/reference/audit.md) | What operators read from the `admin` listener |
+| [The Helm chart](docs/reference/helm.md) | Every value, and what the chart renders |
+| [Running tool-approvals](docs/operations.md) | Compose, Helm, image, commands, Postgres, upgrades, replicas, health, stopping |
 
 ## Gateways
 
@@ -139,12 +160,12 @@ approved.
   surfaces, a minimum assurance level (from the identity provider's `acr` claim), a maximum sign-in age, an
   answer deadline and a use window.
 - **A floor** sets the weakest requirement a deployment accepts; the services refuse to start below it.
-- **Answer surfaces** are the built-in desk (OIDC sign-in with step-up, [reference](docs/reference/desk.md)) or,
-  from milestone 3, any integrated system holding its own credential, whose vouched assurance is capped per
-  surface.
-- **Channels** will tell approvers something is waiting (CloudEvents over signed webhooks, Web Push; planned,
-  milestone 3). A notice carries routing data and a link, never the call's arguments or the agent's words. Until
-  then the desk link (`<public_url>/approvals/<ticket>`) reaches approvers some other way.
+- **Answer surfaces** are the built-in desk (OIDC sign-in with step-up, [reference](docs/reference/desk.md)) or
+  any integrated system holding its own credential, answering through the
+  [Answers API](docs/reference/answers-api.md), whose vouched assurance is capped per surface.
+- **Channels** tell approvers something is waiting (CloudEvents over signed webhooks, Web Push;
+  [reference](docs/reference/channels.md)). A notice carries routing data and a link, never the call's arguments or
+  the agent's words.
 
 A requirement, as the [reference configuration](examples/config.yaml) writes it
 ([every section](docs/reference/configuration.md)):
@@ -202,7 +223,7 @@ Task has a reserved place in the contracts and needs no breaking change.
 | 0 | Package skeleton, import contracts, CI, release automation, the shared call parser, these docs | Built |
 | 1 | Tracer: Check API (gRPC and JSON), `ext_mcp` and minimal `ext_authz` mappings, rules-file policy, config with floor and registry, Approvals on Postgres, held wait and Wait Task create and get, minimal desk with step-up | Built |
 | 2 | Gateway breadth: gateways as optional adapters behind one port, full `ext_authz` classification, gateway-attribute policy, mTLS, inbound deadlines, one conformance suite for every adapter, the answer's moment re-checked at claim | Built |
-| 3 | Approvers' side: complete desk, Answers API for integrated surfaces, audit report, event delivery to channels, Web Push, retention, compose file and Helm chart. **The first deployable release** | Planned |
+| 3 | Approvers' side: complete desk, Answers API for integrated surfaces, audit report, event delivery to channels, Web Push, retention, compose file and Helm chart. **The first deployable release** | Built |
 | 4 | Wait Tasks complete: cancel, replacement, caps, time to live, long holds through Envoy | Planned |
 | 5 | AuthZEN and OPA policy adapters | Planned |
 

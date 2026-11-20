@@ -1,0 +1,47 @@
+{{- /*
+One NetworkPolicy per configured listener, admitting only networkPolicy.ingress.<service>.<listener> to that port.
+Approvals' requests listener also always admits this release's gate and wait pods. A listener with no peers gets a
+policy with no ingress rule: it isolates the pods and admits nothing to that port (an ingress rule with an empty
+`from` would admit everyone, so none is rendered).
+*/}}
+{{- if .Values.networkPolicy.enabled }}
+{{- $root := . }}
+{{- range $component := list "gate" "wait" "approvals" }}
+{{- $values := get $root.Values $component }}
+{{- if $values.enabled }}
+{{- $listeners := (include "tool-approvals.listeners" (dict "root" $root "service" $component) | fromYaml).items }}
+{{- $configured := get $root.Values.networkPolicy.ingress $component | default dict }}
+{{- range $listeners }}
+{{- $peers := get $configured .name | default list }}
+{{- if eq .name "requests" }}
+{{- range $caller := list "gate" "wait" }}
+{{- $peers = append $peers (dict "podSelector" (dict "matchLabels" (include "tool-approvals.selectorLabels" (dict "root" $root "component" $caller) | fromYaml))) }}
+{{- end }}
+{{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "tool-approvals.fullname" $root }}-{{ $component }}-{{ .name }}
+  labels:
+    {{- include "tool-approvals.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $component }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "tool-approvals.selectorLabels" (dict "root" $root "component" $component) | nindent 6 }}
+  policyTypes: [Ingress]
+  {{- if $peers }}
+  ingress:
+    - from:
+        {{- toYaml $peers | nindent 8 }}
+      ports:
+        - port: {{ .port }}
+          protocol: TCP
+  {{- else }}
+  ingress: []
+  {{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

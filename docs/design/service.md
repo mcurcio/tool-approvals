@@ -3,7 +3,8 @@
 The three services, what crosses between them, who owns which data, and how each fails. Read the
 [system design](system.md) first; the [module design](module.md) goes one level down.
 
-> **Status:** milestones 1 (the tracer) and 2 (gateway breadth) are built; the rest arrives in milestones 3-4
+> **Status:** milestones 1 (the tracer), 2 (gateway breadth) and 3 (the approvers' side, the compose file and the
+> Helm chart: the first deployable release) are built; the rest arrives in milestone 4
 > ([roadmap](system.md#delivery-milestones)). How to run what is built: [operations](../operations.md).
 
 ## Summary
@@ -70,7 +71,7 @@ The three services, what crosses between them, who owns which data, and how each
 The desk, Answers API, report and dispatcher stay in Approvals: each needs the Approval aggregate inside its
 commit, and a split would add an internal contract over the same table. Each service serves `/healthz` and
 `/readyz` on its own health listener; Approvals reports ready only while its `LISTEN` change feed is connected
-(waits on a replica without it do not wake until it reconnects). `:answers` and `:admin` arrive in milestone 3.
+(waits on a replica without it do not wake until it reconnects). The optional `:answers` (gRPC and JSON) and `:admin` listeners, built in milestone 3, serve the Answers API and the audit report.
 
 **The wait route.** The config's `wait_route` names the gateway server that is the wait server and the header that
 carries the attested principal to it. The gate's core recognises that route, one rule for every adapter: its

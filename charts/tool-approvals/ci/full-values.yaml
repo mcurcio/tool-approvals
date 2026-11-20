@@ -1,0 +1,142 @@
+# Every listener configured (the gate's Check API and both gateway hooks; Approvals' Answers API and admin), and a
+# NetworkPolicy per listener with example peers. Rendered by CI with `helm template` and kubeconform.
+secrets:
+  gate: tool-approvals-gate
+  wait: tool-approvals-wait
+  approvals: tool-approvals-approvals
+  migrate: tool-approvals-migrate
+tls:
+  gate: tool-approvals-gate-tls
+  wait: tool-approvals-wait-tls
+  approvals: tool-approvals-approvals-tls
+env:
+  approvals:
+    - name: NOTICES_SIGNING_SECRET
+      valueFrom: { secretKeyRef: { name: tool-approvals-channels, key: notices } }
+gate:
+  resources: { requests: { cpu: 50m, memory: 128Mi }, limits: { memory: 256Mi } }
+  podAnnotations: { example.com/team: approvals }
+  podLabels: { example.com/tier: guardrail }
+service:
+  annotations: { example.com/owner: approvals }
+networkPolicy:
+  enabled: true
+  ingress:
+    gate:
+      ext-mcp:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: gateway } }
+      ext-authz:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: gateway } }
+      check-api-grpc:
+        - ipBlock: { cidr: 192.0.2.0/24 }
+    wait:
+      mcp:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: gateway } }
+    approvals:
+      approvers:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: ingress } }
+      answers-grpc:
+        - ipBlock: { cidr: 198.51.100.0/24 }
+      admin:
+        - ipBlock: { cidr: 203.0.113.0/24 }
+config:
+  version: 1
+  registry:
+    - name: gateway-hook
+      kind: caller
+      credential: { bearer_sha256: 1f0b6c6e2a2d4b5f8e9a0c1d2e3f405162738495a6b7c8d9e0f1a2b3c4d5e6f7 }
+      grants: [check]
+    - name: gate
+      kind: caller
+      credential: { bearer_sha256: 2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f70819 }
+      grants: [requests.request, requests.claim]
+    - name: wait-server
+      kind: caller
+      credential: { bearer_sha256: 3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b }
+      grants: [requests.open_wait, requests.await_outcome]
+    - name: gateway-wait-route
+      kind: caller
+      credential: { bearer_sha256: 4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c }
+      grants: [wait.call]
+    - name: ticketing
+      kind: surface
+      credential: { bearer_sha256: 6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e }
+      grants: [answers.review, answers.answer]
+    - name: auditor
+      kind: operator
+      credential: { bearer_sha256: 708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f }
+      grants: [admin.audit]
+  assurance:
+    - { name: password, acr: ["1"] }
+    - { name: passkey, acr: ["2"] }
+  floor: { min_assurance: passkey, max_sign_in_age: 5m }
+  requirements:
+    reviewed:
+      approver_groups: [{ claim: groups, value: approvers }]
+      allowed_surfaces: [desk, ticketing]
+      min_assurance: passkey
+      max_sign_in_age: 3m
+      answer_deadline: 2h
+      use_window: 15m
+  surfaces:
+    - { name: desk, kind: native, cap: passkey, binds_digest: true }
+    - { name: ticketing, kind: integrated, cap: passkey }
+  wait_route: { server: approvals-wait, principal_header: x-approvals-principal }
+  gate:
+    listeners:
+      health: { host: 0.0.0.0, port: 8081 }
+    approvals:
+      address: dns:///tool-approvals-approvals-requests.approvals.svc.cluster.local:9443
+      ca: /etc/tool-approvals/tls/ca.pem
+      credential: { file: /etc/tool-approvals/secrets/approvals-bearer }
+    check_api:
+      grpc: { host: 0.0.0.0, port: 9443, tls: { cert: /etc/tool-approvals/tls/tls.crt, key: /etc/tool-approvals/tls/tls.key } }
+      json: { host: 0.0.0.0, port: 8443, tls: { cert: /etc/tool-approvals/tls/tls.crt, key: /etc/tool-approvals/tls/tls.key } }
+      exposed_wait_tool: approvals-wait_approval_wait
+    ext_mcp:
+      listener: { host: 0.0.0.0, port: 9444, tls: { cert: /etc/tool-approvals/tls/tls.crt, key: /etc/tool-approvals/tls/tls.key } }
+      principal_key: principal
+      exposed_wait_tool: approvals-wait_approval_wait
+    ext_authz:
+      listener: { host: 0.0.0.0, port: 9445, tls: { cert: /etc/tool-approvals/tls/tls.crt, key: /etc/tool-approvals/tls/tls.key } }
+      hook_timeout: 70s
+      principal_path: [envoy.filters.http.jwt_authn, payload, sub]
+      exposed_wait_tool: approval_wait
+    policy:
+      kind: rules
+      rules:
+        - { server: files, tool: "delete_*", require: reviewed }
+      default: none
+  wait:
+    listeners:
+      mcp: { host: 0.0.0.0, port: 8443, tls: { cert: /etc/tool-approvals/tls/tls.crt, key: /etc/tool-approvals/tls/tls.key } }
+      health: { host: 0.0.0.0, port: 8081 }
+    approvals:
+      address: dns:///tool-approvals-approvals-requests.approvals.svc.cluster.local:9443
+      ca: /etc/tool-approvals/tls/ca.pem
+      credential: { file: /etc/tool-approvals/secrets/approvals-bearer }
+  approvals:
+    listeners:
+      requests: { host: 0.0.0.0, port: 9443, tls: { cert: /etc/tool-approvals/tls/tls.crt, key: /etc/tool-approvals/tls/tls.key } }
+      approvers: { host: 0.0.0.0, port: 8080 }
+      health: { host: 0.0.0.0, port: 8081 }
+      answers_grpc: { host: 0.0.0.0, port: 9446, tls: { cert: /etc/tool-approvals/tls/tls.crt, key: /etc/tool-approvals/tls/tls.key } }
+      answers_json: { host: 0.0.0.0, port: 8446, tls: { cert: /etc/tool-approvals/tls/tls.crt, key: /etc/tool-approvals/tls/tls.key } }
+      admin: { host: 0.0.0.0, port: 8447, tls: { cert: /etc/tool-approvals/tls/tls.crt, key: /etc/tool-approvals/tls/tls.key } }
+    database:
+      dsn: { file: /etc/tool-approvals/secrets/dsn }
+    idp:
+      issuer: https://id.example.com
+      client_id: approvals-desk
+      client_secret: { file: /etc/tool-approvals/secrets/idp-client-secret }
+    desk:
+      surface: desk
+      public_url: https://approvals.example.com
+      session_key: { file: /etc/tool-approvals/secrets/desk-session-key }
+      form_key: { file: /etc/tool-approvals/secrets/desk-form-key }
+  channels:
+    - name: approver-notices
+      kind: webhook
+      url: https://hooks.example.com/approvals
+      signing_secret: { env: NOTICES_SIGNING_SECRET }
+      events: notices

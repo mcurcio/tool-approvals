@@ -1,5 +1,6 @@
-"""The migrations on Postgres 18: they create exactly the mapped schema, 0002 goes down and up again, and the rules
-refuse an approved row without an answer, a partial answer and another principal's wait."""
+"""The migrations on Postgres 18: they create exactly the mapped schema, 0002 and 0003 go down and up again, and the
+rules refuse an approved row without an answer, a partial answer, another principal's wait, a push subscription of
+the wrong shape, a negative cursor and a dead letter for no event."""
 
 import uuid
 from collections.abc import Iterator, Mapping
@@ -40,9 +41,17 @@ async def test_migrate_upgrades_an_empty_database_and_is_idempotent() -> None:
     await migrate(fresh)
     await migrate(fresh)
     with psycopg.connect(fresh) as connection:
-        assert connection.execute("SELECT version_num FROM alembic_version").fetchall() == [("0002_answered_at",)]
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchall() == [("0003_delivery",)]
         tables = connection.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY 1")
-        assert [row[0] for row in tables] == ["alembic_version", "approval_events", "approvals", "waits"]
+        assert [row[0] for row in tables] == [
+            "alembic_version",
+            "approval_events",
+            "approvals",
+            "channel_cursors",
+            "dead_letters",
+            "push_subscriptions",
+            "waits",
+        ]
 
 
 def _columns(connection: psycopg.Connection[Any]) -> list[str]:
@@ -159,3 +168,61 @@ def test_one_live_wait_per_principal_and_ticket(sql: psycopg.Connection[Any]) ->
     sql.execute(wait, (b"\x04" * 32,))
     with pytest.raises(errors.UniqueViolation):
         sql.execute(wait, (b"\x05" * 32,))
+
+
+_SUBSCRIPTION: dict[str, object] = {
+    "endpoint_hash": b"\x05" * 32,
+    "endpoint": "https://push.example.com/a",
+    "p256dh": b"\x04" + b"k" * 64,
+    "auth": b"a" * 16,
+    "approver": "subject-1",
+    "approver_groups": '[{"claim": "groups", "value": "approvers"}]',
+    "created_at": "2026-01-01T12:00:00Z",
+    "created_by": "test",
+    "updated_at": "2026-01-01T12:00:00Z",
+    "updated_by": "test",
+}
+
+
+def _insert_subscription(sql: psycopg.Connection[Any], columns: Mapping[str, object]) -> None:
+    row = {**_SUBSCRIPTION, **columns}
+    names = ", ".join(row)
+    values = ", ".join(f"%({name})s" for name in row)
+    sql.execute(f"INSERT INTO push_subscriptions ({names}) VALUES ({values})", row)  # noqa: S608 (the test's own)
+
+
+def test_a_well_formed_push_subscription_is_taken(sql: psycopg.Connection[Any]) -> None:
+    _insert_subscription(sql, {})
+
+
+@pytest.mark.parametrize(
+    "columns",
+    [
+        {"endpoint_hash": b"\x05" * 31},
+        {"p256dh": b"\x04" * 64},
+        {"auth": b"a" * 15},
+        {"endpoint": "https://push.example.com/" + "a" * 2048},
+    ],
+    ids=["endpoint_hash", "p256dh", "auth", "endpoint"],
+)
+def test_a_push_subscription_of_the_wrong_shape_is_refused(
+    sql: psycopg.Connection[Any], columns: Mapping[str, object]
+) -> None:
+    with pytest.raises(errors.CheckViolation):
+        _insert_subscription(sql, columns)
+
+
+def test_a_cursor_never_holds_a_negative_event_id(sql: psycopg.Connection[Any]) -> None:
+    with pytest.raises(errors.CheckViolation):
+        sql.execute(
+            "INSERT INTO channel_cursors (channel, last_event_id, created_at, created_by, updated_at, updated_by) "
+            "VALUES ('hooks', -1, now(), 'test', now(), 'test')"
+        )
+
+
+def test_a_dead_letter_names_an_existing_event(sql: psycopg.Connection[Any]) -> None:
+    with pytest.raises(errors.ForeignKeyViolation):
+        sql.execute(
+            "INSERT INTO dead_letters (channel, event_id, reason, created_at, created_by, updated_at, updated_by) "
+            "VALUES ('hooks', 999999999, 'http 400', now(), 'test', now(), 'test')"
+        )

@@ -1,0 +1,76 @@
+# The values CI installs on kind (tests/chart/kind-install.sh), in the namespace tool-approvals, against a Postgres
+# in the cluster. The script creates every Secret named here, and replaces config.registry with the hashes of the
+# bearers it issues (the hashes below only let this file render on its own). The image comes from --set.
+fullnameOverride: tool-approvals
+secrets:
+  gate: tool-approvals-gate
+  wait: tool-approvals-wait
+  approvals: tool-approvals-approvals
+  migrate: tool-approvals-migrate
+tls:
+  gate: tool-approvals-tls
+  wait: tool-approvals-tls
+  approvals: tool-approvals-tls
+# kind's network has no policy guarantees for kubelet probes; full-values.yaml and minimal-values.yaml render them.
+networkPolicy:
+  enabled: false
+config:
+  version: 1
+  registry:
+    - name: gate
+      kind: caller
+      credential: { bearer_sha256: 2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f70819 }
+      grants: [requests.request, requests.claim]
+    - name: wait-server
+      kind: caller
+      credential: { bearer_sha256: 3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b }
+      grants: [requests.open_wait, requests.await_outcome]
+  assurance:
+    - { name: passkey, acr: ["2"] }
+  floor: { min_assurance: passkey, max_sign_in_age: 5m }
+  requirements:
+    reviewed:
+      approver_groups: [{ claim: groups, value: approvers }]
+      allowed_surfaces: [desk]
+      min_assurance: passkey
+      max_sign_in_age: 3m
+      answer_deadline: 2h
+      use_window: 15m
+  surfaces:
+    - { name: desk, kind: native, cap: passkey }
+  wait_route: { server: approvals-wait, principal_header: x-approvals-principal }
+  gate:
+    listeners:
+      health: { host: 0.0.0.0, port: 8081 }
+    approvals:
+      address: dns:///tool-approvals-approvals-requests.tool-approvals.svc.cluster.local:9443
+      ca: /etc/tool-approvals/tls/ca.pem
+      credential: { file: /etc/tool-approvals/secrets/approvals-bearer }
+    check_api:
+      grpc: { host: 0.0.0.0, port: 9443, tls: { cert: /etc/tool-approvals/tls/tls.crt, key: /etc/tool-approvals/tls/tls.key } }
+      exposed_wait_tool: approvals-wait_approval_wait
+    policy: { kind: rules, default: reviewed }
+  wait:
+    listeners:
+      mcp: { host: 0.0.0.0, port: 8443, tls: { cert: /etc/tool-approvals/tls/tls.crt, key: /etc/tool-approvals/tls/tls.key } }
+      health: { host: 0.0.0.0, port: 8081 }
+    approvals:
+      address: dns:///tool-approvals-approvals-requests.tool-approvals.svc.cluster.local:9443
+      ca: /etc/tool-approvals/tls/ca.pem
+      credential: { file: /etc/tool-approvals/secrets/approvals-bearer }
+  approvals:
+    listeners:
+      requests: { host: 0.0.0.0, port: 9443, tls: { cert: /etc/tool-approvals/tls/tls.crt, key: /etc/tool-approvals/tls/tls.key } }
+      approvers: { host: 0.0.0.0, port: 8080 }
+      health: { host: 0.0.0.0, port: 8081 }
+    database:
+      dsn: { file: /etc/tool-approvals/secrets/dsn }
+    idp:
+      issuer: https://id.example.com
+      client_id: approvals-desk
+      client_secret: { file: /etc/tool-approvals/secrets/idp-client-secret }
+    desk:
+      surface: desk
+      public_url: https://approvals.example.com
+      session_key: { file: /etc/tool-approvals/secrets/desk-session-key }
+      form_key: { file: /etc/tool-approvals/secrets/desk-form-key }

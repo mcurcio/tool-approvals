@@ -32,5 +32,7 @@ def empty_database() -> str:
     """The worker's database with every row deleted (the schema kept); its DSN."""
     dsn = postgres_dsn()
     with psycopg.connect(dsn, autocommit=True) as connection:
-        connection.execute("TRUNCATE approvals, waits, approval_events")
+        connection.execute(
+            "TRUNCATE approvals, waits, approval_events, channel_cursors, dead_letters, push_subscriptions"
+        )
     return dsn

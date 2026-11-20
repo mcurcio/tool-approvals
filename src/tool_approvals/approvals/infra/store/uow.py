@@ -10,14 +10,14 @@ transaction commits) and commits.
 """
 
 import functools
-from collections.abc import AsyncIterator, Callable, Coroutine, Iterator
+from collections.abc import AsyncIterator, Callable, Coroutine, Iterator, Mapping
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timedelta
 from typing import Any, Final
 
 import psycopg.errors
 import sqlalchemy.exc
-from sqlalchemy import func, insert, select, text
+from sqlalchemy import and_, func, insert, or_, select, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.exc import TimeoutError as PoolTimeout
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -26,6 +26,7 @@ from sqlalchemy.orm.exc import StaleDataError
 from tool_approvals.approvals.app.ports import (
     ApprovalRepository,
     ConcurrentChange,
+    PushSubscriptionRepository,
     StoreUnavailable,
     UnitOfWork,
     UnitOfWorkFactory,
@@ -33,6 +34,7 @@ from tool_approvals.approvals.app.ports import (
 from tool_approvals.approvals.domain.approval import Actor, Approval, State
 from tool_approvals.approvals.infra.store.locks import events_lock, principal_lock
 from tool_approvals.approvals.infra.store.mapping import CHANGED, DELETED, STAMP, StoreSession
+from tool_approvals.approvals.infra.store.push import SqlPushSubscriptions
 from tool_approvals.approvals.infra.store.tables import (
     NOTIFY_CHANNEL,
     ONE_LIVE_INDEXES,
@@ -40,7 +42,8 @@ from tool_approvals.approvals.infra.store.tables import (
     approvals,
     waits,
 )
-from tool_approvals.kernel.names import Fingerprint, Principal, Ticket
+from tool_approvals.kernel.names import Fingerprint, Principal, RequirementName, Ticket
+from tool_approvals.kernel.requirements import GroupRef
 from tool_approvals.serving.deadlines import remaining
 
 _LIVE: Final = (State.WAITING, State.APPROVED)
@@ -148,6 +151,7 @@ class _SqlUnitOfWork:
         self._now = now
         self._lock_timeout = lock_timeout
         self._approvals = _SqlApprovals(session)
+        self._push_subscriptions = SqlPushSubscriptions(session)
 
     @property
     def by(self) -> Actor:
@@ -160,6 +164,10 @@ class _SqlUnitOfWork:
     @property
     def approvals(self) -> ApprovalRepository:
         return self._approvals
+
+    @property
+    def push_subscriptions(self) -> PushSubscriptionRepository:
+        return self._push_subscriptions
 
     @_translating
     async def lock_principal(self, principal: Principal) -> None:
@@ -261,6 +269,36 @@ class _SqlApprovals:
         await self._session.flush()
         moment: datetime | None = (await self._session.execute(select(func.min(approvals.c.next_due_at)))).scalar()
         return moment
+
+    @_translating
+    async def waiting_for(
+        self, groups_by_requirement: Mapping[RequirementName, frozenset[GroupRef]], limit: int
+    ) -> list[Approval]:
+        # Per requirement name: the snapshot's approver_groups (a JSONB array of {"claim", "value"}) contains one
+        # of that name's groups.
+        matches = [
+            and_(
+                approvals.c.requirement_name == name,
+                or_(
+                    *(
+                        approvals.c.requirement["approver_groups"].contains([{"claim": g.claim, "value": g.value}])
+                        for g in sorted(groups)
+                    )
+                ),
+            )
+            for name, groups in sorted(groups_by_requirement.items())
+            if groups
+        ]
+        if not matches:
+            return []
+        query = (
+            select(Approval)
+            .where(approvals.c.state == State.WAITING, or_(*matches))
+            .order_by(approvals.c.answer_deadline, approvals.c.ticket)
+            .limit(limit)
+        )
+        await self._session.flush()
+        return list((await self._session.scalars(query)).all())
 
     def add(self, approval: Approval) -> None:
         self._session.add(approval)

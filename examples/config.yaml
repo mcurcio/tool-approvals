@@ -27,6 +27,14 @@ registry:
     kind: caller
     credential: { bearer_sha256: 4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c }
     grants: [wait.call]
+  - name: ticketing # an integrated answer surface: named as its `surfaces` entry, answering through the Answers API
+    kind: surface
+    credential: { bearer_sha256: 6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e }
+    grants: [answers.review, answers.answer]
+  - name: auditor # an operator reading the audit report
+    kind: operator
+    credential: { bearer_sha256: 708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f }
+    grants: [admin.audit]
 
 # Assurance levels, weakest first, each with the IdP `acr` values that vouch it.
 assurance:
@@ -44,19 +52,23 @@ floor:
 requirements:
   reviewed:
     approver_groups: [{ claim: groups, value: approvers }] # any one qualifies
-    allowed_surfaces: [desk]
+    allowed_surfaces: [desk, ticketing]
     min_assurance: passkey
     max_sign_in_age: 3m # the approver signed in at most this long before answering
     answer_deadline: 2h # from the request to the latest answer
     use_window: 15m # from the yes to the latest claim
 
-# Where people answer, and the highest level each may vouch. A native surface always binds the digest of what the
-# approver was shown.
+# Where people answer, and the highest level each may vouch. A native surface (the desk) always binds the digest of
+# what the approver was shown; an integrated surface answers through the Answers API as its registry entry.
 surfaces:
   - name: desk
     kind: native
     cap: passkey
     binds_digest: true
+  - name: ticketing
+    kind: integrated
+    cap: passkey # the highest level it may vouch; a vouched level above it is refused
+    binds_digest: true # default; false lets it answer without the digest of what it showed
 
 # The gateway's route to the wait server, and the header that carries the attested principal on it.
 wait_route:
@@ -119,6 +131,9 @@ approvals: # `approvals migrate` reads only approvals.database
     requests: { host: 0.0.0.0, port: 9443, tls: { cert: /etc/tool-approvals/approvals.pem, key: /etc/tool-approvals/approvals-key.pem } }
     approvers: { host: 0.0.0.0, port: 8080 } # the desk, behind a TLS-terminating proxy at public_url
     health: { host: 0.0.0.0, port: 8081 }
+    answers_grpc: { host: 0.0.0.0, port: 9446, tls: { cert: /etc/tool-approvals/approvals.pem, key: /etc/tool-approvals/approvals-key.pem } }
+    answers_json: { host: 0.0.0.0, port: 8446, tls: { cert: /etc/tool-approvals/approvals.pem, key: /etc/tool-approvals/approvals-key.pem } }
+    admin: { host: 0.0.0.0, port: 8447, tls: { cert: /etc/tool-approvals/approvals.pem, key: /etc/tool-approvals/approvals-key.pem } }
   drain: 5s # default
   database:
     dsn: { file: /run/secrets/approvals-dsn } # postgresql://approvals@db.example.com/approvals, direct, no pooler
@@ -140,3 +155,26 @@ approvals: # `approvals migrate` reads only approvals.database
     public_url: https://approvals.example.com
     session_key: { file: /run/secrets/desk-session-key } # at least 32 bytes
     form_key: { file: /run/secrets/desk-form-key } # at least 32 bytes, separate from the session key
+  delivery:
+    attempt_timeout: 5s # default; one webhook or push attempt
+    give_up_after: 24h # default; a paused channel dead-letters an event older than this (retention is at least it)
+
+# Where Approvals sends events: CloudEvents over signed webhooks (Standard Webhooks), and Web Push. A notice carries
+# routing data and the desk link, never the call's arguments or the agent's words.
+channels:
+  - name: approver-notices
+    kind: webhook
+    url: https://hooks.example.com/approvals
+    signing_secret: { env: NOTICES_SIGNING_SECRET } # whsec_ and base64 of the key
+    events: notices # approval.waiting and approval.resolved
+  - name: audit-archive
+    kind: webhook
+    url: https://audit.example.com/ingest
+    signing_secret: { env: AUDIT_SIGNING_SECRET }
+    events: audit # an audit sink: every event, approval.answered included
+  - name: browser-push
+    kind: web_push
+    vapid_private_key: { env: VAPID_PRIVATE_KEY } # a PEM P-256 private key
+    vapid_subject: mailto:approvers@example.com
+    push_origins: [https://push.example.com] # a subscription's endpoint must start with one of these
+    subscription_max_age: 30d # default; notices only this long after a browser's last registration

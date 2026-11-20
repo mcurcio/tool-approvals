@@ -18,6 +18,7 @@ from tool_approvals.config import checks
 from tool_approvals.config.errors import ConfigError
 from tool_approvals.config.sections import (
     Approvals,
+    Channel,
     FloorSection,
     Gate,
     Level,
@@ -50,6 +51,7 @@ class ConfigFile(BaseModel):
     gate: Gate | None = None
     wait: Wait | None = None
     approvals: Approvals | None = None
+    channels: tuple[Channel, ...] | None = None  # read by `approvals serve` only
 
     def scale(self) -> AssuranceScale:
         """The assurance scale, weakest first; empty when the file has no `assurance`."""

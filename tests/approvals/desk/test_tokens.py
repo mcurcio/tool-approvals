@@ -4,7 +4,7 @@ import base64
 import hashlib
 import hmac
 
-from tool_approvals.approvals.edges.desk.tokens import form_token, form_token_ok
+from tool_approvals.approvals.edges.desk.tokens import form_token, form_token_ok, push_token, push_token_ok
 from tool_approvals.kernel.names import Digest, Ticket
 
 KEY = b"k" * 32
@@ -37,3 +37,14 @@ def test_a_token_that_is_not_ascii_or_is_empty_is_refused_without_raising() -> N
     token = form_token(KEY, SID, TICKET, DIGEST)
     for wrong in ("", token + "é", "é" * len(token), token[:-1], token + "\udc80"):
         assert not form_token_ok(KEY, SID, TICKET, DIGEST, wrong)
+
+
+def test_the_push_token_is_hmac_sha256_over_the_sid_and_the_word_push() -> None:
+    mac = hmac.new(KEY, _field(SID.encode()) + _field(b"push"), hashlib.sha256).digest()
+    token = push_token(KEY, SID)
+    assert token == base64.urlsafe_b64encode(mac).decode()
+    assert push_token_ok(KEY, SID, token)
+    assert not push_token_ok(b"x" * 32, SID, token)
+    assert not push_token_ok(KEY, "session-2", token)
+    for wrong in ("", token + "é", token[:-1], form_token(KEY, SID, TICKET, DIGEST)):
+        assert not push_token_ok(KEY, SID, wrong)

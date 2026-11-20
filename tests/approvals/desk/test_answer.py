@@ -14,7 +14,7 @@ from tests.approvals.domain.examples import AGENT, SERVER, WAITER, call_ref
 from tests.fixtures.oidc_provider import hidden_fields
 from tool_approvals.approvals.app.answers import AnswerService, ApprovalDetail
 from tool_approvals.approvals.app.ports import StoreUnavailable
-from tool_approvals.approvals.edges.desk.app import CONTENT_SECURITY_POLICY, desk_app
+from tool_approvals.approvals.edges.desk.app import CONTENT_SECURITY_POLICY, PageKind, desk_app
 from tool_approvals.approvals.edges.desk.pages import visible
 from tool_approvals.config.views import IdpView
 from tool_approvals.kernel.names import Ticket
@@ -153,7 +153,7 @@ def test_a_combining_mark_with_nothing_visible_to_carry_it_is_escaped() -> None:
 
 
 async def test_every_response_carries_the_content_security_policy(desk: Desk) -> None:
-    assert POLICY == CONTENT_SECURITY_POLICY
+    assert CONTENT_SECURITY_POLICY[PageKind.PLAIN] == POLICY
     ticket = await desk.world.ticket()
     person = desk.person()
     assert await person.answer(ticket, "approve") == 303

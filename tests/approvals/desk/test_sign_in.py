@@ -10,6 +10,8 @@ import itsdangerous
 import pytest
 
 from tests.approvals.desk.conftest import CLIENT_ID, DESK_URL, SESSION_MAX_AGE, Desk
+from tests.approvals.desk.driver import DeskPerson
+from tests.approvals.desk.memory_desk import memory_desk
 from tests.approvals.domain.examples import HUMAN, call_ref
 from tests.fixtures.oidc_provider import SignInScript
 from tool_approvals.approvals.edges.desk.app import SESSION_COOKIE
@@ -174,3 +176,51 @@ async def test_a_callback_without_a_sign_in_under_way_is_refused(desk: Desk) -> 
     person = desk.person()
     response = await person.browser.send("GET", f"{DESK_URL}/callback?code=x&state=y")
     assert response.status_code == 400
+
+
+# A sign-in already held is never weakened by a sign-in the browser did not need (login CSRF): over the in-memory
+# store.
+
+
+def _level(person: DeskPerson) -> object:
+    session = _session(f"{SESSION_COOKIE}={person.browser.cookies[SESSION_COOKIE]}")
+    sign_in = session["sign_in"]
+    assert isinstance(sign_in, dict)
+    return sign_in["level"]
+
+
+@pytest.mark.parametrize(("page", "path"), [("list", "/approvals"), ("push", "/push")])
+async def test_a_signed_in_browser_sent_to_sign_in_for_a_page_goes_straight_to_it(page: str, path: str) -> None:
+    async with memory_desk() as desk:
+        ticket = await desk.ticket()
+        person = desk.person()
+        assert (await person.open(ticket, SignInScript(acr=PASSKEY_ACR))).status_code == 200
+        asked = len(desk.idp.authorizations)
+        response = await person.browser.send("GET", f"{DESK_URL}/login?next={page}")
+        assert (response.status_code, response.headers["location"]) == (303, f"{DESK_URL}{path}")
+        assert len(desk.idp.authorizations) == asked  # no new sign-in started
+        assert _level(person) == "passkey"
+
+
+async def test_a_weaker_sign_in_never_replaces_a_fresh_stronger_one() -> None:
+    async with memory_desk() as desk:
+        ticket = await desk.ticket()
+        person = desk.person()
+        assert (await person.open(ticket, SignInScript(acr=PASSKEY_ACR))).status_code == 200
+        # Sent to sign in again, the provider vouches a weaker sign-in (its own session, say): the stronger is kept.
+        desk.idp.script(SignInScript(acr=PASSWORD_ACR))
+        page = await person.browser.visit(f"{DESK_URL}/login?ticket={ticket}")
+        assert (page.status_code, str(page.url)) == (200, person.review_url(ticket))
+        assert _level(person) == "passkey"
+
+
+async def test_a_weaker_sign_in_replaces_a_stronger_one_no_longer_fresh() -> None:
+    async with memory_desk() as desk:
+        person = desk.person()
+        desk.idp.script(SignInScript(acr=PASSKEY_ACR, auth_age=SESSION_MAX_AGE + timedelta(seconds=30)))
+        assert (await person.browser.visit(f"{DESK_URL}/push")).status_code == 200
+        assert _level(person) == "passkey"
+        ticket = await desk.ticket()
+        page = await person.open(ticket, SignInScript(acr=OTP_ACR))
+        assert (page.status_code, str(page.url)) == (200, person.review_url(ticket))
+        assert _level(person) == "otp"

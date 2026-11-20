@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block main %}
+<h1>{{ title }}</h1>
+{% if rows %}
+<table>
+<thead><tr><th>Approval</th><th>Agent</th><th>Server</th><th>Tool</th><th>Requirement</th><th>Answer by</th></tr></thead>
+<tbody>
+{% for row in rows %}
+<tr>
+<td><a href="{{ review_base }}/{{ row.ticket }}">Review</a></td>
+<td><code>{{ row.principal | visible }}</code></td>
+<td><code>{{ row.server | visible }}</code></td>
+<td><code>{{ row.tool | visible }}</code></td>
+<td>{{ row.requirement | visible }}</td>
+<td>{{ row.answer_deadline.isoformat(timespec="seconds") }}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+{% else %}
+<p>Nothing is waiting for you.</p>
+{% endif %}
+{% if push_page %}
+<p><a href="{{ push_page }}">Notices in this browser</a></p>
+{% endif %}
+{% endblock %}

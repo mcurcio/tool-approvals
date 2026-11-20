@@ -1,0 +1,19 @@
+{{- $root := . }}
+{{- range $component := list "gate" "wait" "approvals" }}
+{{- $values := get $root.Values $component }}
+{{- if and $values.enabled $values.podDisruptionBudget }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "tool-approvals.fullname" $root }}-{{ $component }}
+  labels:
+    {{- include "tool-approvals.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $component }}
+spec:
+  {{- toYaml $values.podDisruptionBudget | nindent 2 }}
+  selector:
+    matchLabels:
+      {{- include "tool-approvals.selectorLabels" (dict "root" $root "component" $component) | nindent 6 }}
+{{- end }}
+{{- end }}

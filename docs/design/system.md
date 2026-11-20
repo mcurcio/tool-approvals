@@ -4,8 +4,8 @@ The whole system: what problem it solves, its parts, the public contracts and ho
 [service design](service.md) goes one level down (the three services, what crosses between them, state and
 failure); the [module design](module.md) goes one further (packages, import rules, storage mechanics).
 
-> **Status:** milestones 0, 1 and 2 are built; nothing here is deployable until milestone 3
-> ([roadmap](#delivery-milestones)). The [reference pages](../reference/configuration.md) document what is built.
+> **Status:** milestones 0 to 3 are built, and milestone 3 is the first deployable release: a compose file and a
+> Helm chart released with the image ([operations](../operations.md), [roadmap](#delivery-milestones)). The [reference pages](../reference/configuration.md) document what is built.
 > Where code and these pages disagree, one of them has a bug: please open an issue.
 
 ## Summary
@@ -314,7 +314,7 @@ with a ticket; a test client declaring Tasks calls `approval_wait` and gets a Wa
 an `acr` is refused; one at the right strength approves; `tasks/get` completes with `approved`; the repeat runs
 once. The same refusal and claim through Envoy's `ext_authz` and through a plain HTTP Check API caller. The
 assurance-cap rule for integrated surfaces is proven inside Approvals against real Postgres; its end-to-end path
-needs the Answers API (milestone 3).
+runs through the Answers API (milestone 3), in the e2e tracer.
 
 **Gateway breadth (milestone 2):** every adapter builds the same gateway context; the rules file matches gateway
 attributes; Envoy's requests are classified by one pure table; a gateway hook may authenticate with mTLS; an

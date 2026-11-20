@@ -1,0 +1,386 @@
+"""Event delivery: committed approval events to each configured channel, at least once and in event-id order per
+channel (a transactional outbox read by competing consumers).
+
+Per channel, every replica competes for the channel's lock (`ChannelLocks`); the holder reads the events after
+the channel's cursor in id order, sends them one at a time, and moves the cursor through the lock's own
+connection. Outcomes of one send:
+
+- delivered (2xx): the cursor moves past the event and any pause ends;
+- retry (a timeout, a connection error, 5xx, 429) and misconfigured (401, 403, 404; logged as an ERROR naming the
+  channel and status): the channel pauses with capped backoff (BACKOFF_FIRST, doubling, to BACKOFF_CAP), keeping
+  its position; the pause is the one timer, since nothing announces a receiver's return;
+- rejected (any other 4xx): the event is dead-lettered for the channel and delivery moves on.
+
+Once a channel has been failing (paused since its last success) for longer than `give_up_after`, an event older
+than `give_up_after` is dead-lettered instead of sent. The horizon counts the channel's own failing time, so one
+short pause never gives up on old events (a backlog after an outage of this service, a new channel over old
+events). An event a
+channel is not sent (a `notices` channel gets only approval.waiting and approval.resolved) moves its cursor
+without a send. A holder wakes on the change feed (`watch_all`) and on its pause timer.
+
+The Web Push channel is one `PushChannel`: one cursor, each event sent to every subscription its approver groups
+route to, with an outcome per subscription (one subscription's failure never decides the others').
+"""
+
+import logging
+from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from enum import StrEnum
+from typing import Final, Protocol
+
+from tool_approvals.approvals.app.attempts import attempt
+from tool_approvals.approvals.app.ports import (
+    ChangeFeed,
+    ChannelLocks,
+    ChannelLog,
+    ChannelPosition,
+    CommittedEvent,
+    UnitOfWork,
+    UnitOfWorkFactory,
+)
+from tool_approvals.approvals.app.records import Audience, event_type
+from tool_approvals.approvals.domain.approval import Actor, ActorKind
+from tool_approvals.approvals.domain.push import PushSubscription
+from tool_approvals.kernel.names import CallerName
+from tool_approvals.kernel.timeouts import Stopped, StopSignal, Timeouts
+
+BACKOFF_FIRST: Final = timedelta(seconds=1)
+BACKOFF_CAP: Final = timedelta(minutes=5)
+EVENT_BATCH: Final = 100  # events read per query; a full batch is followed by the next at once
+
+_log: Final = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class Delivered:
+    """2xx: the receiver has the event."""
+
+
+@dataclass(frozen=True, slots=True)
+class Retry:
+    """A timeout, a connection error, 5xx or 429: pause and send the same event again."""
+
+    reason: str  # e.g. "http 503", "timeout"
+
+
+@dataclass(frozen=True, slots=True)
+class Misconfigured:
+    """401, 403 or 404: the channel's configuration is wrong; pause like Retry, and log an ERROR."""
+
+    reason: str  # e.g. "http 401"
+
+
+@dataclass(frozen=True, slots=True)
+class Rejected:
+    """Any other 4xx: the receiver will never take this event; dead-letter it and move on."""
+
+    reason: str  # e.g. "http 400"
+
+
+type SendOutcome = Delivered | Retry | Misconfigured | Rejected
+
+
+@dataclass(frozen=True, slots=True)
+class Gone:
+    """404 or 410 from a push service: the subscription no longer exists; delete it (it counts as delivered)."""
+
+
+class ChannelSender(Protocol):
+    """One channel's wire. Each attempt is bounded by the configured attempt timeout (a timeout is Retry). A send
+    made of several attempts calls `moved` after each, so the liveness check sees it progress."""
+
+    @property
+    def audience(self) -> Audience: ...
+
+    async def send(self, event: CommittedEvent, *, moved: Callable[[], None] | None = None) -> SendOutcome: ...
+
+
+class PushService(Protocol):
+    """Web Push to one subscription. Each attempt is bounded by the configured attempt timeout (a timeout is
+    Retry)."""
+
+    async def push(self, subscription: PushSubscription, event: CommittedEvent) -> SendOutcome | Gone: ...
+
+
+@dataclass(frozen=True, slots=True)
+class Backoff:
+    """The pause after the n-th failure in a row: `first`, doubling, at most `cap`."""
+
+    first: timedelta = BACKOFF_FIRST
+    cap: timedelta = BACKOFF_CAP
+
+    def after(self, failures: int) -> timedelta:
+        delay = self.first
+        for _ in range(1, failures):
+            delay *= 2
+            if delay >= self.cap:
+                return self.cap
+        return min(delay, self.cap)
+
+
+class LoopState(StrEnum):
+    WAITING_FOR_LOCK = "waiting-for-lock"  # another replica delivers this channel
+    IDLE = "idle"  # nothing pending: waiting on the change feed
+    PAUSED = "paused"  # waiting out a pause
+    WORKING = "working"  # events pending, being delivered
+
+
+@dataclass(slots=True)
+class Progress:
+    """What the liveness probe reads: the loop's state and the monotonic time it last made progress."""
+
+    monotonic: Callable[[], float]
+    state: LoopState = LoopState.WAITING_FOR_LOCK
+    last_progress: float = field(default=0.0)
+
+    def enter(self, state: LoopState) -> None:
+        self.state = state
+        self.last_progress = self.monotonic()
+
+    def moved(self) -> None:
+        self.last_progress = self.monotonic()
+
+    def stalled(self, limit: timedelta) -> bool:
+        """Holding the lock with events pending, not paused, and no progress for longer than `limit`."""
+        if self.state is not LoopState.WORKING:
+            return False
+        return self.monotonic() - self.last_progress > limit.total_seconds()
+
+
+def stall_limit(attempt_timeout: timedelta, backoff: Backoff) -> timedelta:
+    """How long a working loop may go without progress before the process is not live: three attempts and the
+    longest pause."""
+    return 3 * attempt_timeout + backoff.cap
+
+
+class ChannelDelivery:
+    """Delivers one channel's events while this replica holds its lock."""
+
+    def __init__(  # noqa: PLR0913 (each a separate port or setting)
+        self,
+        channel: str,
+        locks: ChannelLocks,
+        sender: ChannelSender,
+        *,
+        feed: ChangeFeed,
+        timeouts: Timeouts,
+        give_up_after: timedelta,
+        monotonic: Callable[[], float],
+        backoff: Backoff = Backoff(),
+        batch: int = EVENT_BATCH,
+    ) -> None:
+        self.channel: Final = channel
+        self._locks = locks
+        self._sender = sender
+        self._feed = feed
+        self._timeouts = timeouts
+        self._give_up_after = give_up_after
+        self._backoff = backoff
+        self._batch = batch
+        self.progress: Final = Progress(monotonic)
+        self.holds = 0  # how many times this replica has taken the channel's lock
+
+    async def run(self, stop: StopSignal) -> None:
+        """Until `stop`: wait for the channel's lock, then deliver while holding it. A lost store connection
+        propagates (the caller starts it again); the lock goes with the connection."""
+        self.progress.enter(LoopState.WAITING_FOR_LOCK)
+        try:
+            await self._timeouts.run(None, lambda: self._hold(stop), stop)
+        finally:
+            self.progress.enter(LoopState.WAITING_FOR_LOCK)
+
+    async def _hold(self, stop: StopSignal) -> None:
+        async with self._locks.hold(self.channel) as log:
+            self.holds += 1
+            await self._deliver(log, stop)
+
+    async def _deliver(self, log: ChannelLog, stop: StopSignal) -> None:
+        failures = 0
+        while not stop.is_set():
+            async with self._feed.watch_all() as changes:  # subscribed before the first read: no change is missed
+                while True:
+                    position = await log.position()
+                    paused_until = position.paused_until
+                    if paused_until is not None and position.now < paused_until:
+                        self.progress.enter(LoopState.PAUSED)
+                        if isinstance(await self._sleep(paused_until - position.now, stop), Stopped):
+                            return
+                        continue
+                    events = await log.events_after(position.last_event_id, self._batch)
+                    if not events:
+                        self.progress.enter(LoopState.IDLE)
+                        woken = await self._timeouts.run(None, lambda: _changed(changes), stop)
+                        if isinstance(woken, Stopped):
+                            return
+                        if woken is False:
+                            break  # the feed was lost: subscribe again
+                        continue
+                    self.progress.enter(LoopState.WORKING)
+                    give_up_before = self._give_up_before(position)
+                    outcome = await self._batch_of(log, events, give_up_before, failures, stop)
+                    if outcome is None:
+                        return
+                    failures = outcome
+
+    def _give_up_before(self, position: ChannelPosition) -> datetime | None:
+        """Events created before this are dead-lettered unsent: set only once the channel has been failing for
+        longer than `give_up_after`."""
+        since = position.failing_since
+        if position.paused_until is None or since is None or position.now - since <= self._give_up_after:
+            return None
+        return position.now - self._give_up_after
+
+    async def _batch_of(
+        self,
+        log: ChannelLog,
+        events: list[CommittedEvent],
+        give_up_before: datetime | None,
+        failures: int,
+        stop: StopSignal,
+    ) -> int | None:
+        """Deliver `events` in order until one pauses the channel; the failures in a row after it, or None when
+        stopped. `give_up_before` is set once the channel has failed past the horizon: an event created before it is
+        dead-lettered."""
+        skipped: int | None = None  # the last event not sent; a later cursor write covers it
+        for event in events:
+            if event_type(self._sender.audience, event.kind) is None:
+                skipped = event.id
+                continue
+            skipped = None
+            if give_up_before is not None and event.created_at < give_up_before:
+                reason = f"gave up after {_duration(self._give_up_after)}"
+                await log.dead_letter(event.id, reason)
+                _log.error("delivery %s: event %d dead-lettered: %s", self.channel, event.id, reason)
+                self.progress.moved()
+                continue
+            outcome = await self._timeouts.run(None, _sending(self._sender, event, self.progress.moved), stop)
+            match outcome:
+                case Stopped():
+                    return None
+                case Delivered():
+                    await log.advance(event.id)
+                    failures = 0
+                    give_up_before = None
+                case Rejected(reason):
+                    await log.dead_letter(event.id, reason)
+                    _log.error("delivery %s: event %d dead-lettered: %s", self.channel, event.id, reason)
+                case Retry(reason) | Misconfigured(reason):
+                    failures += 1
+                    delay = self._backoff.after(failures)
+                    await log.pause(delay, reason)
+                    if isinstance(outcome, Misconfigured):
+                        _log.error(
+                            "delivery %s: %s, check the channel's configuration; paused for %s",
+                            self.channel,
+                            reason,
+                            delay,
+                        )
+                    else:
+                        _log.warning("delivery %s: %s; paused for %s", self.channel, reason, delay)
+                    self.progress.moved()
+                    return failures
+            self.progress.moved()
+        if skipped is not None:
+            await log.skip(skipped)
+            self.progress.moved()
+        return failures
+
+    async def _sleep(self, delay: timedelta, stop: StopSignal) -> object:
+        return await self._timeouts.run(delay, stop.wait, stop)
+
+
+class PushChannel:
+    """The Web Push channel as one `ChannelSender`: each event goes to every subscription its approver groups
+    route to and that was last registered within `max_age` (by the database's clock), each subscription with its
+    own outcome. A subscription routes on the groups its approver held when registering it, so it lapses: an
+    approver keeps notices by registering again (the desk's push page does on each visit), and one removed from a
+    group stops getting its notices within `max_age`.
+
+    - Delivered: that subscription has the event.
+    - Gone (404, 410): the subscription is deleted, acting as Actor(DELIVERY, None, <channel>); it counts as
+      delivered.
+    - Rejected: that subscription alone loses the event (an ERROR log naming the channel, the event and the
+      status, never the endpoint); the others still get it, and the event is not dead-lettered for the channel.
+    - Retry or Misconfigured: the others still get the event; the send then answers that outcome (Misconfigured
+      first), so the channel pauses, and the next send of the same event goes only to the subscriptions still owed
+      it. That memory is this replica's: after a takeover every routed subscription gets the event again (at least
+      once).
+    """
+
+    audience: Final = Audience.NOTICES
+
+    def __init__(self, channel: str, uow: UnitOfWorkFactory, service: PushService, max_age: timedelta) -> None:
+        self._channel = channel
+        self._uow = uow
+        self._service = service
+        self._max_age = max_age
+        # The channel's name, as the registry caller slot of the actor: "delivery via <channel>".
+        self._actor: Final = Actor(ActorKind.DELIVERY, None, CallerName(channel))
+        self._owed_event: int | None = None  # the event a pause interrupted
+        self._finished: set[str] = set()  # the endpoints that have already finished `_owed_event`
+
+    async def send(self, event: CommittedEvent, *, moved: Callable[[], None] | None = None) -> SendOutcome:
+        async def routed(unit: UnitOfWork) -> list[PushSubscription]:
+            return await unit.push_subscriptions.routed_to(event.approver_groups, unit.now - self._max_age)
+
+        if self._owed_event != event.id:
+            self._owed_event, self._finished = event.id, set()
+        again: list[Retry | Misconfigured] = []
+        for subscription in await attempt(self._uow, self._actor, routed):
+            if subscription.endpoint in self._finished:
+                continue
+            outcome = await self._service.push(subscription, event)
+            match outcome:
+                case Gone():
+                    await self._forget(subscription.endpoint)
+                case Rejected(reason):
+                    _log.error(
+                        "delivery %s: event %d not delivered to one push subscription: %s",
+                        self._channel,
+                        event.id,
+                        reason,
+                    )
+                case Retry() | Misconfigured():
+                    again.append(outcome)
+            if not isinstance(outcome, Retry | Misconfigured):
+                self._finished.add(subscription.endpoint)
+            if moved is not None:
+                moved()
+        if again:
+            return next((o for o in again if isinstance(o, Misconfigured)), again[0])
+        self._owed_event, self._finished = None, set()
+        return Delivered()
+
+    async def _forget(self, endpoint: str) -> None:
+        async def delete(unit: UnitOfWork) -> None:
+            stored = await unit.push_subscriptions.get(endpoint)
+            if stored is not None:
+                await unit.push_subscriptions.delete(stored)
+                await unit.commit()
+
+        await attempt(self._uow, self._actor, delete)
+
+
+def _sending(
+    sender: ChannelSender, event: CommittedEvent, moved: Callable[[], None]
+) -> Callable[[], Awaitable[SendOutcome]]:
+    return lambda: sender.send(event, moved=moved)
+
+
+async def _changed(changes: AsyncIterator[None]) -> bool:
+    """True on the next committed change, False once the feed is lost."""
+    try:
+        await anext(changes)
+    except StopAsyncIteration:
+        return False
+    return True
+
+
+def _duration(span: timedelta) -> str:
+    """`span` the way the configuration writes it: 24h, 90m, 45s."""
+    seconds = int(span.total_seconds())
+    for unit, size in (("h", 3600), ("m", 60)):
+        if seconds % size == 0 and seconds >= size:
+            return f"{seconds // size}{unit}"
+    return f"{seconds}s"

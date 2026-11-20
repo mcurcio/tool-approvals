@@ -50,6 +50,7 @@ class ActorKind(StrEnum):
     DEADLINE = "deadline"
     RETENTION = "retention"
     REQUIREMENT = "requirement"  # a yes that no longer meets the current requirement
+    DELIVERY = "delivery"  # event delivery: a push subscription its push service no longer knows
 
 
 @dataclass(frozen=True, slots=True)

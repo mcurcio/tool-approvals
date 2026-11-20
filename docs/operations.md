@@ -3,8 +3,9 @@
 How to install, start, scale, upgrade and stop the three services. What each setting means is in the
 [configuration reference](reference/configuration.md).
 
-> **Pre-release.** No compose file or Helm chart ships yet (planned, milestone 3); the commands below are what
-> such packaging will run.
+Two packagings run what this page describes: a [compose file](#docker-compose) for one host and a
+[Helm chart](#helm) for Kubernetes, both released with the image. The sections after them explain what either
+does, for running the commands any other way.
 
 ## The image and the command
 
@@ -36,6 +37,69 @@ configuration is refused, with every problem on stderr.
 docker run --rm --read-only -v "$PWD/config.yaml:/etc/tool-approvals/config.yaml:ro" \
   tool-approvals --config /etc/tool-approvals/config.yaml config check
 ```
+
+## Docker Compose
+
+[`deploy/compose`](../deploy/compose/README.md) holds `compose.yaml`, an example `config.yaml` and a gitignored
+`secrets/` directory. Compose starts Postgres, runs `approvals migrate` once Postgres is healthy, starts Approvals
+once the migration exits 0, then the gate and the wait server once Approvals is ready. Every tool-approvals
+container runs with a read-only root, every capability dropped, the configuration mounted read-only and only the
+secret files its own sections read (the migration gets only the DSN).
+
+1. **Secrets.** Create each file under `deploy/compose/secrets/`: the Postgres password and the DSN, the desk's two
+   keys (`openssl rand -base64 32`), the identity provider's client secret, the gate's and the wait server's
+   bearers (`tool-approvals credentials issue`; their hashes go into the registry), and a CA with a certificate and
+   key per service (`openssl`). The [compose README](../deploy/compose/README.md) has every command.
+2. **Configuration.** Edit `config.yaml` (registry hashes, requirements, policy, identity provider, desk URL) and
+   run `config check` on it.
+3. **Start:** `docker compose -f deploy/compose/compose.yaml up -d`. The published ports bind to `127.0.0.1`;
+   set `TOOL_APPROVALS_BIND` to publish them on another host address.
+4. **Upgrade:** set `TOOL_APPROVALS_VERSION` to the new release and `up -d` again: the migration runs first, then
+   each service is recreated.
+
+## Helm
+
+The chart (`oci://ghcr.io/mcurcio/charts/tool-approvals`, the same version as the image; every value in
+[the Helm reference](reference/helm.md)) renders a Deployment of two replicas for each service, a Service per
+service plus a headless `<fullname>-approvals-requests` for the gate and the wait server to round-robin over,
+disruption budgets, a topology spread, optional NetworkPolicies, and the migration as a hook.
+
+1. **Secrets.** The chart never creates a Secret: create them in the release's namespace first and name them in
+   `secrets` and `tls`. Each is mounted read-only at `/etc/tool-approvals/secrets` (or `/etc/tool-approvals/tls`)
+   in its service's pods, and the configuration names the files there:
+
+   ```bash
+   kubectl -n approvals create secret generic tool-approvals-migrate --from-file=dsn=./dsn
+   kubectl -n approvals create secret generic tool-approvals-approvals --from-file=dsn=./dsn \
+     --from-file=desk-session-key=./desk-session-key --from-file=desk-form-key=./desk-form-key \
+     --from-file=idp-client-secret=./idp-client-secret
+   kubectl -n approvals create secret generic tool-approvals-gate --from-file=approvals-bearer=./gate-bearer
+   kubectl -n approvals create secret generic tool-approvals-wait --from-file=approvals-bearer=./wait-bearer
+   kubectl -n approvals create secret generic tool-approvals-tls \
+     --from-file=tls.crt=./server.pem --from-file=tls.key=./server-key.pem --from-file=ca.pem=./ca.pem
+   ```
+
+   The migration's Secret holds only the DSN, under the same file name as in Approvals' Secret. Issue the bearers
+   with `tool-approvals credentials issue` and put their hashes in `config.registry`; issue a certificate for
+   every name a bearer-carrying listener answers on (at least
+   `<fullname>-approvals-requests.<namespace>.svc.cluster.local`).
+2. **Values.** Put the configuration file under `config` (the chart reads each listener's port from it), with
+   `gate.approvals.address` and `wait.approvals.address` set to
+   `dns:///<fullname>-approvals-requests.<namespace>.svc.cluster.local:<requests port>`.
+3. **Install:** `helm install tool-approvals oci://ghcr.io/mcurcio/charts/tool-approvals --version <version>
+   --namespace approvals -f values.yaml`. The `pre-install` hook runs `approvals migrate` first; the install fails
+   if it fails, and nothing else starts.
+4. **Upgrade:** `helm upgrade` with the new `--version`. The `pre-upgrade` hook migrates while the previous
+   release still serves (migrations only expand, [upgrades](#upgrades-and-migrations)), then each Deployment rolls
+   one new pod at a time (`maxUnavailable: 0`), each taking traffic once `/readyz` answers. A configuration change
+   alone also rolls the pods (the pods carry the configuration's checksum).
+
+**NetworkPolicy.** The chart renders one per listener by default (`networkPolicy.enabled: true`), admitting
+nobody a listener's list does not name. Admit only the callers each listener serves: the gateway to
+the gate's hooks and Check API and to the wait server's `mcp`; this release's gate and wait pods to Approvals'
+`requests` (the chart adds them); people's ingress to `approvers`; integrated surfaces to `answers-grpc` and
+`answers-json`; operators to `admin`; your probes and monitoring to `health`. Keep `requests`, `approvers`, the
+Answers API and `admin` off every network agents reach: an agent that can reach them can at least try to answer.
 
 ## Start-up order
 
@@ -72,13 +136,14 @@ create tables in it (`approvals migrate` creates the schema).
   check that has already given up.
 - All deadlines and sign-in ages are judged by the database's clock.
 - An ended Approval is deleted `approvals.retention` after it ended (default 90 days). Longer audit is yours to
-  keep: there is no audit export yet (planned, milestone 3).
+  keep: send every event to an audit sink channel ([channels](reference/channels.md)).
 
 ## Upgrades and migrations
 
 Migrations are Alembic revisions shipped in the image; `approvals migrate` upgrades to the latest and exits 0. A
 release only **adds** to the schema while the previous release may still be serving (expand, then contract in a
-later release), and CI checks every migration for that, so the order is: migrate, then roll the services. Contract
+later release), and CI checks every migration for that, so the order is: migrate, then roll the services. The Helm
+chart's hook and the compose file's `migrate` service keep that order for you. Contract
 changes ride in a later release, after nothing older serves. The Check API and ApprovalRequests change the same way
 (`buf breaking` in CI).
 
@@ -137,7 +202,7 @@ finished its TLS handshake included, so an idle client cannot hold the stop. A s
 `drain` plus the longest grace above (5 s, or `gate.check_budget` for the gate if that is longer) plus about a
 second.
 
-In Kubernetes the drain replaces a `preStop` sleep: leave `preStop` out (or keep it short and lower `drain` by as
+In Kubernetes the drain replaces a `preStop` sleep (the Helm chart sets none, and 15 s): leave `preStop` out (or keep it short and lower `drain` by as
 much, since the two add up), and set `terminationGracePeriodSeconds` a few seconds above `drain` plus the longest
 grace (with the defaults, 5 + 5 + 1 s: 15 s is enough for every service). Other orchestrators: give the stop
 timeout the same margin.

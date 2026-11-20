@@ -31,6 +31,12 @@ docker build -t tool-approvals:e2e .
 TOOL_APPROVALS_E2E_IMAGE=tool-approvals:e2e uv run pytest -n auto tests/e2e tests/conformance
 ```
 
+The Helm chart's tests (`tests/chart`) render it with `helm template` and skip without `helm`; CI also runs
+`helm lint` and kubeconform on every `charts/tool-approvals/ci/` values file, and installs the chart on kind when the
+chart, the Dockerfile or the install script change. `Chart.yaml`'s `version` and `appVersion` stay `0.0.0`: the
+release packages the chart with its own version. The compose file's schema is checked with
+`docker compose -f deploy/compose/compose.yaml config --quiet`.
+
 A change to behaviour that the [reference pages](docs/reference/configuration.md) describe updates them in the
 same pull request.
 

@@ -5,24 +5,41 @@ GET /login?ticket=: authorization code + PKCE S256, nonce, acr_values = the effe
 max_age = its max_sign_in_age; the verifier, nonce, state and ticket wait in the signed session cookie (Authlib's
 state store) until the callback. Only an approver may read a requirement (AnswerService.review), so a browser
 without a sign-in first signs in plainly, to learn who it is; a sign-in that then falls short of the requirement
-is sent back once, asking for it.
+is sent back once, asking for it. GET /login?next=list or ?next=push with a sign-in already held: a 303 straight to
+the page, starting no sign-in.
 GET /callback: iss; aud and azp (if present) = client_id; nonce; acr on the scale; auth_time present and not in the
 future; sign-in moment = min(auth_time, receipt). Session (HMAC-SHA-256 signed, Secure, HttpOnly, SameSite=Lax,
-Max-Age the longest sign-in age a requirement may allow): sid, sub, groups, level, moment. A sign-in that asked
-for the requirement and still falls short of it is refused here.
+Max-Age the longest sign-in age a requirement may allow): sid, sub, groups, level, moment. A new sign-in never
+replaces a still-fresh one (younger than that Max-Age) of a higher level: a sign-in a third party started (login
+CSRF) cannot weaken a stepped-up one. A sign-in that asked for the requirement and still falls short of it is
+refused here.
 GET /approvals/{ticket}: the review when the session qualifies, else /login; words and arguments as escaped text.
 POST /approvals/{ticket}: verdict, comment, digest, form_token → AnswerService.answer.
 Both answer with Cache-Control: no-store, so no cache keeps a review or an answer.
-Every response: Content-Security-Policy "default-src 'none'; style-src 'self'; form-action 'self';
-frame-ancestors 'none'; base-uri 'none'".
+GET /approvals (with a WaitingList): the Waiting Approvals the signed-in approver may answer here, each linking to
+its review; without a sign-in, a plain sign-in first (/login?next=list). GET / is a 303 to it. Neither needs a
+step-up: they answer nothing.
+With push (a Web Push channel configured; the desk then needs the list): GET /push, the push page (linked from the
+list; without a sign-in, a plain sign-in first, /login?next=push), loads /desk.js, which registers the service
+worker /push/desk-sw.js under its default scope /push/ (so it controls no review and not the list) and POSTs the
+browser's subscription to /push/subscriptions (DELETE removes it), again on each visit while subscribed, which
+renews it. Both requests are JSON (Content-Type application/json) and carry the push token (an HMAC over the
+session); without push these routes are 404.
+Every response carries a Content-Security-Policy from CONTENT_SECURITY_POLICY: PageKind.PUSH (first-party script,
+a worker, same-origin requests) for the push page and the service worker's script when they are served (200),
+PageKind.PLAIN (no script at all) for every other response. The push page is the only one that loads a script.
 """
 
 import base64
 import binascii
+import functools
 import hashlib
+import json
 import secrets
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
+from http import HTTPStatus
 from typing import Any, Final, cast
 from urllib.parse import urlencode
 
@@ -36,27 +53,58 @@ from starlette.middleware import Middleware
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse, Response
-from starlette.routing import Route
+from starlette.routing import BaseRoute, Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from tool_approvals.approvals.app.answers import AnswerService, ApprovalDetail
 from tool_approvals.approvals.app.ports import StoreUnavailable
+from tool_approvals.approvals.app.push import PushDesk, PushRefusal, SubscriptionKeys
+from tool_approvals.approvals.app.waiting import WaitingList
 from tool_approvals.approvals.domain.answer import Verdict
 from tool_approvals.approvals.domain.approval import State
 from tool_approvals.approvals.edges.desk import pages
 from tool_approvals.approvals.edges.desk.sign_in import Client, SignIn, from_session, sign_in_of, to_session
-from tool_approvals.approvals.edges.desk.tokens import form_token, form_token_ok
+from tool_approvals.approvals.edges.desk.tokens import form_token, form_token_ok, push_token, push_token_ok
 from tool_approvals.config.views import DeskView, IdpView
 from tool_approvals.kernel.names import Digest, Ticket, is_ticket
 from tool_approvals.kernel.requirements import AnswerError, AnswerFacts, AssuranceScale, Requirement, qualify
 
-CONTENT_SECURITY_POLICY: Final = (
-    "default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
-)
+
+class PageKind(StrEnum):
+    """Which Content-Security-Policy a desk response carries."""
+
+    PLAIN = "plain"  # every response but the two below: no script at all
+    PUSH = "push"  # the push page and the service worker's script: first-party script, a worker, same-origin requests
+
+
+_POLICY_START: Final = ("default-src 'none'",)
+_SCRIPTS: Final = ("script-src 'self'", "worker-src 'self'", "connect-src 'self'")
+_POLICY_REST: Final = ("style-src 'self'", "form-action 'self'", "frame-ancestors 'none'", "base-uri 'none'")
+# The desk's one home for its policies. Never 'unsafe-inline' or another origin: the push page's values travel as
+# data attributes, and its scripts are the package's own.
+CONTENT_SECURITY_POLICY: Final[Mapping[PageKind, str]] = {
+    PageKind.PLAIN: "; ".join((*_POLICY_START, *_POLICY_REST)),
+    PageKind.PUSH: "; ".join((*_POLICY_START, *_SCRIPTS, *_POLICY_REST)),
+}
 SESSION_COOKIE: Final = "desk_session"
 STYLESHEET_PATH: Final = "/desk.css"
+SCRIPT_PATH: Final = "/desk.js"
+LIST_PATH: Final = "/approvals"
+PUSH_PATH: Final = "/push"
+# The worker's default scope is its script's directory, SERVICE_WORKER_SCOPE: no review page or list lies under it,
+# so the worker controls none of them (and no Service-Worker-Allowed header widens it).
+SERVICE_WORKER_SCOPE: Final = f"{PUSH_PATH}/"
+SERVICE_WORKER_PATH: Final = f"{SERVICE_WORKER_SCOPE}desk-sw.js"
+SUBSCRIPTIONS_PATH: Final = "/push/subscriptions"
+# The paths whose served (200) responses carry PageKind.PUSH: the push page and the service worker's script.
+_SCRIPTED: Final = frozenset({PUSH_PATH, SERVICE_WORKER_PATH})
+JAVASCRIPT: Final = "text/javascript"  # RFC 9239
 _IDP: Final = "idp"  # the one Authlib client's name (its state keys in the session carry it)
-_LOGIN: Final = "login"  # the session key of the sign-in under way: its ticket, and whether it asked the requirement
+# The session key of the sign-in under way: what it is for (a ticket's review, or a page that answers nothing:
+# "next" = "list" or "push"), and whether it asked for the requirement.
+_LOGIN: Final = "login"
+_NEXT_LIST: Final = "list"
+_NEXT_PUSH: Final = "push"
 _SIGN_IN: Final = "sign_in"  # the session key of the sign-in
 _DIGEST_BYTES: Final = 32
 _NO_STORE: Final = {"cache-control": "no-store"}
@@ -68,29 +116,60 @@ _STATUS: Final[Mapping[AnswerError, int]] = {
     AnswerError.ALREADY_ANSWERED: 409,
     AnswerError.PAST_DEADLINE: 409,
 }  # every other refusal: 403
+_PUSH_STATUS: Final[Mapping[PushRefusal, int]] = {
+    PushRefusal.MALFORMED: 400,
+    PushRefusal.UNKNOWN_SUBSCRIPTION: 404,
+}  # every other refusal: 403
 _TITLES: Final[Mapping[int, str]] = {
     400: "Not understood",
     403: "Not allowed",
     404: "Not found",
     409: "Not answered",
+    415: "Not understood",
     502: "Sign-in unavailable",
     503: "Try again",
 }
 
 
-def desk_app(answers: AnswerService, desk: DeskView, idp: IdpView, scale: AssuranceScale) -> Starlette:
-    """The desk on the approvers' listener, answering as `desk.surface`."""
-    routes = _Desk(answers, desk, idp, scale)
+def desk_app(  # noqa: PLR0913, PLR0917 (milestone 3 adds the list and push)
+    answers: AnswerService,
+    desk: DeskView,
+    idp: IdpView,
+    scale: AssuranceScale,
+    waiting: WaitingList | None = None,
+    push: PushDesk | None = None,
+) -> Starlette:
+    """The desk on the approvers' listener, answering as `desk.surface`. `waiting` serves the list of Approvals the
+    signed-in approver may answer; `push` (with a Web Push channel configured) lets them register for notices, and
+    needs `waiting`: the push page links back to the list, and a notice without a link of the desk's opens it.
+    Raises ValueError for `push` without `waiting`."""
+    if push is not None and waiting is None:
+        raise ValueError("a desk offering push must serve the list (pass waiting)")
+    routes = _Desk(answers, desk, idp, scale, listed=waiting is not None, pushed=push is not None)
+    served: list[BaseRoute] = [
+        Route("/login", routes.login, methods=["GET"]),
+        Route("/callback", routes.callback, methods=["GET"]),
+        Route("/approvals/{ticket}", routes.review, methods=["GET"]),
+        Route("/approvals/{ticket}", routes.answer, methods=["POST"]),
+        Route(STYLESHEET_PATH, _stylesheet, methods=["GET"]),
+    ]
+    if waiting is not None:
+        served += [
+            Route("/", routes.home, methods=["GET"]),
+            Route(LIST_PATH, functools.partial(routes.waiting, waiting), methods=["GET"]),
+        ]
+    if push is not None:
+        served += [
+            Route(PUSH_PATH, functools.partial(routes.push_page, push), methods=["GET"]),
+            Route(SCRIPT_PATH, _script, methods=["GET"]),
+            Route(SERVICE_WORKER_PATH, _service_worker, methods=["GET"]),
+            Route(SUBSCRIPTIONS_PATH, functools.partial(routes.subscribe, push), methods=["POST"]),
+            Route(SUBSCRIPTIONS_PATH, functools.partial(routes.unsubscribe, push), methods=["DELETE"]),
+        ]
     return Starlette(
-        routes=[
-            Route("/login", routes.login, methods=["GET"]),
-            Route("/callback", routes.callback, methods=["GET"]),
-            Route("/approvals/{ticket}", routes.review, methods=["GET"]),
-            Route("/approvals/{ticket}", routes.answer, methods=["POST"]),
-            Route(STYLESHEET_PATH, _stylesheet, methods=["GET"]),
-        ],
+        routes=served,
         middleware=[
-            Middleware(_ContentSecurityPolicy),
+            Middleware(_ContentSecurityPolicy, scripted=frozenset() if push is None else _SCRIPTED),
             # No sign-in older than session_max_age can answer anything, so no cookie needs to live longer.
             Middleware(_Sessions, secret_key=desk.session_key.hex(), max_age=desk.session_max_age),
         ],
@@ -115,10 +194,12 @@ class _Sessions(SessionMiddleware):
 
 
 class _ContentSecurityPolicy:
-    """Sets the desk's Content-Security-Policy on every HTTP response."""
+    """Sets the desk's Content-Security-Policy on every HTTP response: PageKind.PUSH on a 200 for a path in
+    `scripted`, PageKind.PLAIN on every other, replacing any policy a route set."""
 
-    def __init__(self, app: ASGIApp) -> None:
+    def __init__(self, app: ASGIApp, *, scripted: frozenset[str]) -> None:
         self._app = app
+        self._scripted = scripted
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -127,10 +208,12 @@ class _ContentSecurityPolicy:
 
         async def with_policy(message: Message) -> None:
             if message["type"] == "http.response.start":
+                scripted = message["status"] == HTTPStatus.OK and scope["path"] in self._scripted
+                policy = CONTENT_SECURITY_POLICY[PageKind.PUSH if scripted else PageKind.PLAIN]
                 headers = [
                     (name, value) for name, value in message.get("headers", []) if name != b"content-security-policy"
                 ]
-                headers.append((b"content-security-policy", CONTENT_SECURITY_POLICY.encode()))
+                headers.append((b"content-security-policy", policy.encode()))
                 message = {**message, "headers": headers}
             await send(message)
 
@@ -141,11 +224,35 @@ async def _stylesheet(_request: Request) -> Response:
     return Response(pages.STYLESHEET, media_type="text/css")
 
 
+async def _script(_request: Request) -> Response:
+    return Response(pages.SCRIPT, media_type=JAVASCRIPT)
+
+
+async def _service_worker(_request: Request) -> Response:
+    return Response(pages.SERVICE_WORKER, media_type=JAVASCRIPT)
+
+
 class _Desk:
-    def __init__(self, answers: AnswerService, desk: DeskView, idp: IdpView, scale: AssuranceScale) -> None:
+    def __init__(  # noqa: PLR0913 (the desk app's own arguments)
+        self,
+        answers: AnswerService,
+        desk: DeskView,
+        idp: IdpView,
+        scale: AssuranceScale,
+        *,
+        listed: bool,
+        pushed: bool,
+    ) -> None:
+        """`listed`: the desk serves the list; `pushed`: it serves the push page. A sign-in may be for either."""
         self._answers = answers
         self._desk = desk
         self._scale = scale
+        # The pages a plain sign-in may be for ("next"), and where it comes back to.
+        self._next: dict[str, str] = {}
+        if listed:
+            self._next[_NEXT_LIST] = LIST_PATH
+        if pushed:
+            self._next[_NEXT_PUSH] = PUSH_PATH
         self._client = Client(idp.issuer, idp.client_id, idp.groups_claim)
         self._base = desk.public_url.rstrip("/")
         oauth = OAuth()
@@ -157,8 +264,16 @@ class _Desk:
             client_kwargs={"scope": "openid", "code_challenge_method": "S256"},
         )
 
-    # GET /login?ticket=
+    # GET /login?ticket= or /login?next=list or /login?next=push
     async def login(self, request: Request) -> Response:
+        page = request.query_params.get("next", "")
+        if page in self._next:
+            if self._signed_in(request) is not None:
+                # Already signed in: never a new sign-in that could replace this one (login CSRF).
+                return self._see(self._next[page])
+            # The list and the push page answer nothing: a plain sign-in, to learn who it is.
+            request.session[_LOGIN] = {"next": page, "asked": False}
+            return await self._authorize(request, {})
         ticket = _ticket(request.query_params.get("ticket", ""))
         sign_in = self._signed_in(request)
         detail = None if sign_in is None else await self._review(sign_in, ticket)
@@ -167,6 +282,9 @@ class _Desk:
         # Without a sign-in (or as one no approver of it), the requirement cannot be read: sign in plainly first.
         asks = self._asks(detail.effective) if isinstance(detail, ApprovalDetail) else {}
         request.session[_LOGIN] = {"ticket": ticket, "asked": bool(asks)}
+        return await self._authorize(request, asks)
+
+    async def _authorize(self, request: Request, asks: Mapping[str, str]) -> Response:
         try:
             return cast("Response", await self._idp.authorize_redirect(request, f"{self._base}/callback", **asks))
         except httpx.HTTPError as failed:
@@ -187,18 +305,33 @@ class _Desk:
         login = request.session.pop(_LOGIN, None)
         if not isinstance(login, dict):
             raise HTTPException(400, "No sign-in is under way: open the approval's link again.")
-        ticket = _ticket(str(login.get("ticket", "")))
+        page = self._next.get(str(login.get("next", "")))
+        ticket = None if page is not None else _ticket(str(login.get("ticket", "")))
         claims = await self._verified_claims(request)
-        sign_in = sign_in_of(claims, self._client, self._scale, datetime.now(UTC), secrets.token_urlsafe(18))
+        received = datetime.now(UTC)
+        sign_in = sign_in_of(claims, self._client, self._scale, received, secrets.token_urlsafe(18))
         if not isinstance(sign_in, SignIn):
             raise HTTPException(403, f"The sign-in was refused ({sign_in}).")
-        request.session[_SIGN_IN] = to_session(sign_in)  # a new sign-in, a new sid
+        held = self._signed_in(request)
+        if held is not None and self._outranks(held, sign_in, received):
+            sign_in = held  # a weaker sign-in never replaces a fresh, stronger one (login CSRF)
+        else:
+            request.session[_SIGN_IN] = to_session(sign_in)  # a new sign-in, a new sid
+        if ticket is None:  # a sign-in for the list or the push page
+            return self._see(cast("str", page))
         refused = self._qualify(sign_in, await self._detail(sign_in, ticket))
         if refused is None:
             return self._see(f"/approvals/{ticket}")
         if refused in _STEP_UP and not login.get("asked"):
             return self._see(f"/login?{urlencode({'ticket': ticket})}")  # now asking for the requirement
         raise _refusal(refused)  # it asked for the requirement and still fell short: never ask in a loop
+
+    def _outranks(self, held: SignIn, new: SignIn, at: datetime) -> bool:
+        """Whether `held` is still fresh at `at` (younger than the session's max age, the longest sign-in age a
+        requirement may allow) and of a higher level than `new`."""
+        held_rank, new_rank = self._scale.rank(held.level), self._scale.rank(new.level)
+        fresh = at - held.moment < self._desk.session_max_age
+        return fresh and held_rank is not None and (new_rank is None or held_rank > new_rank)
 
     async def _verified_claims(self, request: Request) -> dict[str, object]:
         """The ID token's claims once Authlib has checked the state, exchanged the code with the PKCE verifier,
@@ -269,6 +402,93 @@ class _Desk:
         seen.headers.update(_NO_STORE)
         return seen
 
+    # GET /
+    async def home(self, _request: Request) -> Response:
+        return self._see(LIST_PATH)
+
+    # GET /approvals
+    async def waiting(self, waiting: WaitingList, request: Request) -> Response:
+        sign_in = self._signed_in(request)
+        if sign_in is None:
+            return self._see(f"/login?{urlencode({'next': _NEXT_LIST})}")
+        try:
+            rows = await waiting.for_viewer(sign_in.groups)
+        except StoreUnavailable as failed:
+            raise HTTPException(503, "The list could not be read just now.") from failed
+        page = pages.list_page(
+            rows,
+            stylesheet=f"{self._base}{STYLESHEET_PATH}",
+            review_base=f"{self._base}{LIST_PATH}",
+            push_page=self._page_url(_NEXT_PUSH),
+        )
+        return HTMLResponse(page, headers=_NO_STORE)
+
+    # GET /push
+    async def push_page(self, push: PushDesk, request: Request) -> Response:
+        sign_in = self._signed_in(request)
+        if sign_in is None:
+            return self._see(f"/login?{urlencode({'next': _NEXT_PUSH})}")
+        offer = pages.PushOffer(
+            script=f"{self._base}{SCRIPT_PATH}",
+            service_worker=f"{self._base}{SERVICE_WORKER_PATH}",
+            service_worker_scope=f"{self._base}{SERVICE_WORKER_SCOPE}",
+            subscriptions=f"{self._base}{SUBSCRIPTIONS_PATH}",
+            application_server_key=push.application_server_key,
+            token=push_token(self._desk.form_key, sign_in.sid),
+        )
+        page = pages.push_page(offer, stylesheet=f"{self._base}{STYLESHEET_PATH}", list_page=self._page_url(_NEXT_LIST))
+        return HTMLResponse(page, headers=_NO_STORE)
+
+    def _page_url(self, page: str) -> str | None:
+        """The URL of the list or the push page, or None when the desk does not serve it."""
+        path = self._next.get(page)
+        return None if path is None else f"{self._base}{path}"
+
+    # POST /push/subscriptions
+    async def subscribe(self, push: PushDesk, request: Request) -> Response:
+        sign_in, body = await self._push_request(request)
+        keys = _subscription_keys(body)
+        if keys is None:
+            raise _push_refusal(PushRefusal.MALFORMED)
+        try:
+            refused = await push.registrations.register(sign_in.sub, sign_in.groups, keys)
+        except StoreUnavailable as failed:
+            raise HTTPException(503, "The subscription could not be kept just now.") from failed
+        return _pushed(refused)
+
+    # DELETE /push/subscriptions
+    async def unsubscribe(self, push: PushDesk, request: Request) -> Response:
+        sign_in, body = await self._push_request(request)
+        endpoint = body.get("endpoint")
+        if not isinstance(endpoint, str):
+            raise _push_refusal(PushRefusal.MALFORMED)
+        try:
+            refused = await push.registrations.unregister(sign_in.sub, endpoint)
+        except StoreUnavailable as failed:
+            raise HTTPException(503, "The subscription could not be removed just now.") from failed
+        return _pushed(refused)
+
+    async def _push_request(self, request: Request) -> tuple[SignIn, dict[str, object]]:
+        """The sign-in and the JSON body of a push request whose token checks out; else the
+        refusal: 403 without a sign-in or with a token not of this session, 415 for a body that is not JSON by its
+        Content-Type, 400 for one that does not parse as a JSON object."""
+        sign_in = self._signed_in(request)
+        if sign_in is None:
+            raise HTTPException(403, "Not signed in: open the list again.")
+        media_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        if media_type != "application/json":
+            raise HTTPException(415, "Send the subscription as application/json.")
+        try:
+            body = json.loads(await request.body())
+        except (ValueError, UnicodeDecodeError) as unreadable:
+            raise HTTPException(400, "The request was not JSON.") from unreadable
+        if not isinstance(body, dict):
+            raise HTTPException(400, "The request was not a JSON object.")
+        token = body.get("form_token")
+        if not isinstance(token, str) or not push_token_ok(self._desk.form_key, sign_in.sid, token):
+            raise HTTPException(403, "The request did not come from this sign-in's page.")
+        return sign_in, body
+
     def _signed_in(self, request: Request) -> SignIn | None:
         return from_session(request.session.get(_SIGN_IN), self._client)
 
@@ -313,7 +533,9 @@ class _Desk:
         """The page for a failure no route handled. Starlette answers it outside every middleware, so the page
         carries the policy itself."""
         return self._page(
-            500, "The desk could not finish this request.", {"content-security-policy": CONTENT_SECURITY_POLICY}
+            500,
+            "The desk could not finish this request.",
+            {"content-security-policy": CONTENT_SECURITY_POLICY[PageKind.PLAIN]},
         )
 
     def _page(self, status: int, message: str, headers: Mapping[str, str] | None = None) -> Response:
@@ -330,6 +552,37 @@ def _ticket(text: str) -> Ticket:
 
 def _refusal(refused: AnswerError) -> HTTPException:
     return HTTPException(_STATUS.get(refused, 403), f"This approval cannot be answered here ({refused}).")
+
+
+def _push_refusal(refused: PushRefusal) -> HTTPException:
+    return HTTPException(_PUSH_STATUS.get(refused, 403), f"Not kept ({refused}).")
+
+
+def _pushed(refused: PushRefusal | None) -> Response:
+    if refused is not None:
+        raise _push_refusal(refused)
+    return Response(status_code=204, headers=_NO_STORE)
+
+
+def _subscription_keys(body: Mapping[str, object]) -> SubscriptionKeys | None:
+    """The browser's PushSubscription as a request carried it: {"endpoint", "keys": {"p256dh", "auth"}}, the keys
+    base64url (padded or not); None for any other shape. The lengths are PushRegistrations' to check."""
+    endpoint, keys = body.get("endpoint"), body.get("keys")
+    if not isinstance(endpoint, str) or not isinstance(keys, dict):
+        return None
+    p256dh, auth = _base64url(keys.get("p256dh")), _base64url(keys.get("auth"))
+    if p256dh is None or auth is None:
+        return None
+    return SubscriptionKeys(endpoint, p256dh, auth)
+
+
+def _base64url(value: object) -> bytes | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return base64.urlsafe_b64decode(value.encode("ascii") + b"=" * (-len(value) % 4))
+    except (binascii.Error, UnicodeEncodeError, ValueError):
+        return None
 
 
 def _digest(text: str | None) -> Digest | None:

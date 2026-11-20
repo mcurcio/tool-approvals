@@ -111,6 +111,36 @@ def test_a_rule_attribute_with_only_the_check_api_enabled_passes(tmp_path: Path)
     assert cfg.gate.policy.rules[1].attributes == {"tenant": "blue"}
 
 
+def test_an_integrated_surface_need_not_bind_the_digest(tmp_path: Path) -> None:
+    cfg = load(_write(tmp_path, _edit(_yaml().load(EXAMPLE), {"set": {"surfaces.1.binds_digest": False}})))
+    assert cfg.surfaces is not None
+    assert (cfg.surfaces[1].kind, cfg.surfaces[1].binds_digest) == ("integrated", False)
+
+
+def test_a_requirement_allowing_only_an_integrated_surface_passes(tmp_path: Path) -> None:
+    # The desk need not be among a requirement's allowed surfaces once an integrated surface can answer it.
+    case = {"set": {"requirements.reviewed.allowed_surfaces": ["ticketing"]}}
+    cfg = load(_write(tmp_path, _edit(_yaml().load(EXAMPLE), case)))
+    assert cfg.requirements is not None
+    assert cfg.requirements["reviewed"].allowed_surfaces == ("ticketing",)
+
+
+def test_without_integrated_surfaces_the_answers_api_listeners_may_be_left_out(tmp_path: Path) -> None:
+    case = {
+        "delete": [
+            "registry.4",
+            "surfaces.1",
+            "approvals.listeners.answers_grpc",
+            "approvals.listeners.answers_json",
+            "approvals.listeners.admin",
+        ],
+        "set": {"requirements.reviewed.allowed_surfaces": ["desk"]},
+    }
+    cfg = load(_write(tmp_path, _edit(_yaml().load(EXAMPLE), case)))
+    assert cfg.approvals is not None
+    assert cfg.approvals.listeners.answers_grpc is None
+
+
 def test_an_ext_authz_section_without_envoys_types_installed_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ExtAuthz, "needs", PackageExtra("envoy", "tool_approvals_absent.envoy.types"))
     (problem,) = _problems(EXAMPLE, "config", EXAMPLE_ENV)

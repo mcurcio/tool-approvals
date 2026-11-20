@@ -1,12 +1,14 @@
 """Each command's view of the configuration: frozen values in kernel types, with only that command's secrets
 resolved. A command never sees another command's sections or secrets."""
 
+import base64
+import binascii
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
 from types import MappingProxyType
-from typing import Final
+from typing import Final, Literal
 
 from tool_approvals.config.errors import ConfigError
 from tool_approvals.config.file import ConfigFile
@@ -14,6 +16,7 @@ from tool_approvals.config.sections import (
     NO_APPROVAL,
     Approvals,
     ApprovalsClient,
+    Channel,
     ClientCertCredential,
     Database,
     FloorSection,
@@ -21,17 +24,21 @@ from tool_approvals.config.sections import (
     Level,
     Listener,
     RegistryEntry,
+    RegistryKind,
     RequirementSection,
     Secret,
     Surface,
     Wait,
     WaitRoute,
+    WebhookChannel,
+    WebPushChannel,
 )
 from tool_approvals.kernel.methods import Method
 from tool_approvals.kernel.names import CallerName, RequirementName, ServerName, SurfaceName
 from tool_approvals.kernel.requirements import AssuranceScale, Floor, Requirement, SurfaceRule
 
 MIN_DESK_KEY_BYTES: Final = 32
+WHSEC_PREFIX: Final = "whsec_"
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +66,7 @@ class RegistryEntryView:
     # a bearer entry.
     client_cert_sha256: bytes | None = field(default=None, kw_only=True)
     grants: frozenset[Method]
+    kind: RegistryKind = field(default="caller", kw_only=True)  # a `surface` entry's name is its surface's
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,6 +193,29 @@ class DeskView:
 
 
 @dataclass(frozen=True, slots=True)
+class DeliveryView:
+    attempt_timeout: timedelta = timedelta(seconds=5)  # one webhook or push attempt
+    give_up_after: timedelta = timedelta(hours=24)  # failing longer than this, a channel dead-letters older events
+
+
+@dataclass(frozen=True, slots=True)
+class WebhookChannelView:
+    name: str
+    url: str
+    signing_secret: str  # resolved: the Standard Webhooks secret, `whsec_` and base64 (decoded by the channel)
+    events: Literal["notices", "audit"]  # notices: approval.waiting and approval.resolved; audit: every event
+
+
+@dataclass(frozen=True, slots=True)
+class WebPushChannelView:
+    name: str
+    vapid_private_key: bytes  # resolved: a PEM P-256 private key (parsed by the channel at start)
+    vapid_subject: str
+    push_origins: tuple[str, ...]  # a subscription's endpoint must start with one of these
+    subscription_max_age: timedelta  # a subscription gets notices this long after its last registration
+
+
+@dataclass(frozen=True, slots=True)
 class ApprovalsView:
     requests: ListenerView
     approvers: ListenerView
@@ -200,6 +231,15 @@ class ApprovalsView:
     requirements: Mapping[RequirementName, Requirement]
     surfaces: Mapping[SurfaceName, SurfaceRule]
     registry: tuple[RegistryEntryView, ...]
+    # Milestone 3, each optional: the Answers API, the audit report, and event delivery.
+    answers_grpc: ListenerView | None = field(default=None, kw_only=True)
+    answers_json: ListenerView | None = field(default=None, kw_only=True)
+    admin: ListenerView | None = field(default=None, kw_only=True)
+    # The integrated surfaces (kind: integrated), each answering through the Answers API as its registry entry.
+    integrated: Mapping[SurfaceName, SurfaceRule] = field(default_factory=lambda: MappingProxyType({}), kw_only=True)
+    delivery: DeliveryView = field(default_factory=DeliveryView, kw_only=True)
+    webhooks: tuple[WebhookChannelView, ...] = field(default=(), kw_only=True)
+    web_push: WebPushChannelView | None = field(default=None, kw_only=True)  # at most one (config.checks)
 
 
 @dataclass(frozen=True, slots=True)
@@ -316,6 +356,7 @@ def approvals_view(cfg: ConfigFile, env: Mapping[str, str]) -> ApprovalsView:
             )
     secrets = _Secrets(env)
     database = _database(approvals.database, secrets)
+    webhooks, web_push = _channels(cfg.channels or (), secrets)
     client_secret = secrets.text(approvals.idp.client_secret, "approvals.idp.client_secret")
     session_key = secrets.key(approvals.desk.session_key, "approvals.desk.session_key")
     form_key = secrets.key(approvals.desk.form_key, "approvals.desk.form_key")
@@ -345,6 +386,15 @@ def approvals_view(cfg: ConfigFile, env: Mapping[str, str]) -> ApprovalsView:
         requirements=_requirements(requirements),
         surfaces=rules,
         registry=_registry(registry),
+        answers_grpc=_optional_listener(approvals.listeners.answers_grpc),
+        answers_json=_optional_listener(approvals.listeners.answers_json),
+        admin=_optional_listener(approvals.listeners.admin),
+        integrated=MappingProxyType(
+            {name: rule for name, rule in rules.items() if _kind_of(surfaces, name) == "integrated"}
+        ),
+        delivery=DeliveryView(approvals.delivery.attempt_timeout, approvals.delivery.give_up_after),
+        webhooks=webhooks,
+        web_push=web_push,
     )
 
 
@@ -387,6 +437,9 @@ class _Secrets:
             self._problems.append(f"{where}: not UTF-8 text")
             return ""
 
+    def raw(self, secret: Secret, where: str) -> bytes:
+        return self._read(secret, where)
+
     def problem(self, text: str) -> None:
         self._problems.append(text)
 
@@ -411,6 +464,42 @@ class _Secrets:
         if not value:
             self._problems.append(f"{where}: {source} is unset or empty")
         return value
+
+
+def _channels(
+    channels: tuple[Channel, ...], secrets: _Secrets
+) -> tuple[tuple[WebhookChannelView, ...], WebPushChannelView | None]:
+    """The webhook channels in file order, and the Web Push channel (config.checks allows at most one), each with
+    its secret resolved."""
+    webhooks: list[WebhookChannelView] = []
+    web_push: WebPushChannelView | None = None
+    for channel in channels:
+        where = f"channels.{channel.name}"
+        if isinstance(channel, WebhookChannel):
+            secret = secrets.text(channel.signing_secret, f"{where}.signing_secret")
+            if secret and not _standard_webhooks_secret(secret):
+                secrets.problem(f"{where}.signing_secret: not whsec_ and base64")
+            webhooks.append(WebhookChannelView(channel.name, channel.url, secret, channel.events))
+        elif isinstance(channel, WebPushChannel):
+            key = secrets.raw(channel.vapid_private_key, f"{where}.vapid_private_key")
+            web_push = WebPushChannelView(
+                channel.name, key, channel.vapid_subject, channel.push_origins, channel.subscription_max_age
+            )
+    return tuple(webhooks), web_push
+
+
+def _standard_webhooks_secret(secret: str) -> bool:
+    """Whether `secret` is a Standard Webhooks signing secret: `whsec_` and the base64 of a non-empty key."""
+    if not secret.startswith(WHSEC_PREFIX):
+        return False
+    try:
+        return bool(base64.b64decode(secret.removeprefix(WHSEC_PREFIX), validate=True))
+    except binascii.Error:
+        return False
+
+
+def _kind_of(surfaces: tuple[Surface, ...], name: SurfaceName) -> str:
+    return next(surface.kind for surface in surfaces if surface.name == name)
 
 
 def _client(client: ApprovalsClient, where: str, secrets: _Secrets) -> RequestsClientView:
@@ -453,8 +542,10 @@ def _registry(entries: tuple[RegistryEntry, ...]) -> tuple[RegistryEntryView, ..
 def _entry(entry: RegistryEntry) -> RegistryEntryView:
     name, grants, credential = CallerName(entry.name), frozenset(entry.grants), entry.credential
     if isinstance(credential, ClientCertCredential):
-        return RegistryEntryView(name, None, client_cert_sha256=credential.client_cert_sha256, grants=grants)
-    return RegistryEntryView(name, credential.bearer_sha256, grants=grants)
+        return RegistryEntryView(
+            name, None, client_cert_sha256=credential.client_cert_sha256, grants=grants, kind=entry.kind
+        )
+    return RegistryEntryView(name, credential.bearer_sha256, grants=grants, kind=entry.kind)
 
 
 def _scale(levels: tuple[Level, ...]) -> AssuranceScale:

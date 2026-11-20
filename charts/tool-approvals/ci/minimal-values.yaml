@@ -1,0 +1,84 @@
+# The fewest listeners: no Check API, one gateway hook, no Answers API and no admin listener, Approvals' requests
+# listener on a non-default port, the default NetworkPolicies (on, no peers configured), and a ServiceAccount the
+# operator made.
+secrets:
+  gate: tool-approvals-gate
+  wait: tool-approvals-wait
+  approvals: tool-approvals-approvals
+  migrate: tool-approvals-migrate
+tls:
+  gate: tool-approvals-tls
+  wait: tool-approvals-tls
+  approvals: tool-approvals-tls
+serviceAccount:
+  create: false
+  name: tool-approvals
+config:
+  version: 1
+  registry:
+    - name: gateway-hook
+      kind: caller
+      credential: { bearer_sha256: 1f0b6c6e2a2d4b5f8e9a0c1d2e3f405162738495a6b7c8d9e0f1a2b3c4d5e6f7 }
+      grants: [check]
+    - name: gate
+      kind: caller
+      credential: { bearer_sha256: 2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f70819 }
+      grants: [requests.request, requests.claim]
+    - name: wait-server
+      kind: caller
+      credential: { bearer_sha256: 3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b }
+      grants: [requests.open_wait, requests.await_outcome]
+    - name: gateway-wait-route
+      kind: caller
+      credential: { bearer_sha256: 4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c }
+      grants: [wait.call]
+  assurance:
+    - { name: passkey, acr: ["2"] }
+  floor: { min_assurance: passkey, max_sign_in_age: 5m }
+  requirements:
+    reviewed:
+      approver_groups: [{ claim: groups, value: approvers }]
+      allowed_surfaces: [desk]
+      min_assurance: passkey
+      max_sign_in_age: 3m
+      answer_deadline: 2h
+      use_window: 15m
+  surfaces:
+    - { name: desk, kind: native, cap: passkey }
+  wait_route: { server: approvals-wait, principal_header: x-approvals-principal }
+  gate:
+    listeners:
+      health: { host: 0.0.0.0, port: 8081 }
+    approvals:
+      address: dns:///tool-approvals-approvals-requests.approvals.svc.cluster.local:7443
+      ca: /etc/tool-approvals/tls/ca.pem
+      credential: { file: /etc/tool-approvals/secrets/approvals-bearer }
+    ext_mcp:
+      listener: { host: 0.0.0.0, port: 9444, tls: { cert: /etc/tool-approvals/tls/tls.crt, key: /etc/tool-approvals/tls/tls.key } }
+      principal_key: principal
+      exposed_wait_tool: approvals-wait_approval_wait
+    policy: { kind: rules, default: reviewed }
+  wait:
+    listeners:
+      mcp: { host: 0.0.0.0, port: 8443, tls: { cert: /etc/tool-approvals/tls/tls.crt, key: /etc/tool-approvals/tls/tls.key } }
+      health: { host: 0.0.0.0, port: 8081 }
+    approvals:
+      address: dns:///tool-approvals-approvals-requests.approvals.svc.cluster.local:7443
+      ca: /etc/tool-approvals/tls/ca.pem
+      credential: { file: /etc/tool-approvals/secrets/approvals-bearer }
+  approvals:
+    listeners:
+      requests: { host: 0.0.0.0, port: 7443, tls: { cert: /etc/tool-approvals/tls/tls.crt, key: /etc/tool-approvals/tls/tls.key } }
+      approvers: { host: 0.0.0.0, port: 8080 }
+      health: { host: 0.0.0.0, port: 8081 }
+    database:
+      dsn: { file: /etc/tool-approvals/secrets/dsn }
+    idp:
+      issuer: https://id.example.com
+      client_id: approvals-desk
+      client_secret: { file: /etc/tool-approvals/secrets/idp-client-secret }
+    desk:
+      surface: desk
+      public_url: https://approvals.example.com
+      session_key: { file: /etc/tool-approvals/secrets/desk-session-key }
+      form_key: { file: /etc/tool-approvals/secrets/desk-form-key }

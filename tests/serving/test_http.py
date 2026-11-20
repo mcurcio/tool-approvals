@@ -2,6 +2,7 @@
 
 import asyncio
 import ssl
+from collections.abc import Callable
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -95,6 +96,27 @@ async def test_health_app_reports_live_and_names_what_is_not_ready(tls: TlsFiles
     assert "store" not in not_ready.text
     assert "feed" not in not_ready.text
     assert "store" in neither.text
+
+
+async def test_health_app_is_not_live_naming_each_failed_liveness_check(tls: TlsFiles) -> None:
+    stalled = {"delivery hooks": False, "delivery push": False}
+
+    def not_stalled(name: str) -> Callable[[], bool]:
+        return lambda: not stalled[name]
+
+    app = health_app({"feed": lambda: True}, {name: not_stalled(name) for name in stalled})
+    listener = _listener(tls)
+    async with serving_asgi(app, listener), _client(listener, tls.ca) as client:
+        live = await client.get("/healthz")
+        stalled["delivery push"] = True
+        one = await client.get("/healthz")
+        stalled["delivery hooks"] = True
+        both = await client.get("/healthz")
+        ready = await client.get("/readyz")
+    assert (live.status_code, live.text) == (200, "ok")
+    assert (one.status_code, one.text) == (503, "not live: delivery push")
+    assert (both.status_code, both.text) == (503, "not live: delivery hooks, delivery push")
+    assert ready.status_code == 200  # liveness and readiness are separate
 
 
 async def test_health_app_is_ready_when_every_check_is(tls: TlsFiles) -> None:

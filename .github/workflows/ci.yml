@@ -1,7 +1,8 @@
 # Checks on every pull request and every push to main. On a push to main that passes them, the release job runs
 # semantic-release (.releaserc.json): Conventional Commit types decide the version, the tag holds it, and the release
 # notes go on the GitHub Release and into CHANGELOG.md. CHANGELOG.md is the only file the release commits back to main,
-# in a `chore(release): <version> [skip ci]` commit on top of the tested one, which the tag points at.
+# in a `chore(release): <version> [skip ci]` commit on top of the tested one, which the tag points at. The image and
+# the Helm chart are built from that tagged commit and versioned from the tag (chart-publish).
 name: CI
 
 on:
@@ -16,6 +17,11 @@ permissions:
 env:
   UV_VERSION: 0.13.5
   ACTIONLINT_VERSION: v1.7.12
+  # Downloaded binaries, each checked against its release's published SHA-256.
+  HELM_VERSION: v3.22.1
+  HELM_SHA256: 896cf63684a42a723d61c980369d6e588330927deb13676ca0d85006dd6da0ea
+  KUBECONFORM_VERSION: v0.8.0
+  KUBECONFORM_SHA256: 9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
 
 jobs:
   check:
@@ -67,6 +73,84 @@ jobs:
             exit 0
           fi
           npx --no-install buf breaking --against ".git#tag=$latest"
+      # The compose file's schema (no daemon needed; tests/chart/test_compose.py checks what it runs).
+      - run: docker compose -f deploy/compose/compose.yaml config --quiet
+
+  # The Helm chart: tests/chart (helm template assertions), `helm lint` and kubeconform for every ci/ values file,
+  # and, when the chart, the image or the install changed, an install on kind with the image built from this commit:
+  # the migration hook must succeed and every Deployment become Ready (tests/chart/kind/install.sh).
+  chart:
+    name: Helm chart
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install helm and kubeconform
+        run: |
+          bin="$RUNNER_TEMP/bin"
+          mkdir -p "$bin"
+          curl -fsSLo "$RUNNER_TEMP/helm.tar.gz" "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "$HELM_SHA256  $RUNNER_TEMP/helm.tar.gz" | sha256sum --check --strict -
+          tar -xzf "$RUNNER_TEMP/helm.tar.gz" -C "$RUNNER_TEMP" linux-amd64/helm
+          install "$RUNNER_TEMP/linux-amd64/helm" "$bin/helm"
+          curl -fsSLo "$RUNNER_TEMP/kubeconform.tar.gz" \
+            "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          echo "$KUBECONFORM_SHA256  $RUNNER_TEMP/kubeconform.tar.gz" | sha256sum --check --strict -
+          tar -xzf "$RUNNER_TEMP/kubeconform.tar.gz" -C "$bin" kubeconform
+          echo "$bin" >> "$GITHUB_PATH"
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+      - run: uv sync --locked
+      - run: uv run --locked pytest tests/chart
+      - name: helm lint and kubeconform, every ci/ values file
+        run: |
+          for values in charts/tool-approvals/ci/*.yaml; do
+            echo "::group::$values"
+            helm lint --strict charts/tool-approvals -f "$values"
+            helm template ci charts/tool-approvals -f "$values" | kubeconform -strict -summary -
+            echo "::endgroup::"
+          done
+      # On a pull request, against its base; on a push, against the commit before it (a new branch: everything).
+      - name: Did the chart, the image or the install change?
+        id: changed
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          paths=(charts/ Dockerfile .dockerignore tests/chart/kind/)
+          if [ -z "$BASE" ] || [ "$BASE" = 0000000000000000000000000000000000000000 ] \
+              || ! git cat-file -e "$BASE^{commit}" 2> /dev/null; then
+            echo "No base commit to compare: installing."
+            echo "install=true" >> "$GITHUB_OUTPUT"
+          elif git diff --quiet "$BASE" HEAD -- "${paths[@]}"; then
+            echo "Nothing under ${paths[*]} changed: no install."
+            echo "install=false" >> "$GITHUB_OUTPUT"
+          else
+            git diff --name-only "$BASE" HEAD -- "${paths[@]}"
+            echo "install=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.changed.outputs.install == 'true'
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build the image from this commit
+        if: steps.changed.outputs.install == 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          load: true
+          tags: tool-approvals:chart
+          cache-from: type=gha,scope=image
+      - if: steps.changed.outputs.install == 'true'
+        uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
+        with:
+          cluster_name: chart
+      - name: Install the chart on kind
+        if: steps.changed.outputs.install == 'true'
+        run: |
+          kind load docker-image tool-approvals:chart --name chart
+          tests/chart/kind/install.sh tool-approvals chart
 
   # The image built from this commit (amd64, loaded into the runner's Docker), then tests/e2e and
   # tests/conformance against it: the compose stack of tests/e2e/compose.yaml with both gateways. The unit run in
@@ -98,7 +182,7 @@ jobs:
 
   release:
     name: Release (semantic-release)
-    needs: [check, e2e]
+    needs: [check, e2e, chart]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     concurrency:
@@ -238,3 +322,39 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           provenance: mode=max
           cache-from: type=gha,scope=image
+
+  # The Helm chart, on a release only: packaged from the tagged commit with the release's version as both the chart
+  # version and the appVersion (Chart.yaml keeps the 0.0.0 placeholders; nothing is committed back), and pushed as an
+  # OCI artifact to oci://ghcr.io/<owner>/charts/tool-approvals. After the image job, so the appVersion's image exists.
+  chart-publish:
+    name: Chart (publish)
+    needs: [release, image]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.release.outputs.version != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release.outputs.tag }}
+          persist-credentials: false
+      - name: Install helm
+        run: |
+          curl -fsSLo "$RUNNER_TEMP/helm.tar.gz" "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "$HELM_SHA256  $RUNNER_TEMP/helm.tar.gz" | sha256sum --check --strict -
+          tar -xzf "$RUNNER_TEMP/helm.tar.gz" -C "$RUNNER_TEMP" linux-amd64/helm
+          mkdir -p "$RUNNER_TEMP/bin"
+          install "$RUNNER_TEMP/linux-amd64/helm" "$RUNNER_TEMP/bin/helm"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Package and push the chart
+        env:
+          VERSION: ${{ needs.release.outputs.version }}
+          OWNER: ${{ github.repository_owner }}
+          ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          helm package charts/tool-approvals --version "$VERSION" --app-version "$VERSION" \
+            --destination "$RUNNER_TEMP/chart"
+          printf '%s' "$GITHUB_TOKEN" | helm registry login ghcr.io --username "$ACTOR" --password-stdin
+          helm push "$RUNNER_TEMP/chart/tool-approvals-$VERSION.tgz" "oci://ghcr.io/${OWNER,,}/charts"

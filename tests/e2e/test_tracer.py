@@ -4,7 +4,9 @@ Through agentgateway: a gated call is refused with a ticket; a client that does 
 given a task; a client declaring Tasks calls the wait tool and gets a Wait Task; a desk answer at too weak an
 `acr` is refused; one at the right level approves; `tasks/get` completes "approved"; the repeat runs once, and a
 third call asks afresh. The same refusal and claim through Envoy's ext_authz, and through a plain HTTPS Check API
-caller. (F2: a test surface's answer above its cap is proven in Approvals on real Postgres, not here.)
+caller. Then an integrated surface answers instead of the desk: holding its own bearer it reviews over gRPC (the
+exact argument bytes and the digest), vouches an assurance above its cap over JSON and is refused, then approves
+over gRPC as a passkey sign-in 5 s old with the digest; the wait answers approved and the repeat runs once.
 
 The stack runs a short max_hold, so the held call ends on its own, and agentgateway's request timeout on the wait
 target above it, as a deployment must keep it: on the 2026-07-28 protocol the wait server sends nothing until a
@@ -14,7 +16,7 @@ hold ends, and agentgateway ends a call that outlives its request timeout with a
 import base64
 import json
 import ssl
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final
 
@@ -23,8 +25,10 @@ import pytest
 
 from tests.conformance.gateways import GatewayUnderTest
 from tests.e2e.modern import modern_client
-from tests.e2e.stack import GATED_TOOL, TOOL_SERVERS, Stack, stack
+from tests.e2e.stack import APPROVER_GROUP, GATED_TOOL, REQUIREMENT, TOOL_SERVERS, Stack, stack
+from tests.e2e.surface import answer_request
 from tests.e2e.verdicts import EXPOSED_WAIT_TOOL, ticket_of
+from tool_approvals.contract.answers.v1 import answers_pb2
 from tool_approvals.gate.core.check import Pending
 from tool_approvals.gate.core.wording import agent_text
 from tool_approvals.kernel.names import Ticket
@@ -123,8 +127,53 @@ async def _through_the_check_api(st: Stack) -> None:
         assert again["pending"]["ticket"] != ticket, again
 
 
+async def _through_an_integrated_surface(st: Stack) -> None:
+    gateway, principal = st.gateways["agentgateway"], "tracer-surface"
+    ticket = ticket_of(await gateway.call(principal, GATED_SERVER, GATED_TOOL, ARGUMENTS))
+
+    detail = (await st.surface.review(ticket)).detail
+    stored = await st.store.approval(ticket)
+    assert stored is not None
+    assert detail.arguments == stored.arguments_json  # the exact bytes the gateway forwards
+    assert json.loads(detail.arguments) == json.loads(ARGUMENTS)
+    assert (detail.ticket, detail.principal, detail.server, detail.tool) == (
+        ticket,
+        principal,
+        GATED_SERVER,
+        GATED_TOOL,
+    )
+    assert detail.state == answers_pb2.STATE_WAITING
+    assert detail.requirement.name == REQUIREMENT
+    assert len(detail.digest) == 32
+
+    def vouched(assurance: str) -> answers_pb2.AnswerRequest:
+        return answer_request(
+            ticket,
+            approver="surface-approver",
+            groups=(("groups", APPROVER_GROUP),),
+            assurance=assurance,
+            signed_in_at=datetime.now(UTC) - timedelta(seconds=5),
+            shown_digest=detail.digest,
+        )
+
+    status, above_cap = await st.surface.answer_json(vouched("hardware-key"))
+    assert (status, above_cap) == (200, {"error": {"code": "CODE_ABOVE_CAP"}})
+    assert await _state(st, ticket) == "waiting"
+
+    answered = await st.surface.answer(vouched("passkey"))
+    assert answered.WhichOneof("result") == "answered", answered
+    assert await _state(st, ticket) == "approved"
+
+    waited = await modern_client(gateway, st.agents, principal, tasks=False).call_tool(
+        EXPOSED_WAIT_TOOL, {"ticket": ticket}
+    )
+    assert waited["structuredContent"] == {"state": "approved"}, waited
+    await _repeat_runs_once_then_asks_again(st, gateway, principal, ticket)
+
+
 async def test_tracer(tmp_path: Path) -> None:
     async with stack(tmp_path, max_hold=MAX_HOLD, wait_request_timeout=WAIT_REQUEST_TIMEOUT) as st:
         await _through_agentgateway(st)
         await _through_envoy(st)
         await _through_the_check_api(st)
+        await _through_an_integrated_surface(st)

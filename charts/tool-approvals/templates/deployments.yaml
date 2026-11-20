@@ -1,0 +1,113 @@
+{{- $root := . }}
+{{- $checksum := include "tool-approvals.config" . | sha256sum }}
+{{- range $component := list "gate" "wait" "approvals" }}
+{{- $values := get $root.Values $component }}
+{{- if $values.enabled }}
+{{- $listeners := (include "tool-approvals.listeners" (dict "root" $root "service" $component) | fromYaml).items }}
+{{- $selector := include "tool-approvals.selectorLabels" (dict "root" $root "component" $component) }}
+{{- $health := first $listeners }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "tool-approvals.fullname" $root }}-{{ $component }}
+  labels:
+    {{- include "tool-approvals.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $component }}
+spec:
+  replicas: {{ $values.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      {{- $selector | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ $checksum }}
+        {{- with $values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "tool-approvals.labels" $root | nindent 8 }}
+        app.kubernetes.io/component: {{ $component }}
+        {{- with $values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "tool-approvals.serviceAccountName" $root }}
+      automountServiceAccountToken: {{ $root.Values.serviceAccount.automountServiceAccountToken }}
+      terminationGracePeriodSeconds: {{ $values.terminationGracePeriodSeconds }}
+      {{- with $root.Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml $root.Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ $component }}
+          image: {{ include "tool-approvals.image" $root }}
+          imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+          args: {{ include "tool-approvals.args" $component }}
+          securityContext:
+            {{- toYaml $root.Values.securityContext | nindent 12 }}
+          ports:
+            {{- range $listeners }}
+            - name: {{ .name }}
+              containerPort: {{ .port }}
+              protocol: TCP
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+              scheme: {{ ternary "HTTPS" "HTTP" $health.tls }}
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+              scheme: {{ ternary "HTTPS" "HTTP" $health.tls }}
+            periodSeconds: 2
+            failureThreshold: 1
+          {{- with (get $root.Values.env $component) }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            {{- include "tool-approvals.volumeMounts" (dict "secret" (get $root.Values.secrets $component) "tls" (get $root.Values.tls $component)) | nindent 12 }}
+      volumes:
+        {{- include "tool-approvals.volumes" (dict "configMap" (printf "%s-config" (include "tool-approvals.fullname" $root)) "secret" (get $root.Values.secrets $component) "tls" (get $root.Values.tls $component)) | nindent 8 }}
+      topologySpreadConstraints:
+        {{- if $values.topologySpreadConstraints }}
+        {{- toYaml $values.topologySpreadConstraints | nindent 8 }}
+        {{- else }}
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- $selector | nindent 14 }}
+        {{- end }}
+      {{- with $values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+{{- end }}

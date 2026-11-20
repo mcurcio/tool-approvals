@@ -33,9 +33,18 @@ def test_the_rendered_ports_file_publishes_every_port_the_harness_dials(tmp_path
     published = {name: [entry.rpartition(":")[2] for entry in service["ports"]] for name, service in services.items()}
     assert published == {
         **{name: [str(port) for port in ports] for name, ports in stack.PUBLISHED.items()},
-        "approvals": [str(stack.APPROVALS_DESK_PORT)],
+        "approvals": [str(port) for port in (*stack.PUBLISHED["approvals"], stack.APPROVALS_DESK_PORT)],
     }
-    assert services["approvals"]["ports"] == [f"127.0.0.1:{rendered.desk_port}:{stack.APPROVALS_DESK_PORT}"]
+    assert services["approvals"]["ports"][-1] == f"127.0.0.1:{rendered.desk_port}:{stack.APPROVALS_DESK_PORT}"
+
+
+def test_every_answers_api_listener_is_published_with_tls(tmp_path: Path) -> None:
+    # An integrated surface on the host dials both bindings; each carries the surface's bearer, so each has tls.
+    rendered = stack.render(tmp_path, guardrails=True)
+    listeners = _YAML.load(rendered.directory / "mounted" / "config.yaml")["approvals"]["listeners"]
+    answers = {name: listeners[name] for name in ("answers_grpc", "answers_json")}
+    assert {listener["port"] for listener in answers.values()} == set(stack.PUBLISHED["approvals"])
+    assert all("tls" in listener for listener in answers.values())
 
 
 def test_every_gate_listener_but_health_is_published(tmp_path: Path) -> None:

@@ -3,10 +3,9 @@
 The Python packages, what each may import, what each module promises, and how Approvals uses Postgres. Read the
 [system](system.md) and [service](service.md) designs first.
 
-> **Status:** milestones 0, 1 and 2 are built: every module below not marked planned exists, and the import
-> contracts are enforced in CI ([roadmap](system.md#delivery-milestones)). Modules for later milestones
-> (`gate.policy`'s AuthZEN and OPA adapters; `approvals.edges.answers` and `admin`; `approvals.infra.channels`;
-> `approvals.app.delivery` and `audit`; telemetry) are planned.
+> **Status:** milestones 0 to 3 are built: every module below not marked planned exists, the import contracts are
+> enforced in CI, and the image and the Helm chart are released together ([roadmap](system.md#delivery-milestones)).
+> Modules for later milestones (`gate.policy`'s AuthZEN and OPA adapters) and telemetry are planned.
 
 ## Summary
 
@@ -92,6 +91,7 @@ standard library's network, process and database modules):
 | C8 | `requests_client` is importable only by `gate.main` and `wait.main` | protected |
 | C9 | `gate.core` and `gate.policy` import no `gate.mappings`, no `contract.agentgateway` and no Envoy types (`envoy`, `xds`, `udpa`, `validate`): each gateway is an optional adapter at the edge, reaching the core only through the gateway port | forbidden |
 | C10 | The adapters `gate.mappings.check_api`, `ext_mcp` and `ext_authz` import none of each other; only `ext_authz` imports Envoy's types and only `ext_mcp` imports `contract.agentgateway` (the shared `attributes`, `errors` and `grants` import neither) | independence, forbidden |
+| C11 | The channel adapters `approvals.infra.channels.webhook` and `web_push` import none of each other, and only `approvals.main` imports `approvals.infra.channels` | independence, protected |
 
 `pyproject.toml` holds the exact contracts.
 
@@ -188,7 +188,7 @@ so a wait racing an answer or a deadline conflicts and retries.
 | Caps | Under the principal lock: Waiting Approvals ≤ cap, live waits ≤ cap; a partial unique index keeps one live wait per (principal, ticket); opening a wait ends the old one with `still_waiting` in the same commit |
 | Due index | A stored generated column `next_due_at` with a btree index; the waker orders by it with `LIMIT`; the next wake is its minimum |
 | Channel lock | Per channel, each replica blocks in a session advisory lock on a dedicated connection; the holder delivers and advances the cursor through that connection, monotonically (`GREATEST`), so a holder whose lock is gone cannot write. The process's liveness probe watches the delivery loop's progress while events are pending and the channel is not paused; a failed probe restarts the process, its connection closes, and another replica takes over |
-| Pause, dead letter | 2xx advances. Timeout, connection error, 5xx and 429 pause with capped backoff (the one timer: nothing announces a receiver's return); 401, 403 and 404 pause and alert; other 4xx dead-letter. A dead letter is a row plus a `delivery.dead_lettered` audit event. An event older than the give-up horizon while paused is dead-lettered |
+| Pause, dead letter | 2xx advances. Timeout, connection error, 5xx and 429 pause with capped backoff (the one timer: nothing announces a receiver's return); 401, 403 and 404 pause and alert, and so does any status that is neither 2xx, 4xx nor 5xx (redirects are not followed); other 4xx dead-letter. A dead letter is a row plus a `delivery.dead_lettered` audit event. Once the channel has been failing (paused since its last 2xx) for longer than the give-up horizon, an event older than the horizon is dead-lettered |
 | Stored kinds and states | Postgres enum types. A new value (`ALTER TYPE ... ADD VALUE`) is a contract migration: a release reading a value it does not know fails on load, so the value is added once every running release reads it, and written only after that (`scripts/check_migrations.py` refuses it in an expand migration). A new state with a deadline also changes the generated column, a contract migration |
 
 **Identity-provider premise for integrators:** `auth_time` must be the time of the sign-in ceremony that met the
@@ -243,7 +243,8 @@ requested level. An identity provider that reuses an earlier ceremony for a high
 - **Costs:** event-writing commits are serialised (bounded by gated-call volume); a dedicated connection per
   channel per replica; ordering only by id at the receiver; a Connect client cannot call the JSON binding
   directly; order holds per sender only, so a delivery takeover can interleave; one Web Push cursor pauses every
-  device when one push service fails.
+  device when one push service fails (each subscription has its own outcome: a rejection loses only that
+  subscription's notice, and after a pause the event goes only to the subscriptions still owed it).
 - **Deferred:** a published conformance kit for third-party adapters (the suite's cases live in one module, so a
   kit can export them); `connectrpc` once it reaches 1.0; per-role
   database users.
