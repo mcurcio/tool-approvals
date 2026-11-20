@@ -6,6 +6,8 @@ import html.parser
 import json
 from typing import Final
 
+import pytest
+
 from tests.approvals.desk.conftest import DESK_URL
 from tests.approvals.desk.memory_desk import APPLICATION_SERVER_KEY, memory_desk
 from tests.approvals.domain.examples import DESK_RULE, RULES, call_ref
@@ -120,7 +122,7 @@ async def test_without_push_the_list_links_no_script_and_the_push_routes_do_not_
             ("GET", "/push"),
             ("GET", "/login?next=push"),
             ("GET", "/desk.js"),
-            ("GET", "/desk-sw.js"),
+            ("GET", "/push/desk-sw.js"),
             ("POST", "/push/subscriptions"),
         ):
             assert (await person.browser.send(method, f"{DESK_URL}{path}")).status_code == 404, path
@@ -159,15 +161,41 @@ async def test_the_push_page_offers_push_through_the_package_scripts() -> None:
         assert parsed.scripts() == [f"{DESK_URL}/desk.js"]
         (section,) = [attrs for tag, attrs in parsed.tags if tag == "section"]
         assert section["data-application-server-key"] == APPLICATION_SERVER_KEY
-        assert section["data-service-worker"] == f"{DESK_URL}/desk-sw.js"
+        assert section["data-service-worker"] == f"{DESK_URL}/push/desk-sw.js"
+        assert section["data-service-worker-scope"] == f"{DESK_URL}/push/"
         assert section["data-subscriptions"] == f"{DESK_URL}/push/subscriptions"
         assert section["data-push-token"]
         assert "<script>" not in page.text  # no inline script: the key travels as a data attribute
-        for path, marker in (("/desk.js", b"pushManager"), ("/desk-sw.js", b"notificationclick")):
+        for path, marker in (("/desk.js", b"pushManager"), ("/push/desk-sw.js", b"notificationclick")):
             script = await person.browser.send("GET", f"{DESK_URL}{path}")
             assert script.status_code == 200
             assert script.headers["content-type"].startswith("text/javascript"), path
             assert marker in script.content
+
+
+async def test_the_service_worker_scope_is_its_own_directory_and_excludes_the_reviews_and_the_list() -> None:
+    async with memory_desk() as desk:
+        person = desk.person()
+        await desk.ticket()
+        page = await person.browser.visit(PUSH_URL)
+        (section,) = [attrs for tag, attrs in _parsed(page.text).tags if tag == "section"]
+        worker, scope = section["data-service-worker"] or "", section["data-service-worker-scope"] or ""
+        # The scope is the worker script's own directory (the default scope), so no Service-Worker-Allowed header
+        # is needed, and the worker controls no page outside it: never a review, the list, or the desk's root.
+        assert worker.rsplit("/", 1)[0] + "/" == scope
+        response = await person.browser.send("GET", worker)
+        assert response.status_code == 200
+        assert "service-worker-allowed" not in response.headers
+        for page in (f"{DESK_URL}/approvals", f"{DESK_URL}/approvals/x", LIST_URL, f"{DESK_URL}/"):
+            assert not page.startswith(scope), page
+        assert (await person.browser.send("GET", f"{DESK_URL}/desk-sw.js")).status_code == 404
+
+
+async def test_a_desk_with_push_must_serve_the_list() -> None:
+    # The push page links back to the list, and a notice the worker cannot place opens the list.
+    with pytest.raises(ValueError, match="list"):
+        async with memory_desk(listed=False, push=True):
+            pass
 
 
 class _Down(WaitingList):

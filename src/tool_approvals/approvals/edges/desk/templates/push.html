@@ -3,7 +3,7 @@
 {% endblock %}
 {% block main %}
 <h1>{{ title }}</h1>
-<section id="push" data-application-server-key="{{ push.application_server_key }}" data-push-token="{{ push.token }}" data-subscriptions="{{ push.subscriptions }}" data-service-worker="{{ push.service_worker }}">
+<section id="push" data-application-server-key="{{ push.application_server_key }}" data-push-token="{{ push.token }}" data-subscriptions="{{ push.subscriptions }}" data-service-worker="{{ push.service_worker }}" data-service-worker-scope="{{ push.service_worker_scope }}">
 <p>
 <button type="button" id="push-on" hidden>Notify this browser</button>
 <button type="button" id="push-off" hidden>Stop notifying this browser</button>

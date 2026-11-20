@@ -57,17 +57,21 @@ applies. A requirement changed in configuration to drop a group, or to disallow 
 the list at once; an answered or expired Approval is never listed.
 
 The list answers nothing, so it needs a sign-in but no step-up: without one, the desk signs the person in plainly
-(`/login?next=list`, no `acr_values` or `max_age`) and comes back to the list. A review opened from it asks for
+(`/login?next=list`, no `acr_values` or `max_age`) and comes back to the list. With a sign-in already held,
+`/login?next=list` (and `/login?next=push`) goes straight to the page and starts no new sign-in. A new sign-in
+never replaces one still younger than the session's `Max-Age` at a higher level, so a sign-in started by another
+site (login CSRF) cannot weaken a stepped-up one. A review opened from it asks for
 the requirement's level as usual. The list is sent with `Cache-Control: no-store`.
 
 ## Push notices
 
-With a Web Push channel configured, the list links to the push page, `GET /push`, which offers **Notify this
+With a Web Push channel configured (the desk then always serves the list), the list links to the push page, `GET /push`, which offers **Notify this
 browser** (and **Stop notifying this browser**). Like the list it needs a sign-in but no step-up: without one, the
 desk signs the person in plainly (`/login?next=push`) and comes back to it; it is sent with
 `Cache-Control: no-store`. It is the only desk page that loads a script: one first-party script, `/desk.js`, which
-registers the service worker `/desk-sw.js`, asks the browser for a push subscription with the channel's VAPID
-public key, and sends it to the desk. The key and the other values the script needs are data attributes on the
+registers the service worker `/push/desk-sw.js`, asks the browser for a push subscription with the channel's VAPID
+public key, and sends it to the desk. The worker's scope is `/push/`, its script's own directory, so it controls no
+review page and not the list. The key and the other values the script needs are data attributes on the
 page; there is no inline script. The service worker shows
 a notification for `approval.waiting` with a link to the review, replaces it (the same tag: the ticket) for
 `approval.resolved`, and opens the link on a click; a link that is not the desk's own opens the list instead.
@@ -86,6 +90,11 @@ a notification for `approval.waiting` with a link to the review, replaces it (th
 - **CSRF.** The request must be `Content-Type: application/json` and carry the page's push token, an HMAC with
   `desk.form_key` over the session and the word `push`.
 - Registering an endpoint again replaces its subscription; an approver removes only their own.
+- **A subscription lapses.** It routes on the groups the approver held when registering it, so it receives
+  notices only for the channel's `subscription_max_age` (default 30 days) after its last registration. The push
+  page registers the browser's subscription again on every visit while it is subscribed, which renews it:
+  approvers revisit `/push` to keep their notices. Someone removed from an approver group stops receiving its
+  notices within `subscription_max_age` at the latest (sooner if they unsubscribe or the push service drops it).
 
 Without a Web Push channel these routes, the push page and both scripts answer 404, and the list does not link
 the push page.
@@ -134,7 +143,7 @@ Map each `acr` value your provider issues to a level in `assurance`, weakest fir
 | Form token | An HMAC with `desk.form_key` over the session, the ticket and the shown digest: the CSRF defence, and the binding of an answer to the page that showed it |
 | Both keys | At least 32 bytes each, separate, and the same on every replica |
 | HTTPS | The cookie is `Secure`, so serve `public_url` over HTTPS: a TLS-terminating proxy in front of the plain-HTTP approvers listener |
-| Content-Security-Policy | Per page. The push page (`/push`) and the service worker's script (`/desk-sw.js`), when served: `default-src 'none'; script-src 'self'; worker-src 'self'; connect-src 'self'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`, so the page runs only the desk's own scripts (never inline script or another origin's) and they reach only the desk. Every other response, the review page, the answer and the list included: `default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`, which runs no script at all. The review page holds no script |
+| Content-Security-Policy | Per page. The push page (`/push`) and the service worker's script (`/push/desk-sw.js`), when served: `default-src 'none'; script-src 'self'; worker-src 'self'; connect-src 'self'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`, so the page runs only the desk's own scripts (never inline script or another origin's) and they reach only the desk. Every other response, the review page, the answer and the list included: `default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`, which runs no script at all. The review page holds no script |
 
 Every answer is stored with the surface, the approver's subject, the group through which they qualified, the
 level the surface vouched, and the sign-in moment.

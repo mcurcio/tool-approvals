@@ -58,6 +58,7 @@ async def test_the_list_and_every_response_but_the_push_page_and_the_worker_carr
             ("GET", "/"),
             ("GET", "/desk.js"),
             ("GET", "/desk.css"),
+            ("GET", "/desk-sw.js"),
             ("POST", "/push"),
             ("GET", "/push/"),
             ("POST", "/push/subscriptions"),
@@ -76,7 +77,7 @@ async def test_the_push_page_and_the_service_worker_carry_the_push_policy() -> N
     async with memory_desk() as desk:
         person = desk.person()
         page = await person.browser.visit(f"{DESK_URL}/push")
-        worker = await person.browser.send("GET", f"{DESK_URL}/desk-sw.js")
+        worker = await person.browser.send("GET", f"{DESK_URL}/push/desk-sw.js")
         for response in (page, worker):
             assert response.status_code == 200, response.url
             assert response.headers["content-security-policy"] == PUSH, response.url
@@ -87,7 +88,7 @@ async def test_without_push_no_response_allows_script() -> None:
     async with memory_desk(push=False) as desk:
         person = desk.person()
         await person.browser.visit(f"{DESK_URL}/approvals")
-        for path in ("/push", "/desk-sw.js", "/desk.js"):
+        for path in ("/push", "/push/desk-sw.js", "/desk.js"):
             assert (await person.browser.send("GET", f"{DESK_URL}{path}")).status_code == 404, path
         for response in _desk_responses(person.browser.visited):
             assert response.headers["content-security-policy"] == SCRIPT_FREE, (response.url, response.status_code)

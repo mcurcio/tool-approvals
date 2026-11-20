@@ -62,6 +62,7 @@ class PushOffer:
 
     script: str  # the URL of desk.js
     service_worker: str  # the URL of desk-sw.js
+    service_worker_scope: str  # its scope: the script's own directory, which holds no review page and not the list
     subscriptions: str  # the URL of /push/subscriptions
     application_server_key: str  # the VAPID public key, base64url
     token: str  # the push token of this session

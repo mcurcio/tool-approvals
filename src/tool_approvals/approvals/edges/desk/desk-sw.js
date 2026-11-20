@@ -3,10 +3,13 @@
 // opened: the desk's list is opened instead.
 "use strict";
 
+// The worker's scope is the desk's push directory (<desk>/push/): the desk itself is one level up.
+const desk = new URL("..", self.registration.scope);
+
 const deskLink = (link) => {
-  const fallback = new URL("approvals", self.registration.scope).href;
+  const fallback = new URL("approvals", desk).href;
   try {
-    const url = new URL(String(link || ""), self.registration.scope);
+    const url = new URL(String(link || ""), desk);
     return url.origin === self.location.origin ? url.href : fallback;
   } catch {
     return fallback;

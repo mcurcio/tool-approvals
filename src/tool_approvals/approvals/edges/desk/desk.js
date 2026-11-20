@@ -35,10 +35,37 @@
     off.hidden = !subscribed;
   };
 
+  // The worker's scope is the push page's own directory, never the reviews or the list (it controls none of them).
+  const scope = settings.serviceWorkerScope;
+
   const subscription = async () => {
-    const registration = await navigator.serviceWorker.getRegistration(settings.serviceWorker);
+    const registration = await navigator.serviceWorker.getRegistration(scope);
     return registration ? registration.pushManager.getSubscription() : null;
   };
+
+  // The push page lies outside the scope, so navigator.serviceWorker.ready never settles here: wait for the
+  // registration's own worker to activate.
+  const activated = (registration) =>
+    registration.active
+      ? Promise.resolve(registration)
+      : new Promise((resolve, reject) => {
+          const worker = registration.installing || registration.waiting;
+          worker.addEventListener("statechange", () => {
+            if (worker.state === "activated") {
+              resolve(registration);
+            } else if (worker.state === "redundant") {
+              reject(new Error("the service worker was not installed"));
+            }
+          });
+        });
+
+  // Register (or renew) this browser's subscription with the desk; a subscription routes notices only for a while
+  // after its last registration, so the page sends it again on each visit.
+  const keep = (pushed) =>
+    send("POST", {
+      endpoint: pushed.endpoint,
+      keys: { p256dh: toBase64Url(pushed.getKey("p256dh")), auth: toBase64Url(pushed.getKey("auth")) },
+    });
 
   on.addEventListener("click", async () => {
     try {
@@ -46,18 +73,14 @@
         status.textContent = "Notifications are blocked for this site in this browser.";
         return;
       }
-      await navigator.serviceWorker.register(settings.serviceWorker);
-      const registration = await navigator.serviceWorker.ready;
+      const registration = await activated(await navigator.serviceWorker.register(settings.serviceWorker, { scope }));
       const pushed =
         (await registration.pushManager.getSubscription()) ||
         (await registration.pushManager.subscribe({
           userVisibleOnly: true,
           applicationServerKey: fromBase64Url(settings.applicationServerKey),
         }));
-      const response = await send("POST", {
-        endpoint: pushed.endpoint,
-        keys: { p256dh: toBase64Url(pushed.getKey("p256dh")), auth: toBase64Url(pushed.getKey("auth")) },
-      });
+      const response = await keep(pushed);
       if (response.ok) {
         show(true);
         status.textContent = "This browser will be notified.";
@@ -84,7 +107,17 @@
   });
 
   subscription().then(
-    (pushed) => show(Boolean(pushed)),
+    async (pushed) => {
+      show(Boolean(pushed));
+      if (pushed && Notification.permission === "granted") {
+        const response = await keep(pushed); // renews it: an approver who visits keeps getting notices
+        if (!response.ok) {
+          status.textContent = `This browser's notices were not renewed (HTTP ${response.status}).`;
+        }
+      }
+    },
     () => show(false),
-  );
+  ).catch(() => {
+    status.textContent = "This browser's notices could not be renewed.";
+  });
 })();

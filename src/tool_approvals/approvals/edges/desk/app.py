@@ -5,21 +5,26 @@ GET /login?ticket=: authorization code + PKCE S256, nonce, acr_values = the effe
 max_age = its max_sign_in_age; the verifier, nonce, state and ticket wait in the signed session cookie (Authlib's
 state store) until the callback. Only an approver may read a requirement (AnswerService.review), so a browser
 without a sign-in first signs in plainly, to learn who it is; a sign-in that then falls short of the requirement
-is sent back once, asking for it.
+is sent back once, asking for it. GET /login?next=list or ?next=push with a sign-in already held: a 303 straight to
+the page, starting no sign-in.
 GET /callback: iss; aud and azp (if present) = client_id; nonce; acr on the scale; auth_time present and not in the
 future; sign-in moment = min(auth_time, receipt). Session (HMAC-SHA-256 signed, Secure, HttpOnly, SameSite=Lax,
-Max-Age the longest sign-in age a requirement may allow): sid, sub, groups, level, moment. A sign-in that asked
-for the requirement and still falls short of it is refused here.
+Max-Age the longest sign-in age a requirement may allow): sid, sub, groups, level, moment. A new sign-in never
+replaces a still-fresh one (younger than that Max-Age) of a higher level: a sign-in a third party started (login
+CSRF) cannot weaken a stepped-up one. A sign-in that asked for the requirement and still falls short of it is
+refused here.
 GET /approvals/{ticket}: the review when the session qualifies, else /login; words and arguments as escaped text.
 POST /approvals/{ticket}: verdict, comment, digest, form_token → AnswerService.answer.
 Both answer with Cache-Control: no-store, so no cache keeps a review or an answer.
 GET /approvals (with a WaitingList): the Waiting Approvals the signed-in approver may answer here, each linking to
 its review; without a sign-in, a plain sign-in first (/login?next=list). GET / is a 303 to it. Neither needs a
 step-up: they answer nothing.
-With push (a Web Push channel configured): GET /push, the push page (linked from the list; without a sign-in, a
-plain sign-in first, /login?next=push), loads /desk.js, which registers the service worker /desk-sw.js and POSTs
-the browser's subscription to /push/subscriptions (DELETE removes it). Both requests are JSON (Content-Type
-application/json) and carry the push token (an HMAC over the session); without push these routes are 404.
+With push (a Web Push channel configured; the desk then needs the list): GET /push, the push page (linked from the
+list; without a sign-in, a plain sign-in first, /login?next=push), loads /desk.js, which registers the service
+worker /push/desk-sw.js under its default scope /push/ (so it controls no review and not the list) and POSTs the
+browser's subscription to /push/subscriptions (DELETE removes it), again on each visit while subscribed, which
+renews it. Both requests are JSON (Content-Type application/json) and carry the push token (an HMAC over the
+session); without push these routes are 404.
 Every response carries a Content-Security-Policy from CONTENT_SECURITY_POLICY: PageKind.PUSH (first-party script,
 a worker, same-origin requests) for the push page and the service worker's script when they are served (200),
 PageKind.PLAIN (no script at all) for every other response. The push page is the only one that loads a script.
@@ -84,9 +89,12 @@ CONTENT_SECURITY_POLICY: Final[Mapping[PageKind, str]] = {
 SESSION_COOKIE: Final = "desk_session"
 STYLESHEET_PATH: Final = "/desk.css"
 SCRIPT_PATH: Final = "/desk.js"
-SERVICE_WORKER_PATH: Final = "/desk-sw.js"
 LIST_PATH: Final = "/approvals"
 PUSH_PATH: Final = "/push"
+# The worker's default scope is its script's directory, SERVICE_WORKER_SCOPE: no review page or list lies under it,
+# so the worker controls none of them (and no Service-Worker-Allowed header widens it).
+SERVICE_WORKER_SCOPE: Final = f"{PUSH_PATH}/"
+SERVICE_WORKER_PATH: Final = f"{SERVICE_WORKER_SCOPE}desk-sw.js"
 SUBSCRIPTIONS_PATH: Final = "/push/subscriptions"
 # The paths whose served (200) responses carry PageKind.PUSH: the push page and the service worker's script.
 _SCRIPTED: Final = frozenset({PUSH_PATH, SERVICE_WORKER_PATH})
@@ -132,7 +140,11 @@ def desk_app(  # noqa: PLR0913, PLR0917 (milestone 3 adds the list and push)
     push: PushDesk | None = None,
 ) -> Starlette:
     """The desk on the approvers' listener, answering as `desk.surface`. `waiting` serves the list of Approvals the
-    signed-in approver may answer; `push` (with a Web Push channel configured) lets them register for notices."""
+    signed-in approver may answer; `push` (with a Web Push channel configured) lets them register for notices, and
+    needs `waiting`: the push page links back to the list, and a notice without a link of the desk's opens it.
+    Raises ValueError for `push` without `waiting`."""
+    if push is not None and waiting is None:
+        raise ValueError("a desk offering push must serve the list (pass waiting)")
     routes = _Desk(answers, desk, idp, scale, listed=waiting is not None, pushed=push is not None)
     served: list[BaseRoute] = [
         Route("/login", routes.login, methods=["GET"]),
@@ -256,6 +268,9 @@ class _Desk:
     async def login(self, request: Request) -> Response:
         page = request.query_params.get("next", "")
         if page in self._next:
+            if self._signed_in(request) is not None:
+                # Already signed in: never a new sign-in that could replace this one (login CSRF).
+                return self._see(self._next[page])
             # The list and the push page answer nothing: a plain sign-in, to learn who it is.
             request.session[_LOGIN] = {"next": page, "asked": False}
             return await self._authorize(request, {})
@@ -293,10 +308,15 @@ class _Desk:
         page = self._next.get(str(login.get("next", "")))
         ticket = None if page is not None else _ticket(str(login.get("ticket", "")))
         claims = await self._verified_claims(request)
-        sign_in = sign_in_of(claims, self._client, self._scale, datetime.now(UTC), secrets.token_urlsafe(18))
+        received = datetime.now(UTC)
+        sign_in = sign_in_of(claims, self._client, self._scale, received, secrets.token_urlsafe(18))
         if not isinstance(sign_in, SignIn):
             raise HTTPException(403, f"The sign-in was refused ({sign_in}).")
-        request.session[_SIGN_IN] = to_session(sign_in)  # a new sign-in, a new sid
+        held = self._signed_in(request)
+        if held is not None and self._outranks(held, sign_in, received):
+            sign_in = held  # a weaker sign-in never replaces a fresh, stronger one (login CSRF)
+        else:
+            request.session[_SIGN_IN] = to_session(sign_in)  # a new sign-in, a new sid
         if ticket is None:  # a sign-in for the list or the push page
             return self._see(cast("str", page))
         refused = self._qualify(sign_in, await self._detail(sign_in, ticket))
@@ -305,6 +325,13 @@ class _Desk:
         if refused in _STEP_UP and not login.get("asked"):
             return self._see(f"/login?{urlencode({'ticket': ticket})}")  # now asking for the requirement
         raise _refusal(refused)  # it asked for the requirement and still fell short: never ask in a loop
+
+    def _outranks(self, held: SignIn, new: SignIn, at: datetime) -> bool:
+        """Whether `held` is still fresh at `at` (younger than the session's max age, the longest sign-in age a
+        requirement may allow) and of a higher level than `new`."""
+        held_rank, new_rank = self._scale.rank(held.level), self._scale.rank(new.level)
+        fresh = at - held.moment < self._desk.session_max_age
+        return fresh and held_rank is not None and (new_rank is None or held_rank > new_rank)
 
     async def _verified_claims(self, request: Request) -> dict[str, object]:
         """The ID token's claims once Authlib has checked the state, exchanged the code with the PKCE verifier,
@@ -404,6 +431,7 @@ class _Desk:
         offer = pages.PushOffer(
             script=f"{self._base}{SCRIPT_PATH}",
             service_worker=f"{self._base}{SERVICE_WORKER_PATH}",
+            service_worker_scope=f"{self._base}{SERVICE_WORKER_SCOPE}",
             subscriptions=f"{self._base}{SUBSCRIPTIONS_PATH}",
             application_server_key=push.application_server_key,
             token=push_token(self._desk.form_key, sign_in.sid),
