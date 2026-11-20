@@ -177,3 +177,4 @@ channels:
     vapid_private_key: { env: VAPID_PRIVATE_KEY } # a PEM P-256 private key
     vapid_subject: mailto:approvers@example.com
     push_origins: [https://push.example.com] # a subscription's endpoint must start with one of these
+    subscription_max_age: 30d # default; notices only this long after a browser's last registration

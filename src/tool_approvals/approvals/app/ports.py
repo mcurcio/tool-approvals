@@ -80,8 +80,9 @@ class PushSubscriptionRepository(Protocol):
 
     async def get(self, endpoint: str) -> PushSubscription | None: ...
 
-    async def routed_to(self, groups: frozenset[GroupRef]) -> list[PushSubscription]:
-        """Every subscription whose approver groups meet `groups`, ordered by endpoint."""
+    async def routed_to(self, groups: frozenset[GroupRef], registered_since: datetime) -> list[PushSubscription]:
+        """Every subscription whose approver groups meet `groups` and whose last registration (its last-changed
+        audit time) is at or after `registered_since`, once each, ordered by endpoint."""
         ...
 
     def add(self, subscription: PushSubscription) -> None: ...

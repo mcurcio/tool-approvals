@@ -139,7 +139,12 @@ subscribes with the push service its vendor runs, and the desk stores the subscr
 - **What is sent.** The same CloudEvent JSON a `notices` webhook receives, encrypted for the browser
   (`aes128gcm`, RFC 8291). `TTL` is `give_up_after`, `Topic` is the ticket (a newer notice for the same Approval
   replaces one not yet shown), and `Urgency` is `high` for `approval.waiting`, `normal` otherwise.
-- **Routing.** Each event goes to every subscription whose groups include one of the event's approver groups.
+- **Routing.** Each event goes to every subscription whose groups include one of the event's approver groups and
+  that was last registered within `subscription_max_age` (default `30d`), by the database's clock. A subscription
+  keeps the groups its approver held when registering it, so it lapses: approvers keep their notices by revisiting
+  the desk's push page (`/push`), which registers the subscription again on each visit. Someone removed from an
+  approver group stops receiving its notices within `subscription_max_age`. A lapsed subscription stays stored
+  (nothing deletes it yet) until the approver renews or removes it, or the push service answers 404 or 410.
 - **Responses.** Each subscription has its own outcome, so one browser never decides another's notices. 2xx is
   delivered; 404 or 410 means the browser unsubscribed, so the subscription is deleted; any other 4xx (except 401
   and 403) loses that one notice for that one subscription, with an ERROR log line (the event is not

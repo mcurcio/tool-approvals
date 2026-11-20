@@ -402,7 +402,9 @@ async def test_the_desk_push_registrations_write_the_desk_surface_as_via(tmp_pat
 
     view = replace(
         _view("postgresql://unused.invalid/db", tmp_path, "bearer"),
-        web_push=WebPushChannelView("push", VAPID_PEM, "mailto:ops@example.com", ("https://push.example.com",)),
+        web_push=WebPushChannelView(
+            "push", VAPID_PEM, "mailto:ops@example.com", ("https://push.example.com",), timedelta(days=30)
+        ),
     )
     store = MemoryStore(NOW)
     desk = _push_desk(view, store.unit_of_work)

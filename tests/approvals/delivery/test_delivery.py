@@ -356,6 +356,7 @@ def test_the_stall_limit_is_three_attempts_and_the_backoff_cap() -> None:
 ENDPOINT_A = "https://push.example.com/a"
 ENDPOINT_B = "https://push.example.com/b"
 ENDPOINT_C = "https://push.example.com/c"
+MAX_AGE = timedelta(days=30)  # how long a registration routes notices
 
 
 def subscription(endpoint: str, groups: frozenset[GroupRef]) -> PushSubscription:
@@ -388,7 +389,7 @@ async def test_web_push_sends_each_event_to_every_subscription_its_groups_route_
         subscription(ENDPOINT_C, frozenset({GroupRef("groups", "finance")})),
     )
     service = FakePushService()
-    channel = PushChannel("push", store.unit_of_work, service)
+    channel = PushChannel("push", store.unit_of_work, service, MAX_AGE)
     assert await channel.send(committed(7, groups=frozenset({APPROVERS}))) == Delivered()
     assert service.pushed == [(ENDPOINT_A, 7), (ENDPOINT_B, 7)]
     assert channel.audience is Audience.NOTICES
@@ -399,7 +400,7 @@ async def test_a_subscription_the_push_service_no_longer_knows_is_deleted_and_co
         subscription(ENDPOINT_A, frozenset({APPROVERS})), subscription(ENDPOINT_B, frozenset({APPROVERS}))
     )
     service = FakePushService({ENDPOINT_A: Gone()})
-    channel = PushChannel("push", store.unit_of_work, service)
+    channel = PushChannel("push", store.unit_of_work, service, MAX_AGE)
     assert await channel.send(committed(1)) == Delivered()
     assert set(store.subscriptions()) == {ENDPOINT_B}
     assert service.pushed == [(ENDPOINT_A, 1), (ENDPOINT_B, 1)]
@@ -411,7 +412,7 @@ async def test_a_subscription_to_send_again_still_lets_the_others_have_the_event
         subscription(ENDPOINT_A, frozenset({APPROVERS})), subscription(ENDPOINT_B, frozenset({APPROVERS}))
     )
     service = FakePushService({ENDPOINT_A: outcome})
-    channel = PushChannel("push", store.unit_of_work, service)
+    channel = PushChannel("push", store.unit_of_work, service, MAX_AGE)
     assert await channel.send(committed(1)) == outcome
     assert service.pushed == [(ENDPOINT_A, 1), (ENDPOINT_B, 1)]
     assert set(store.subscriptions()) == {ENDPOINT_A, ENDPOINT_B}
@@ -425,7 +426,7 @@ async def test_a_rejecting_subscription_loses_only_its_own_notice(caplog: pytest
     channels, feed = FakeChannels(), MemoryFeed()
     channels.add(committed(1), committed(2, EventKind.APPROVED))
     with caplog.at_level(logging.ERROR):
-        async with running(loop(channels, PushChannel(CHANNEL, store.unit_of_work, service), feed)):
+        async with running(loop(channels, PushChannel(CHANNEL, store.unit_of_work, service, MAX_AGE), feed)):
             await until(lambda: cursor(channels).last_event_id == 2)
     assert service.pushed == [(ENDPOINT_A, 1), (ENDPOINT_B, 1), (ENDPOINT_A, 2), (ENDPOINT_B, 2)]  # each once
     assert channels.dead_letters == []  # the event is not dead-lettered for every subscriber
@@ -440,7 +441,7 @@ async def test_a_web_push_retry_pauses_the_channel_and_resends_only_to_the_subsc
     service = FakePushService({ENDPOINT_A: Retry("http 429")})
     channels, feed = FakeChannels(), MemoryFeed()
     channels.add(committed(1))
-    async with running(loop(channels, PushChannel(CHANNEL, store.unit_of_work, service), feed)):
+    async with running(loop(channels, PushChannel(CHANNEL, store.unit_of_work, service, MAX_AGE), feed)):
         await until(lambda: len(service.pushed) == 2)
         assert cursor(channels).pause_reason == "http 429"
         del service.outcomes[ENDPOINT_A]
@@ -451,6 +452,25 @@ async def test_a_web_push_retry_pauses_the_channel_and_resends_only_to_the_subsc
 async def test_web_push_marks_progress_after_each_subscription() -> None:
     store = await push_store(*(subscription(e, frozenset({APPROVERS})) for e in (ENDPOINT_A, ENDPOINT_B, ENDPOINT_C)))
     ticks: list[int] = []
-    channel = PushChannel("push", store.unit_of_work, FakePushService())
+    channel = PushChannel("push", store.unit_of_work, FakePushService(), MAX_AGE)
     assert await channel.send(committed(1), moved=lambda: ticks.append(1)) == Delivered()
     assert len(ticks) == 3
+
+
+async def test_a_subscription_last_registered_past_the_max_age_gets_nothing_until_it_is_registered_again() -> None:
+    store = await push_store(subscription(ENDPOINT_A, frozenset({APPROVERS})))
+    service = FakePushService()
+    channel = PushChannel("push", store.unit_of_work, service, MAX_AGE)
+    store.clock = START + MAX_AGE  # still within the max age: its last registration was exactly that long ago
+    assert await channel.send(committed(1)) == Delivered()
+    store.clock = START + MAX_AGE + timedelta(seconds=1)
+    assert await channel.send(committed(2)) == Delivered()
+    assert service.pushed == [(ENDPOINT_A, 1)]
+    async with store.unit_of_work(Actor(ActorKind.APPROVER, "subject-1", None)) as unit:  # the approver renews it
+        stored = await unit.push_subscriptions.get(ENDPOINT_A)
+        assert stored is not None
+        await unit.push_subscriptions.delete(stored)
+        unit.push_subscriptions.add(subscription(ENDPOINT_A, frozenset({APPROVERS})))
+        await unit.commit()
+    assert await channel.send(committed(3)) == Delivered()
+    assert service.pushed == [(ENDPOINT_A, 1), (ENDPOINT_A, 3)]

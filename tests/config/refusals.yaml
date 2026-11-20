@@ -281,6 +281,10 @@
   set: { requirements.reviewed.use_window: 0s }
   expect: ["requirements.reviewed.use_window: a duration is a positive whole number and a unit"]
 
+- name: a zero push subscription max age
+  set: { channels.2.subscription_max_age: 0d }
+  expect: ["subscription_max_age: a duration is a positive whole number and a unit"]
+
 - name: a requirement with no approver group
   set: { requirements.reviewed.approver_groups: [] }
   expect: ["requirements.reviewed.approver_groups: empty, so no one can answer it"]

@@ -292,7 +292,10 @@ class ChannelDelivery:
 
 class PushChannel:
     """The Web Push channel as one `ChannelSender`: each event goes to every subscription its approver groups
-    route to, each subscription with its own outcome.
+    route to and that was last registered within `max_age` (by the database's clock), each subscription with its
+    own outcome. A subscription routes on the groups its approver held when registering it, so it lapses: an
+    approver keeps notices by registering again (the desk's push page does on each visit), and one removed from a
+    group stops getting its notices within `max_age`.
 
     - Delivered: that subscription has the event.
     - Gone (404, 410): the subscription is deleted, acting as Actor(DELIVERY, None, <channel>); it counts as
@@ -307,10 +310,11 @@ class PushChannel:
 
     audience: Final = Audience.NOTICES
 
-    def __init__(self, channel: str, uow: UnitOfWorkFactory, service: PushService) -> None:
+    def __init__(self, channel: str, uow: UnitOfWorkFactory, service: PushService, max_age: timedelta) -> None:
         self._channel = channel
         self._uow = uow
         self._service = service
+        self._max_age = max_age
         # The channel's name, as the registry caller slot of the actor: "delivery via <channel>".
         self._actor: Final = Actor(ActorKind.DELIVERY, None, CallerName(channel))
         self._owed_event: int | None = None  # the event a pause interrupted
@@ -318,7 +322,7 @@ class PushChannel:
 
     async def send(self, event: CommittedEvent, *, moved: Callable[[], None] | None = None) -> SendOutcome:
         async def routed(unit: UnitOfWork) -> list[PushSubscription]:
-            return await unit.push_subscriptions.routed_to(event.approver_groups)
+            return await unit.push_subscriptions.routed_to(event.approver_groups, unit.now - self._max_age)
 
         if self._owed_event != event.id:
             self._owed_event, self._finished = event.id, set()

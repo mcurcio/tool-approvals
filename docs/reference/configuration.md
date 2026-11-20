@@ -367,12 +367,13 @@ channels:
     vapid_private_key: { env: VAPID_PRIVATE_KEY } # a PEM P-256 private key
     vapid_subject: mailto:approvers@example.com
     push_origins: [https://push.example.com] # a subscription's endpoint must start with one of these
+    subscription_max_age: 30d # default; notices only this long after a browser's last registration
 ```
 
 | Key | Meaning |
 |---|---|
 | `kind: webhook` | CloudEvents in structured JSON mode, POSTed to `url` and signed per [Standard Webhooks](https://www.standardwebhooks.com/) with `signing_secret` (`whsec_` followed by the base64 key). `events: notices` sends `approval.waiting` and `approval.resolved`; `events: audit` makes it an audit sink that receives every event |
-| `kind: web_push` | Web Push of `approval.waiting` and `approval.resolved` to every browser an approver registered through the desk, whose groups route the event. `vapid_private_key` is a PEM P-256 private key; `vapid_subject` a `mailto:` or `https:` contact; `push_origins` the push services' https origins: a subscription whose endpoint starts with none of them is refused, and nothing is sent anywhere else. At most one |
+| `kind: web_push` | Web Push of `approval.waiting` and `approval.resolved` to every browser an approver registered through the desk, whose groups route the event. `vapid_private_key` is a PEM P-256 private key; `vapid_subject` a `mailto:` or `https:` contact; `push_origins` the push services' https origins: a subscription whose endpoint starts with none of them is refused, and nothing is sent anywhere else. `subscription_max_age` (default `30d`, a positive duration): a subscription receives notices only this long after its last registration, since it routes on the groups its approver held then; approvers renew by revisiting the desk's push page, and someone removed from an approver group stops receiving notices within it. At most one |
 
 Delivery is at least once and in event-id order per channel: [channels](channels.md).
 

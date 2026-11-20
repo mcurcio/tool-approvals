@@ -4,6 +4,7 @@ secrets `approvals serve` refuses once resolved (exit 2, before connecting anywh
 import base64
 import copy
 from collections.abc import Callable
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -201,6 +202,26 @@ def test_the_view_keeps_a_whsec_secret_as_written(tmp_path: Path) -> None:
         ("approver-notices", NOTICES_SECRET, "notices"),
         ("audit-archive", AUDIT_SECRET, "audit"),
     ]
+
+
+def test_a_push_subscription_routes_notices_for_30_days_after_its_last_registration_by_default(tmp_path: Path) -> None:
+    path = _serve_config(tmp_path)
+    document = _yaml().load(path)
+    del document["channels"][WEB_PUSH]["subscription_max_age"]
+    _yaml().dump(document, path)
+    view = approvals_view(load(path), _env())
+    assert view.web_push is not None
+    assert view.web_push.subscription_max_age == timedelta(days=30)
+
+
+def test_the_push_subscription_max_age_is_configurable(tmp_path: Path) -> None:
+    path = _serve_config(tmp_path)
+    document = _yaml().load(path)
+    document["channels"][WEB_PUSH]["subscription_max_age"] = "12h"
+    _yaml().dump(document, path)
+    view = approvals_view(load(path), _env())
+    assert view.web_push is not None
+    assert view.web_push.subscription_max_age == timedelta(hours=12)
 
 
 @pytest.mark.parametrize("secret", ["bm90aWNlcw==", "whsec_", "whsec_not*base64", "whsec_bm90aWNlcw"])

@@ -257,6 +257,13 @@ class MemoryUnitOfWork:
         }
         return kept | self._push_added
 
+    def _push_registered_at(self, endpoint: str) -> datetime:
+        """When the endpoint's subscription was last registered: now for this unit's own addition, else its
+        committed last-changed time."""
+        if endpoint in self._push_added:
+            return self.now
+        return self._store.push_audit[endpoint].updated_at
+
     # The repository's reads, over this unit's own copies where it holds them.
 
     def _load(self, ticket: Ticket) -> Approval | None:
@@ -375,9 +382,13 @@ class _MemoryPushSubscriptions:
     async def get(self, endpoint: str) -> PushSubscription | None:
         return self._unit._push_view().get(endpoint)
 
-    async def routed_to(self, groups: frozenset[GroupRef]) -> list[PushSubscription]:
+    async def routed_to(self, groups: frozenset[GroupRef], registered_since: datetime) -> list[PushSubscription]:
         view = self._unit._push_view()
-        return [view[endpoint] for endpoint in sorted(view) if view[endpoint].routes(groups)]
+        return [
+            view[endpoint]
+            for endpoint in sorted(view)
+            if view[endpoint].routes(groups) and self._unit._push_registered_at(endpoint) >= registered_since
+        ]
 
     def add(self, subscription: PushSubscription) -> None:
         assert subscription.endpoint not in self._unit._push_view(), "delete the endpoint's row before adding one"

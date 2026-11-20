@@ -212,6 +212,7 @@ class WebPushChannelView:
     vapid_private_key: bytes  # resolved: a PEM P-256 private key (parsed by the channel at start)
     vapid_subject: str
     push_origins: tuple[str, ...]  # a subscription's endpoint must start with one of these
+    subscription_max_age: timedelta  # a subscription gets notices this long after its last registration
 
 
 @dataclass(frozen=True, slots=True)
@@ -481,7 +482,9 @@ def _channels(
             webhooks.append(WebhookChannelView(channel.name, channel.url, secret, channel.events))
         elif isinstance(channel, WebPushChannel):
             key = secrets.raw(channel.vapid_private_key, f"{where}.vapid_private_key")
-            web_push = WebPushChannelView(channel.name, key, channel.vapid_subject, channel.push_origins)
+            web_push = WebPushChannelView(
+                channel.name, key, channel.vapid_subject, channel.push_origins, channel.subscription_max_age
+            )
     return tuple(webhooks), web_push
 
 

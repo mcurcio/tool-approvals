@@ -6,16 +6,18 @@ import asyncio
 import time
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
 from tests.approvals.delivery.fakes import ScriptedSender
 from tests.approvals.domain.examples import AGENT, APPROVERS, HOOK, HUMAN, OPERATORS, OTHER_AGENT, PARAMS, SERVER
 from tests.approvals.store.world import Rendezvous, StoreWorld, eventually, running_feed
 from tool_approvals.approvals.app.delivery import Backoff, ChannelDelivery, Rejected
+from tool_approvals.approvals.app.push import PushRegistrations, SubscriptionKeys
 from tool_approvals.approvals.app.records import Audience
 from tool_approvals.approvals.domain.answer import Verdict
 from tool_approvals.approvals.domain.approval import Actor, ActorKind, EventKind
@@ -31,6 +33,7 @@ from tool_approvals.serving.timeouts import AsyncioTimeouts
 
 BY_APPROVER = Actor(ActorKind.APPROVER, "subject-1", None)
 CHANNEL = "hooks"
+MAX_AGE = timedelta(days=30)  # how long a registration routes notices
 
 
 def _subscription(endpoint: str, groups: frozenset[GroupRef]) -> PushSubscription:
@@ -56,24 +59,64 @@ async def test_a_push_subscription_round_trips_with_its_audit_columns(world: Sto
     assert row["created_at"] == row["updated_at"]
 
 
-async def test_routed_to_finds_every_subscription_holding_any_group_ordered_by_endpoint(world: StoreWorld) -> None:
+async def test_routed_to_finds_every_subscription_holding_any_group_once_ordered_by_endpoint(world: StoreWorld) -> None:
     finance = GroupRef("groups", "finance")
+    approvers_role = GroupRef("roles", APPROVERS.value)  # the same value under another claim: not the group
     async with world.uow(BY_APPROVER) as unit:
         unit.push_subscriptions.add(_subscription("https://push.example.com/c", frozenset({OPERATORS})))
         unit.push_subscriptions.add(_subscription("https://push.example.com/a", frozenset({APPROVERS})))
         unit.push_subscriptions.add(_subscription("https://push.example.com/b", frozenset({finance})))
+        unit.push_subscriptions.add(_subscription("https://push.example.com/d", frozenset({APPROVERS, OPERATORS})))
+        unit.push_subscriptions.add(_subscription("https://push.example.com/e", frozenset({approvers_role})))
+        unit.push_subscriptions.add(_subscription("https://push.example.com/f", frozenset()))
         await unit.commit()
     async with world.uow(BY_APPROVER) as unit:
-        routed = await unit.push_subscriptions.routed_to(frozenset({APPROVERS, OPERATORS}))
-        none = await unit.push_subscriptions.routed_to(frozenset())
+        since = unit.now - MAX_AGE
+        routed = await unit.push_subscriptions.routed_to(frozenset({APPROVERS, OPERATORS}), since)
+        none = await unit.push_subscriptions.routed_to(frozenset(), since)
         await unit.push_subscriptions.delete(routed[0])
         await unit.commit()
-    assert [s.endpoint for s in routed] == ["https://push.example.com/a", "https://push.example.com/c"]
+    assert [s.endpoint for s in routed] == [
+        "https://push.example.com/a",
+        "https://push.example.com/c",
+        "https://push.example.com/d",
+    ]
     assert none == []
     assert [r["endpoint"] for r in await world.rows("SELECT endpoint FROM push_subscriptions ORDER BY 1")] == [
         "https://push.example.com/b",
         "https://push.example.com/c",
+        "https://push.example.com/d",
+        "https://push.example.com/e",
+        "https://push.example.com/f",
     ]
+
+
+async def test_routed_to_skips_a_subscription_last_registered_before_the_max_age_and_finds_it_renewed(
+    world: StoreWorld,
+) -> None:
+    registrations = PushRegistrations(world.uow, ("https://push.example.com",), frozenset({APPROVERS}))
+    keys = SubscriptionKeys("https://push.example.com/old", b"\x04" + b"k" * 64, b"a" * 16)
+    assert await registrations.register(ApproverId("subject-1"), frozenset({APPROVERS}), keys) is None
+    async with world.engine.begin() as connection:  # registered just past the max age, by the database's clock
+        await connection.execute(
+            text("UPDATE push_subscriptions SET created_at = :at, updated_at = :at"),
+            {"at": (await _database_now(world)) - MAX_AGE - timedelta(seconds=1)},
+        )
+
+    async def routed() -> list[str]:
+        async with world.uow(BY_APPROVER) as unit:
+            found = await unit.push_subscriptions.routed_to(frozenset({APPROVERS}), unit.now - MAX_AGE)
+        return [s.endpoint for s in found]
+
+    assert await routed() == []
+    assert await registrations.register(ApproverId("subject-1"), frozenset({APPROVERS}), keys) is None  # renewed
+    assert await routed() == ["https://push.example.com/old"]
+
+
+async def _database_now(world: StoreWorld) -> datetime:
+    (row,) = await world.rows("SELECT clock_timestamp() AS now")
+    now: datetime = row["now"]
+    return now
 
 
 @asynccontextmanager

@@ -410,13 +410,15 @@ class WebhookChannel(Section):
 class WebPushChannel(Section):
     """Web Push (RFC 8030, encrypted per RFC 8291, VAPID per RFC 8292) of approval.waiting and approval.resolved to
     every subscription an approver registered through the desk whose groups route the event. A subscription's
-    endpoint must start with one of `push_origins`, and nothing else is ever sent to."""
+    endpoint must start with one of `push_origins`, and nothing else is ever sent to. A subscription gets notices
+    for `subscription_max_age` after its approver last registered it (it routes on the groups held then)."""
 
     name: Text
     kind: Literal["web_push"]
     vapid_private_key: Secret  # a PEM P-256 private key
     vapid_subject: Text  # a mailto: or https: contact the push services may use
     push_origins: Annotated[tuple[Text, ...], Field(min_length=1)]  # https origins, e.g. https://push.example.com
+    subscription_max_age: Duration = timedelta(days=30)
 
 
 Channel = Annotated[WebhookChannel | WebPushChannel, Field(discriminator="kind")]

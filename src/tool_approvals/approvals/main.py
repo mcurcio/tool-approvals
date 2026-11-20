@@ -206,7 +206,7 @@ def _deliveries(  # noqa: PLR0913 (the ports each loop needs)
             give_up_after=delivery.give_up_after,
             client=http,
         )
-        sender = PushChannel(web_push.name, uow, service)
+        sender = PushChannel(web_push.name, uow, service, web_push.subscription_max_age)
         loops.append(
             ChannelDelivery(
                 web_push.name,
