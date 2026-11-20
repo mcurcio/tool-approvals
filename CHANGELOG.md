@@ -1,3 +1,24 @@
+## [0.5.0](https://github.com/mcurcio/tool-approvals/compare/v0.4.0...v0.5.0) (2026-11-20)
+
+### Features
+
+* **approvals:** add the milestone 3 interfaces ([d59821b](https://github.com/mcurcio/tool-approvals/commit/d59821b73120ecbc47c669b8f6b8ef9c5d7ef1a4))
+* **approvals:** deliver approval events to channels and serve the audit report ([a9c2519](https://github.com/mcurcio/tool-approvals/commit/a9c2519b08304f82b648e382feac7f03e670167b))
+* **approvals:** serve the Answers API v1 for integrated surfaces ([4f89bbb](https://github.com/mcurcio/tool-approvals/commit/4f89bbb13ecd691575deed9f48ac8b72b5a41c61))
+* **chart:** add the Helm chart and compose file, released with the image ([0c0cc5c](https://github.com/mcurcio/tool-approvals/commit/0c0cc5cf894d5345d1edc819c40820e77e7990bd))
+* **desk:** list the Approvals waiting for the signed-in approver and register browsers for push ([f6952b8](https://github.com/mcurcio/tool-approvals/commit/f6952b86b2a4a3a040e202cd08b169ea29005b2a))
+
+### Bug Fixes
+
+* **approvals:** write the desk surface as the via of push subscription changes ([1b059c2](https://github.com/mcurcio/tool-approvals/commit/1b059c29a33eaf40678a641560924589a5504fa9))
+* **chart:** render the NetworkPolicies by default ([3a8cbd1](https://github.com/mcurcio/tool-approvals/commit/3a8cbd174bf699b09ebcee47e80f9c6ac6ae410d))
+* **compose:** publish the ports on loopback unless TOOL_APPROVALS_BIND says otherwise ([ad2a657](https://github.com/mcurcio/tool-approvals/commit/ad2a65759597f9d00967e571d23befd9cf226ec0))
+* **delivery:** count the give-up horizon from the first failure, and give each push subscription its own outcome ([05b0256](https://github.com/mcurcio/tool-approvals/commit/05b0256c27301c29bbf0b75a8a896e1bd62d3c19))
+* **desk:** allow first-party script only on the push page ([900206a](https://github.com/mcurcio/tool-approvals/commit/900206abaa22a5173c23981b3c0baeccac362f4f))
+* **desk:** scope the push worker, renew on visit, keep a stepped-up sign-in ([9559a35](https://github.com/mcurcio/tool-approvals/commit/9559a35780dc44dde6dde4bf67b485b98846c6cd))
+* **push:** stop routing a subscription past its max age ([84c2dea](https://github.com/mcurcio/tool-approvals/commit/84c2dea0cc488b0b454bca47383963ddbc1754a1))
+* **store:** bind routed_to's groups through the column's GroupsJson type ([d26528e](https://github.com/mcurcio/tool-approvals/commit/d26528e53c8875263088c99094c39f4f5d478b1d))
+
 ## [0.4.0](https://github.com/mcurcio/tool-approvals/compare/v0.3.0...v0.4.0) (2026-11-19)
 
 ### ⚠ BREAKING CHANGES
