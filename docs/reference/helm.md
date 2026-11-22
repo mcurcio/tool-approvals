@@ -52,6 +52,7 @@ no `preStop` sleep: each service drains itself ([stopping](../operations.md#stop
 |---|---|---|
 | `image.repository` | `ghcr.io/mcurcio/tool-approvals` | The image |
 | `image.tag` | `""` | Its tag; empty means the chart's `appVersion`, which is the release's version |
+| `image.digest` | `""` | Pins every container (the three Deployments and the migration Job) to one image: `sha256:` and 64 lowercase hex digits, or `helm template` and `helm install` fail naming `image.digest`. Set, the image is `<repository>@<digest>` and `image.tag` is not used; empty, `<repository>:<tag>` |
 | `image.pullPolicy` | `IfNotPresent` | |
 | `imagePullSecrets` | `[]` | For a private mirror |
 | `nameOverride`, `fullnameOverride` | `""` | The chart's name in object names, or the whole `<fullname>` prefix |
@@ -74,6 +75,7 @@ no `preStop` sleep: each service drains itself ([stopping](../operations.md#stop
 | `<service>.replicas` | `2` | |
 | `<service>.resources` | `{}` | Container resources |
 | `<service>.nodeSelector`, `.tolerations`, `.affinity` | `{}`, `[]`, `{}` | Scheduling |
+| `<service>.deploymentAnnotations` | `{}` | Added to the Deployment's own metadata, for tools that read it there (a configuration reloader, for example) |
 | `<service>.podAnnotations`, `.podLabels` | `{}` | Added to the pod template |
 | `<service>.podDisruptionBudget` | `{maxUnavailable: 1}` | The budget's spec (`maxUnavailable` or `minAvailable`); empty renders no budget |
 | `<service>.topologySpreadConstraints` | `[]` | Empty: one constraint spreading the service's pods over `kubernetes.io/hostname`, `maxSkew: 1`, `whenUnsatisfiable: ScheduleAnyway`. Given: these replace it |
@@ -140,7 +142,17 @@ networkPolicy:
 
 `Chart.yaml` holds `version: 0.0.0` and `appVersion: 0.0.0`, placeholders never edited by hand: the release job
 packages the chart with the release's version as both and pushes it to `oci://ghcr.io/mcurcio/charts`. A chart
-version therefore always runs the image of the same version unless `image.tag` says otherwise.
+version therefore always runs the image of the same version unless `image.tag` or `image.digest` says otherwise.
+Every object's `app.kubernetes.io/version` label is that `appVersion` (made a valid label value: a `+` becomes `_`),
+never `image.tag`, so no tag or digest can make a label invalid.
+
+To pin the image by digest, so that whoever can push a tag cannot change what runs, set `image.digest` to the digest
+of the release's image (for example from `docker buildx imagetools inspect ghcr.io/mcurcio/tool-approvals:<version>`):
+
+```yaml
+image:
+  digest: sha256:<64 hex digits>
+```
 
 The `charts/tool-approvals/ci/` values files are what CI renders and validates (`helm lint`, kubeconform);
 `kind-values.yaml` is the one it installs on kind with the image built from the commit.

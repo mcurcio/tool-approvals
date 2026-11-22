@@ -14,6 +14,10 @@ metadata:
   labels:
     {{- include "tool-approvals.labels" $root | nindent 4 }}
     app.kubernetes.io/component: {{ $component }}
+  {{- with $values.deploymentAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   replicas: {{ $values.replicas }}
   strategy:
