@@ -504,17 +504,98 @@ def test_a_digest_pins_every_container_and_the_tag_is_not_used() -> None:
 @needs_helm
 def test_without_a_digest_every_container_runs_repository_and_tag() -> None:
     assert _images(_render(MINIMAL)) == {"ghcr.io/mcurcio/tool-approvals:0.0.0"}
+    assert _images(_render(MINIMAL, "--set", "image.digest=null")) == {"ghcr.io/mcurcio/tool-approvals:0.0.0"}
+
+
+DIGEST_REFUSED = "image.digest must be sha256: followed by 64 lowercase hex digits"
+MALFORMED_DIGESTS = [
+    ("--set", "image.digest=" + "0123456789abcdef" * 4),
+    ("--set", "image.digest=sha256:abc"),
+    ("--set", "image.digest=sha256:" + "0123456789ABCDEF" * 4),
+    ("--set", "image.digest=sha512:" + "0123456789abcdef" * 8),
+    ("--set", "image.digest=SHA256:" + "0123456789abcdef" * 4),
+    ("--set", f"image.digest={DIGEST}@x"),
+    ("--set-string", f"image.digest={DIGEST} "),
+    ("--set", "image.digest=0"),
+    ("--set", "image.digest=false"),
+    ("--set", "image.digest=1"),
+    ("--set-json", 'image.digest={"a": 1}'),
+]
+MALFORMED_DIGEST_IDS = [
+    "no-prefix",
+    "short",
+    "uppercase-hex",
+    "sha512",
+    "uppercase-prefix",
+    "trailing-at",
+    "trailing-space",
+    "zero",
+    "false",
+    "one",
+    "object",
+]
+
+
+@needs_helm
+@pytest.mark.parametrize("given", MALFORMED_DIGESTS, ids=MALFORMED_DIGEST_IDS)
+def test_a_malformed_digest_is_refused_by_the_schema(given: tuple[str, str]) -> None:
+    done = _helm("template", "t", str(CHART), "-f", str(MINIMAL), *given)
+    assert done.returncode != 0
+    assert "values don't meet the specifications of the schema" in done.stderr
+    assert "/image/digest" in done.stderr
+
+
+@needs_helm
+@pytest.mark.parametrize("given", MALFORMED_DIGESTS, ids=MALFORMED_DIGEST_IDS)
+def test_a_malformed_digest_is_refused_by_the_template_without_the_schema(given: tuple[str, str]) -> None:
+    done = _helm("template", "t", str(CHART), "-f", str(MINIMAL), "--skip-schema-validation", *given)
+    assert done.returncode != 0
+    assert DIGEST_REFUSED in done.stderr
+
+
+REPOSITORY_REFUSED = "image.repository must be a repository without a tag or digest"
+MALFORMED_REPOSITORIES = [
+    "registry.example.com/team/tool-approvals:1.0.0",
+    "tool-approvals:1.0.0",
+    f"registry.example.com/tool-approvals@{DIGEST}",
+    "registry.example.com/team/",
+    "",
+]
+
+
+@needs_helm
+@pytest.mark.parametrize("repository", MALFORMED_REPOSITORIES)
+def test_a_repository_with_a_tag_or_digest_is_refused(repository: str) -> None:
+    for skip in ([], ["--skip-schema-validation"]):
+        done = _helm(
+            "template", "t", str(CHART), "-f", str(MINIMAL), *skip, "--set-string", f"image.repository={repository}"
+        )
+        assert done.returncode != 0
+        expected = REPOSITORY_REFUSED if skip else "/image/repository"
+        assert expected in done.stderr
 
 
 @needs_helm
 @pytest.mark.parametrize(
-    "digest",
-    ["0123456789abcdef" * 4, "sha256:abc", "sha256:" + "0123456789ABCDEF" * 4, "sha512:" + "0123456789abcdef" * 8],
+    "repository", ["tool-approvals", "registry.example.com:5000/team/tool-approvals", "registry.example.com/a/b/c"]
 )
-def test_a_malformed_digest_is_refused_naming_image_digest(digest: str) -> None:
-    done = _helm("template", "t", str(CHART), "-f", str(MINIMAL), "--set", f"image.digest={digest}")
-    assert done.returncode != 0
-    assert "image.digest must be sha256: followed by 64 lowercase hex digits" in done.stderr
+def test_a_repository_with_a_registry_port_is_accepted(repository: str) -> None:
+    docs = _render(MINIMAL, "--set", f"image.repository={repository}", "--set", f"image.digest={DIGEST}")
+    assert _images(docs) == {f"{repository}@{DIGEST}"}
+
+
+def _notes(*extra: str) -> str:
+    done = _helm("install", "t", str(CHART), "-f", str(MINIMAL), "--dry-run=client", *extra)
+    assert done.returncode == 0, done.stderr
+    return done.stdout.split("NOTES:", 1)[1]
+
+
+@needs_helm
+def test_the_notes_name_the_image_that_runs() -> None:
+    assert "tool-approvals ghcr.io/mcurcio/tool-approvals:0.0.0 is installed" in _notes()
+    pinned = _notes("--set", f"image.digest={DIGEST}", "--set", "image.tag=1.2.3")
+    assert f"tool-approvals ghcr.io/mcurcio/tool-approvals@{DIGEST} is installed" in pinned
+    assert "1.2.3" not in pinned
 
 
 def _chart_with_app_version(tmp_path: Path, app_version: str) -> Path:

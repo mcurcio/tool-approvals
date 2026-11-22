@@ -48,16 +48,21 @@ digest can make the label invalid. Made a valid label value: characters outside 
 
 {{/*
 Every container's image. With image.digest, repository@digest: the digest alone picks the image (a tag beside it is
-ignored by the runtime), so image.tag is not used. Without it, repository:tag.
+ignored by the runtime), so image.tag is not used. Empty or removed, repository:tag. Any other value, or a repository
+holding a tag or digest, fails the render here too, so it is refused even with --skip-schema-validation.
 */}}
 {{- define "tool-approvals.image" -}}
-{{- with .Values.image.digest }}
-{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .) }}
-{{- fail (printf "image.digest must be sha256: followed by 64 lowercase hex digits, got %q" .) }}
+{{- $repository := .Values.image.repository }}
+{{- if not (and (kindIs "string" $repository) (regexMatch "^([^@/]+/)*[^@/:]+$" $repository)) }}
+{{- fail (printf "image.repository must be a repository without a tag or digest (set those in image.tag or image.digest), got %v" $repository) }}
 {{- end }}
-{{- printf "%s@%s" $.Values.image.repository . }}
+{{- $digest := .Values.image.digest }}
+{{- if or (kindIs "invalid" $digest) (and (kindIs "string" $digest) (eq $digest "")) }}
+{{- printf "%s:%s" $repository (include "tool-approvals.tag" .) }}
+{{- else if and (kindIs "string" $digest) (regexMatch "^sha256:[0-9a-f]{64}$" $digest) }}
+{{- printf "%s@%s" $repository $digest }}
 {{- else }}
-{{- printf "%s:%s" .Values.image.repository (include "tool-approvals.tag" .) }}
+{{- fail (printf "image.digest must be sha256: followed by 64 lowercase hex digits, got %v" $digest) }}
 {{- end }}
 {{- end }}
 

@@ -46,13 +46,17 @@ no `preStop` sleep: each service drains itself ([stopping](../operations.md#stop
 
 ## Values
 
+`values.schema.json` checks the shape of `image.repository` and `image.digest`, so Helm refuses a malformed one
+before rendering; the templates refuse the same values with their own message when the schema is skipped
+(`--skip-schema-validation`).
+
 ### Image
 
 | Value | Default | Meaning |
 |---|---|---|
-| `image.repository` | `ghcr.io/mcurcio/tool-approvals` | The image |
+| `image.repository` | `ghcr.io/mcurcio/tool-approvals` | The image, without a tag or digest (a registry port such as `registry.example.com:5000/...` is fine); one holding `@` or a `:` after its last `/` is refused |
 | `image.tag` | `""` | Its tag; empty means the chart's `appVersion`, which is the release's version |
-| `image.digest` | `""` | Pins every container (the three Deployments and the migration Job) to one image: `sha256:` and 64 lowercase hex digits, or `helm template` and `helm install` fail naming `image.digest`. Set, the image is `<repository>@<digest>` and `image.tag` is not used; empty, `<repository>:<tag>` |
+| `image.digest` | `""` | Pins every container (the three Deployments and the migration Job) to one image: `sha256:` and 64 lowercase hex digits, or `helm template` and `helm install` fail naming `image.digest` (a number, boolean or trailing space included). Set, the image is `<repository>@<digest>` and `image.tag` is not used; empty, `<repository>:<tag>` |
 | `image.pullPolicy` | `IfNotPresent` | |
 | `imagePullSecrets` | `[]` | For a private mirror |
 | `nameOverride`, `fullnameOverride` | `""` | The chart's name in object names, or the whole `<fullname>` prefix |

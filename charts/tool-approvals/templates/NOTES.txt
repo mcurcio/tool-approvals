@@ -1,4 +1,4 @@
-tool-approvals {{ include "tool-approvals.tag" . }} is installed as {{ include "tool-approvals.fullname" . }}.
+tool-approvals {{ include "tool-approvals.image" . }} is installed as {{ include "tool-approvals.fullname" . }}.
 
 The migration ran as a hook before the services started. Point the gateway's hook at the
 {{ include "tool-approvals.fullname" . }}-gate Service and the wait route at {{ include "tool-approvals.fullname" . }}-wait;
