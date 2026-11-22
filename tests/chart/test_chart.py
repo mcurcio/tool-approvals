@@ -584,16 +584,33 @@ def test_a_repository_with_a_registry_port_is_accepted(repository: str) -> None:
     assert _images(docs) == {f"{repository}@{DIGEST}"}
 
 
-def _notes(*extra: str) -> str:
-    done = _helm("install", "t", str(CHART), "-f", str(MINIMAL), "--dry-run=client", *extra)
+# `helm template` never renders NOTES.txt and `helm install --dry-run` may contact a cluster, so a copy of the chart
+# carries NOTES.txt as a plain file and a probe template renders it with `tpl`, against the chart's own helpers.
+NOTES_PROBE = """apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: notes-probe
+data:
+  notes: {{ tpl (.Files.Get "notes-probe.txt") . | toJson }}
+"""
+
+
+def _notes(tmp_path: Path, *extra: str) -> str:
+    chart = tmp_path / "tool-approvals"
+    if not chart.exists():
+        shutil.copytree(CHART, chart)
+        shutil.copy(chart / "templates" / "NOTES.txt", chart / "notes-probe.txt")
+        (chart / "templates" / "notes-probe.yaml").write_text(NOTES_PROBE)
+    done = _helm("template", "t", str(chart), "-f", str(MINIMAL), "--show-only", "templates/notes-probe.yaml", *extra)
     assert done.returncode == 0, done.stderr
-    return done.stdout.split("NOTES:", 1)[1]
+    notes: str = _yaml().load(done.stdout)["data"]["notes"]
+    return notes
 
 
 @needs_helm
-def test_the_notes_name_the_image_that_runs() -> None:
-    assert "tool-approvals ghcr.io/mcurcio/tool-approvals:0.0.0 is installed" in _notes()
-    pinned = _notes("--set", f"image.digest={DIGEST}", "--set", "image.tag=1.2.3")
+def test_the_notes_name_the_image_that_runs(tmp_path: Path) -> None:
+    assert "tool-approvals ghcr.io/mcurcio/tool-approvals:0.0.0 is installed" in _notes(tmp_path)
+    pinned = _notes(tmp_path, "--set", f"image.digest={DIGEST}", "--set", "image.tag=1.2.3")
     assert f"tool-approvals ghcr.io/mcurcio/tool-approvals@{DIGEST} is installed" in pinned
     assert "1.2.3" not in pinned
 
