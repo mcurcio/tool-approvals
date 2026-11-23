@@ -2103,13 +2103,13 @@ wheels = [
 
 [[package]]
 name = "xds-protos"
-version = "1.85.1"
+version = "1.85.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "grpcio" },
     { name = "protobuf" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f6/22/0f6120583bea0abf111af8d5a591d3a00cecac391c48ac50109f0344d3af/xds_protos-1.85.1.tar.gz", hash = "sha256:46cde9dbf9ffbda2b54084d815a03f5585c6ca1058eadd113cf4a2dec1198bda", size = 563425, upload-time = "2026-10-30T16:05:28.105Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/1b/46/8452f3b232812bfb780be1cc732c82b0d488ec8760e588e86bd5c029836d/xds_protos-1.85.3.tar.gz", hash = "sha256:289820d40c44599c4b454dd7a90dda9af0cdfc8b573746e3d6ef34a4751c543e", size = 564745, upload-time = "2026-11-18T04:33:32.931Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/fc/cd/91c8daaeeb6f0261f51ed9c85b4baa43919689f5e58694fc155b156c5120/xds_protos-1.85.1-py3-none-any.whl", hash = "sha256:56e56a8d6079f0b6de9a644c0d79752912abb4415e721a434284c9645af2124f", size = 1468215, upload-time = "2026-10-30T16:05:14.956Z" },
+    { url = "https://files.pythonhosted.org/packages/2d/32/1477d67894dd040df30b12ba61ed954a6324c909d20bd033dc32ac9d3dff/xds_protos-1.85.3-py3-none-any.whl", hash = "sha256:fd936fc5d859e76ba31cacae2b0513d4116d67be5168f02d519a96847f0ab4f9", size = 1468216, upload-time = "2026-11-18T04:33:15.867Z" },
 ]
