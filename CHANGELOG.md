@@ -1,3 +1,10 @@
+## [0.6.0](https://github.com/mcurcio/tool-approvals/compare/v0.5.0...v0.6.0) (2026-11-24)
+
+### Features
+
+* **chart:** pin the image by digest and take the version label from appVersion ([e2f59df](https://github.com/mcurcio/tool-approvals/commit/e2f59df2be011ea8457213915574e66ca488656a))
+* **chart:** refuse a malformed image repository or digest, and name the image in the notes ([706d312](https://github.com/mcurcio/tool-approvals/commit/706d312ed39a2d56b71264fec6bda00d68805768))
+
 ## [0.5.0](https://github.com/mcurcio/tool-approvals/compare/v0.4.0...v0.5.0) (2026-11-20)
 
 ### Features
