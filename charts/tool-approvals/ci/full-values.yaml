@@ -1,5 +1,8 @@
 # Every listener configured (the gate's Check API and both gateway hooks; Approvals' Answers API and admin), and a
-# NetworkPolicy per listener with example peers. Rendered by CI with `helm template` and kubeconform.
+# NetworkPolicy per listener with example peers; the image pinned by digest. Rendered by CI with `helm template` and
+# kubeconform.
+image:
+  digest: sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 secrets:
   gate: tool-approvals-gate
   wait: tool-approvals-wait
@@ -15,6 +18,7 @@ env:
       valueFrom: { secretKeyRef: { name: tool-approvals-channels, key: notices } }
 gate:
   resources: { requests: { cpu: 50m, memory: 128Mi }, limits: { memory: 256Mi } }
+  deploymentAnnotations: { example.com/reload: "true" }
   podAnnotations: { example.com/team: approvals }
   podLabels: { example.com/tier: guardrail }
 service:

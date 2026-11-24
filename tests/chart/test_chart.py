@@ -479,3 +479,182 @@ def test_the_image_tag_defaults_to_the_app_version() -> None:
     assert _container(default)["image"] == "ghcr.io/mcurcio/tool-approvals:0.0.0"
     pinned = _of_kind(_render(MINIMAL, "--set", "image.tag=1.2.3"), "Deployment")["t-tool-approvals-gate"]
     assert _container(pinned)["image"] == "ghcr.io/mcurcio/tool-approvals:1.2.3"
+
+
+DIGEST = "sha256:" + "0123456789abcdef" * 4
+
+
+def _images(docs: Sequence[dict[str, Any]]) -> set[str]:
+    """Every container's and init container's image, in every Deployment and Job."""
+    found: set[str] = set()
+    for doc in docs:
+        if doc["kind"] in {"Deployment", "Job"}:
+            pod = doc["spec"]["template"]["spec"]
+            found |= {container["image"] for container in [*pod.get("initContainers", []), *pod["containers"]]}
+    return found
+
+
+@needs_helm
+def test_a_digest_pins_every_container_and_the_tag_is_not_used() -> None:
+    docs = _render(MINIMAL, "--set", f"image.digest={DIGEST}", "--set", "image.tag=1.2.3")
+    assert _images(docs) == {f"ghcr.io/mcurcio/tool-approvals@{DIGEST}"}
+    assert {doc["kind"] for doc in docs if doc["kind"] in {"Deployment", "Job"}} == {"Deployment", "Job"}
+
+
+@needs_helm
+def test_without_a_digest_every_container_runs_repository_and_tag() -> None:
+    assert _images(_render(MINIMAL)) == {"ghcr.io/mcurcio/tool-approvals:0.0.0"}
+    assert _images(_render(MINIMAL, "--set", "image.digest=null")) == {"ghcr.io/mcurcio/tool-approvals:0.0.0"}
+
+
+DIGEST_REFUSED = "image.digest must be sha256: followed by 64 lowercase hex digits"
+MALFORMED_DIGESTS = [
+    ("--set", "image.digest=" + "0123456789abcdef" * 4),
+    ("--set", "image.digest=sha256:abc"),
+    ("--set", "image.digest=sha256:" + "0123456789ABCDEF" * 4),
+    ("--set", "image.digest=sha512:" + "0123456789abcdef" * 8),
+    ("--set", "image.digest=SHA256:" + "0123456789abcdef" * 4),
+    ("--set", f"image.digest={DIGEST}@x"),
+    ("--set-string", f"image.digest={DIGEST} "),
+    ("--set", "image.digest=0"),
+    ("--set", "image.digest=false"),
+    ("--set", "image.digest=1"),
+    ("--set-json", 'image.digest={"a": 1}'),
+]
+MALFORMED_DIGEST_IDS = [
+    "no-prefix",
+    "short",
+    "uppercase-hex",
+    "sha512",
+    "uppercase-prefix",
+    "trailing-at",
+    "trailing-space",
+    "zero",
+    "false",
+    "one",
+    "object",
+]
+
+
+@needs_helm
+@pytest.mark.parametrize("given", MALFORMED_DIGESTS, ids=MALFORMED_DIGEST_IDS)
+def test_a_malformed_digest_is_refused_by_the_schema(given: tuple[str, str]) -> None:
+    done = _helm("template", "t", str(CHART), "-f", str(MINIMAL), *given)
+    assert done.returncode != 0
+    assert "values don't meet the specifications of the schema" in done.stderr
+    assert "/image/digest" in done.stderr
+
+
+@needs_helm
+@pytest.mark.parametrize("given", MALFORMED_DIGESTS, ids=MALFORMED_DIGEST_IDS)
+def test_a_malformed_digest_is_refused_by_the_template_without_the_schema(given: tuple[str, str]) -> None:
+    done = _helm("template", "t", str(CHART), "-f", str(MINIMAL), "--skip-schema-validation", *given)
+    assert done.returncode != 0
+    assert DIGEST_REFUSED in done.stderr
+
+
+REPOSITORY_REFUSED = "image.repository must be a repository without a tag or digest"
+MALFORMED_REPOSITORIES = [
+    "registry.example.com/team/tool-approvals:1.0.0",
+    "tool-approvals:1.0.0",
+    f"registry.example.com/tool-approvals@{DIGEST}",
+    "registry.example.com/team/",
+    "",
+]
+
+
+@needs_helm
+@pytest.mark.parametrize("repository", MALFORMED_REPOSITORIES)
+def test_a_repository_with_a_tag_or_digest_is_refused(repository: str) -> None:
+    for skip in ([], ["--skip-schema-validation"]):
+        done = _helm(
+            "template", "t", str(CHART), "-f", str(MINIMAL), *skip, "--set-string", f"image.repository={repository}"
+        )
+        assert done.returncode != 0
+        expected = REPOSITORY_REFUSED if skip else "/image/repository"
+        assert expected in done.stderr
+
+
+@needs_helm
+@pytest.mark.parametrize(
+    "repository", ["tool-approvals", "registry.example.com:5000/team/tool-approvals", "registry.example.com/a/b/c"]
+)
+def test_a_repository_with_a_registry_port_is_accepted(repository: str) -> None:
+    docs = _render(MINIMAL, "--set", f"image.repository={repository}", "--set", f"image.digest={DIGEST}")
+    assert _images(docs) == {f"{repository}@{DIGEST}"}
+
+
+# `helm template` never renders NOTES.txt and `helm install --dry-run` may contact a cluster, so a copy of the chart
+# carries NOTES.txt as a plain file and a probe template renders it with `tpl`, against the chart's own helpers.
+NOTES_PROBE = """apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: notes-probe
+data:
+  notes: {{ tpl (.Files.Get "notes-probe.txt") . | toJson }}
+"""
+
+
+def _notes(tmp_path: Path, *extra: str) -> str:
+    chart = tmp_path / "tool-approvals"
+    if not chart.exists():
+        shutil.copytree(CHART, chart)
+        shutil.copy(chart / "templates" / "NOTES.txt", chart / "notes-probe.txt")
+        (chart / "templates" / "notes-probe.yaml").write_text(NOTES_PROBE)
+    done = _helm("template", "t", str(chart), "-f", str(MINIMAL), "--show-only", "templates/notes-probe.yaml", *extra)
+    assert done.returncode == 0, done.stderr
+    notes: str = _yaml().load(done.stdout)["data"]["notes"]
+    return notes
+
+
+@needs_helm
+def test_the_notes_name_the_image_that_runs(tmp_path: Path) -> None:
+    assert "tool-approvals ghcr.io/mcurcio/tool-approvals:0.0.0 is installed" in _notes(tmp_path)
+    pinned = _notes(tmp_path, "--set", f"image.digest={DIGEST}", "--set", "image.tag=1.2.3")
+    assert f"tool-approvals ghcr.io/mcurcio/tool-approvals@{DIGEST} is installed" in pinned
+    assert "1.2.3" not in pinned
+
+
+def _chart_with_app_version(tmp_path: Path, app_version: str) -> Path:
+    chart = tmp_path / "tool-approvals"
+    shutil.copytree(CHART, chart)
+    metadata = _values(chart / "Chart.yaml")
+    metadata["appVersion"] = app_version
+    with (chart / "Chart.yaml").open("w") as out:
+        _yaml().dump(metadata, out)
+    return chart
+
+
+def _version_labels(docs: Sequence[dict[str, Any]]) -> set[str]:
+    labels = {doc["metadata"]["labels"]["app.kubernetes.io/version"] for doc in docs if "labels" in doc["metadata"]}
+    for doc in docs:
+        if doc["kind"] in {"Deployment", "Job"}:
+            labels.add(doc["spec"]["template"]["metadata"]["labels"]["app.kubernetes.io/version"])
+    return labels
+
+
+@needs_helm
+@pytest.mark.parametrize(
+    ("app_version", "label"),
+    [("2.3.4", "2.3.4"), ("2.3.4+build.5", "2.3.4_build.5"), ("-" + "9" * 70 + ".", "9" * 63)],
+)
+def test_the_version_label_is_the_app_version_as_a_valid_label_whatever_the_tag(
+    tmp_path: Path, app_version: str, label: str
+) -> None:
+    chart = _chart_with_app_version(tmp_path, app_version)
+    for extra in ([], ["--set", "image.tag=1.0.0@sha256:abc"], ["--set", f"image.digest={DIGEST}"]):
+        done = _helm("template", "t", str(chart), "-f", str(MINIMAL), *extra)
+        assert done.returncode == 0, done.stderr
+        assert _version_labels([doc for doc in _yaml().load_all(done.stdout) if doc]) == {label}
+
+
+@needs_helm
+def test_deployment_annotations_reach_only_their_own_deployment_metadata() -> None:
+    deployments = _of_kind(
+        _render(MINIMAL, *_set_json("wait.deploymentAnnotations", {"example.com/reload": "true"})), "Deployment"
+    )
+    wait = deployments["t-tool-approvals-wait"]
+    assert wait["metadata"]["annotations"] == {"example.com/reload": "true"}
+    assert "example.com/reload" not in wait["spec"]["template"]["metadata"]["annotations"]
+    for name in ("t-tool-approvals-gate", "t-tool-approvals-approvals"):
+        assert "annotations" not in deployments[name]["metadata"]

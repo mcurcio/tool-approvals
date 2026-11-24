@@ -1,0 +1,23 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "tool-approvals chart values",
+  "description": "Checks the values whose shape the chart relies on; every value is described in docs/reference/helm.md.",
+  "type": "object",
+  "properties": {
+    "image": {
+      "type": "object",
+      "properties": {
+        "repository": {
+          "description": "The image repository, without a tag or digest; a registry port before the last / is allowed.",
+          "type": "string",
+          "pattern": "^([^@/]+/)*[^@/:]+$"
+        },
+        "digest": {
+          "description": "Empty, or sha256: and 64 lowercase hex digits.",
+          "type": "string",
+          "pattern": "^(sha256:[0-9a-f]{64})?$"
+        }
+      }
+    }
+  }
+}

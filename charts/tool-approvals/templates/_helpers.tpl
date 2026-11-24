@@ -20,7 +20,7 @@
 helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
 app.kubernetes.io/name: {{ include "tool-approvals.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
-app.kubernetes.io/version: {{ include "tool-approvals.tag" . | quote }}
+app.kubernetes.io/version: {{ include "tool-approvals.version" . | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}
 
@@ -31,12 +31,39 @@ app.kubernetes.io/instance: {{ .root.Release.Name }}
 app.kubernetes.io/component: {{ .component }}
 {{- end }}
 
+{{/*
+The app.kubernetes.io/version label: the chart's appVersion (the release's version), never image.tag, so no tag or
+digest can make the label invalid. Made a valid label value: characters outside [-A-Za-z0-9_.] become "_" (semver's
+"+"), at most 63 characters, starting and ending alphanumeric.
+*/}}
+{{- define "tool-approvals.version" -}}
+{{- $version := regexReplaceAll "[^-A-Za-z0-9_.]" (toString .Chart.AppVersion) "_" }}
+{{- $version = regexReplaceAll "^[^A-Za-z0-9]+" $version "" | trunc 63 }}
+{{- regexReplaceAll "[^A-Za-z0-9]+$" $version "" }}
+{{- end }}
+
 {{- define "tool-approvals.tag" -}}
 {{- default .Chart.AppVersion .Values.image.tag }}
 {{- end }}
 
+{{/*
+Every container's image. With image.digest, repository@digest: the digest alone picks the image (a tag beside it is
+ignored by the runtime), so image.tag is not used. Empty or removed, repository:tag. Any other value, or a repository
+holding a tag or digest, fails the render here too, so it is refused even with --skip-schema-validation.
+*/}}
 {{- define "tool-approvals.image" -}}
-{{- printf "%s:%s" .Values.image.repository (include "tool-approvals.tag" .) }}
+{{- $repository := .Values.image.repository }}
+{{- if not (and (kindIs "string" $repository) (regexMatch "^([^@/]+/)*[^@/:]+$" $repository)) }}
+{{- fail (printf "image.repository must be a repository without a tag or digest (set those in image.tag or image.digest), got %v" $repository) }}
+{{- end }}
+{{- $digest := .Values.image.digest }}
+{{- if or (kindIs "invalid" $digest) (and (kindIs "string" $digest) (eq $digest "")) }}
+{{- printf "%s:%s" $repository (include "tool-approvals.tag" .) }}
+{{- else if and (kindIs "string" $digest) (regexMatch "^sha256:[0-9a-f]{64}$" $digest) }}
+{{- printf "%s@%s" $repository $digest }}
+{{- else }}
+{{- fail (printf "image.digest must be sha256: followed by 64 lowercase hex digits, got %v" $digest) }}
+{{- end }}
 {{- end }}
 
 {{- define "tool-approvals.serviceAccountName" -}}
